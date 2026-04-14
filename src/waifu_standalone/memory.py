@@ -7,6 +7,10 @@ from pathlib import Path
 
 from .models import SessionMemory
 
+HISTORY_LIMIT = 120
+_SAFE_LAUNCHER_ID_CHARS = frozenset("-_")
+_ALLOWED_LAUNCHER_TYPES = frozenset({"group", "person"})
+
 
 def clone_session(session: SessionMemory) -> SessionMemory:
     return SessionMemory(
@@ -36,8 +40,11 @@ class InMemoryStore:
     def append(self, launcher_id: str, launcher_type: str, line: str) -> SessionMemory:
         session = self.load(launcher_id, launcher_type)
         session.history.append(line)
-        session.history = session.history[-20:]
+        session.history = session.history[-HISTORY_LIMIT:]
         return self.save(session)
+
+    def list_sessions(self) -> list[SessionMemory]:
+        return [clone_session(session) for _, session in sorted(self._sessions.items(), key=lambda item: item[0])]
 
 
 class FileMemoryStore:
@@ -72,12 +79,46 @@ class FileMemoryStore:
     def append(self, launcher_id: str, launcher_type: str, line: str) -> SessionMemory:
         session = self.load(launcher_id, launcher_type)
         session.history.append(line)
-        session.history = session.history[-20:]
+        session.history = session.history[-HISTORY_LIMIT:]
         return self.save(session)
+
+    def list_sessions(self) -> list[SessionMemory]:
+        sessions: list[SessionMemory] = []
+        for path in sorted(self.root.glob("*.json")):
+            parts = path.stem.split("_", 1)
+            if len(parts) != 2:
+                continue
+            launcher_type, launcher_id = parts
+            try:
+                sessions.append(self.load(launcher_id, launcher_type))
+            except (ValueError, json.JSONDecodeError, OSError):
+                continue
+        return sessions
 
     def session_path(self, launcher_id: str, launcher_type: str) -> Path:
         return self._session_path(launcher_id, launcher_type)
 
     def _session_path(self, launcher_id: str, launcher_type: str) -> Path:
-        safe_launcher_id = "".join(char for char in launcher_id if char.isalnum() or char in ("-", "_"))
-        return self.root / f"{launcher_type}_{safe_launcher_id}.json"
+        safe_launcher_type = self._sanitize_launcher_type(launcher_type)
+        safe_launcher_id = self._sanitize_launcher_id(launcher_id)
+        path = (self.root / f"{safe_launcher_type}_{safe_launcher_id}.json").resolve()
+        root = self.root.resolve()
+        if not path.is_relative_to(root):
+            raise ValueError("session path escapes storage root")
+        return path
+
+    @staticmethod
+    def _sanitize_launcher_id(launcher_id: str) -> str:
+        safe_launcher_id = "".join(
+            char for char in str(launcher_id or "") if char.isalnum() or char in _SAFE_LAUNCHER_ID_CHARS
+        )
+        if not safe_launcher_id:
+            raise ValueError("launcher_id must contain at least one safe character")
+        return safe_launcher_id
+
+    @staticmethod
+    def _sanitize_launcher_type(launcher_type: str) -> str:
+        resolved = str(launcher_type or "").strip().lower()
+        if resolved not in _ALLOWED_LAUNCHER_TYPES:
+            raise ValueError("launcher_type must be 'group' or 'person'")
+        return resolved

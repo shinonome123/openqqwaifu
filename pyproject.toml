@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "waifu-standalone"
+name = "openqqwaifu"
 version = "0.1.0"
-description = "Standalone Waifu service scaffold with OneBot and QQ sidecar boundaries."
+description = "openqqwaifu：独立运行的 QQ Waifu 控制台与 OneBot/NapCat 机器人框架。"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -17,3 +17,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+waifu_standalone = ["web/*.html", "web/*.css", "web/*.js", "templates/*.yaml", "builtin_skills/*.md"]

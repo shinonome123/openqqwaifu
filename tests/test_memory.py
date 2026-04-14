@@ -37,13 +37,20 @@ class FileMemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = FileMemoryStore(tmpdir)
 
-            for index in range(25):
+            for index in range(140):
                 store.append("1", "group", f"line-{index}")
 
             loaded = store.load("1", "group")
-            self.assertEqual(len(loaded.history), 20)
-            self.assertEqual(loaded.history[0], "line-5")
-            self.assertEqual(loaded.history[-1], "line-24")
+            self.assertEqual(len(loaded.history), 120)
+            self.assertEqual(loaded.history[0], "line-20")
+            self.assertEqual(loaded.history[-1], "line-139")
+
+    def test_invalid_launcher_id_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileMemoryStore(tmpdir)
+
+            with self.assertRaises(ValueError):
+                store.save(SessionMemory(launcher_id="../", launcher_type="group"))
 
 
 if __name__ == "__main__":

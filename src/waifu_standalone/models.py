@@ -5,7 +5,7 @@ from typing import Literal
 
 
 LauncherType = Literal["group", "person"]
-MessageKind = Literal["text", "image"]
+MessageKind = Literal["text", "image", "mention"]
 
 
 @dataclass(slots=True)
@@ -13,6 +13,9 @@ class MessageSegment:
     kind: MessageKind
     text: str = ""
     image_url: str = ""
+    image_base64: str = ""
+    mention_target: str = ""
+    mention_display: str = ""
 
 
 @dataclass(slots=True)
@@ -30,6 +33,58 @@ class InboundEvent:
     @property
     def image_count(self) -> int:
         return sum(1 for segment in self.segments if segment.kind == "image")
+
+    @property
+    def mentioned_targets(self) -> list[str]:
+        return [
+            segment.mention_target.strip()
+            for segment in self.segments
+            if segment.kind == "mention" and segment.mention_target.strip()
+        ]
+
+    def has_bot_mention(self, bot_account_id: str) -> bool:
+        target = str(bot_account_id or "").strip()
+        if not target:
+            return False
+        return target in self.mentioned_targets
+
+    def command_text(self, bot_account_id: str = "") -> str:
+        target = str(bot_account_id or "").strip()
+        parts: list[str] = []
+        for segment in self.segments:
+            if segment.kind == "text" and segment.text:
+                parts.append(segment.text)
+            elif segment.kind == "mention":
+                mention_target = segment.mention_target.strip()
+                if target and mention_target == target:
+                    continue
+                display = segment.mention_display.strip() or mention_target
+                if display:
+                    parts.append(f"@{display}")
+        return "".join(parts).strip()
+
+    def to_memory_text(self) -> str:
+        parts: list[str] = []
+        for segment in self.segments:
+            if segment.kind == "text" and segment.text:
+                parts.append(segment.text)
+            elif segment.kind == "image":
+                parts.append("[图片]")
+            elif segment.kind == "mention":
+                display = segment.mention_display.strip() or segment.mention_target.strip()
+                if display:
+                    parts.append(f"@{display}")
+        return "".join(parts).strip()
+
+    def image_payloads(self) -> list[str]:
+        payloads: list[str] = []
+        for segment in self.segments:
+            if segment.kind != "image":
+                continue
+            payload = segment.image_base64.strip() or segment.image_url.strip()
+            if payload:
+                payloads.append(payload)
+        return payloads
 
 
 @dataclass(slots=True)

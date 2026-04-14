@@ -1,0 +1,615 @@
+import { api } from "../api.js";
+import {
+  el,
+  card,
+  fieldRow,
+  textInput,
+  textarea,
+  numberInput,
+  tagInput,
+  select,
+  switchControl,
+  chip,
+  empty,
+} from "../components.js";
+import { t, onLangChange } from "../i18n.js";
+import { toastOk, toastError, toastInfo, openModal } from "../ui.js";
+
+const PORTRAIT_STYLE_OPTIONS = [
+  { value: "neon-pixel", labelKey: "character.portrait.style.neon-pixel" },
+  { value: "dream-anime", labelKey: "character.portrait.style.dream-anime" },
+  { value: "comic-pop", labelKey: "character.portrait.style.comic-pop" },
+];
+
+const VARIANT_SECTIONS = [
+  ["profile", "character.field.profile", "character.field.profile.hint", 5],
+  ["skills", "character.field.skills", "character.field.skills.hint", 4],
+  ["background", "character.field.background", "character.field.background.hint", 5],
+  ["rules", "character.field.rules", "character.field.rules.hint", 5],
+  ["prologue", "character.field.prologue", "character.field.prologue.hint", 3],
+];
+
+export function mount(root) {
+  let stopped = false;
+  let unsubLang = null;
+  let bundle = null;
+  let editor = null;
+  let other = null;
+  let ai = null;
+  let cursor = 0;
+  let saving = false;
+  let loading = true;
+  let dragStartX = null;
+
+  root.innerHTML = "";
+  const container = el("div", { class: "page" });
+  root.appendChild(container);
+
+  function cards() {
+    return Array.isArray(bundle?.available) ? bundle.available : [];
+  }
+
+  function isImageProviderReady() {
+    const provider = ai?.image_generation || {};
+    return !!(provider.enabled && provider.base_url && provider.api_key && provider.model);
+  }
+
+  function applyBundle(nextBundle) {
+    bundle = nextBundle;
+    editor = bundleToEditor(nextBundle);
+    const items = cards();
+    const currentName = String(nextBundle?.character || "");
+    const nextIndex = items.findIndex((item) => item.character === currentName);
+    cursor = nextIndex >= 0 ? nextIndex : 0;
+  }
+
+  async function loadAll(character = "") {
+    loading = true;
+    render();
+    try {
+      const [nextBundle, nextOther, nextAi] = await Promise.all([
+        api.getCharacterPanel(character),
+        api.getOtherPanel(),
+        api.getAiPanel(),
+      ]);
+      if (stopped) return;
+      other = nextOther;
+      ai = nextAi;
+      applyBundle(nextBundle);
+    } catch (err) {
+      toastError(String(err?.message || err));
+    } finally {
+      if (!stopped) {
+        loading = false;
+        render();
+      }
+    }
+  }
+
+  async function selectCharacter(name, { scroll = false } = {}) {
+    if (!name) return;
+    await loadAll(name);
+    if (scroll) {
+      scrollToWorkbench();
+    }
+  }
+
+  async function activateCharacter(name) {
+    if (!name || saving) return;
+    saving = true;
+    render();
+    try {
+      const selectedBundle = await api.getCharacterPanel(name);
+      const nextAssistant = selectedBundle?.shared?.assistant_name || other?.assistant_name || "";
+      const [savedBundle, savedOther] = await Promise.all([
+        api.saveCharacterPanel({ character: name, set_active: true }),
+        api.saveOtherPanel({ ...(other || {}), assistant_name: nextAssistant }),
+      ]);
+      if (stopped) return;
+      other = savedOther;
+      applyBundle(savedBundle);
+      toastOk(t("character.carousel.activated", { name }));
+    } catch (err) {
+      toastError(t("actions.saveFailed", { msg: err?.message || err }));
+    } finally {
+      if (!stopped) {
+        saving = false;
+        render();
+      }
+    }
+  }
+
+  async function savePage({ generatePortrait = null, setActive = false } = {}) {
+    if (!editor || !other || saving) return;
+    saving = true;
+    render();
+    try {
+      const portrait = {
+        style: editor.portrait.style,
+        prompt_suffix: editor.portrait.prompt_suffix,
+        auto_generate: !!editor.portrait.auto_generate,
+        generate: generatePortrait === null ? !!editor.portrait.auto_generate : !!generatePortrait,
+      };
+      const syncAssistant = setActive || bundle?.current_character === editor.character;
+      const otherPayload = {
+        ...other,
+        assistant_name: syncAssistant ? editor.shared.assistant_name : other.assistant_name,
+      };
+      const [savedBundle, savedOther] = await Promise.all([
+        api.saveCharacterPanel({
+          character: editor.character,
+          set_active: setActive,
+          shared_fields: cloneShared(editor.shared),
+          person_fields: normalizeVariantFields(editor.person),
+          group_fields: normalizeVariantFields(editor.group),
+          portrait,
+        }),
+        api.saveOtherPanel(otherPayload),
+      ]);
+      if (stopped) return;
+      other = savedOther;
+      applyBundle(savedBundle);
+      if (savedBundle?.portrait?.error) {
+        toastError(savedBundle.portrait.error);
+      } else if (savedBundle?.portrait?.notice) {
+        toastInfo(t("character.portrait.notConfiguredHint"));
+      } else if (portrait.generate) {
+        toastOk(t("character.portrait.generated"));
+      } else {
+        toastOk(t("actions.savedOk"));
+      }
+    } catch (err) {
+      toastError(t("actions.saveFailed", { msg: err?.message || err }));
+    } finally {
+      if (!stopped) {
+        saving = false;
+        render();
+      }
+    }
+  }
+
+  async function createCharacter() {
+    const nameInput = textInput({ placeholder: t("character.create.namePlaceholder") });
+    const assistantInput = textInput({ placeholder: t("character.create.assistantPlaceholder") });
+    const styleState = { value: PORTRAIT_STYLE_OPTIONS[0].value };
+    const styleSelect = select({
+      value: styleState.value,
+      options: PORTRAIT_STYLE_OPTIONS.map((item) => ({ value: item.value, label: t(item.labelKey) })),
+      onChange: (value) => {
+        styleState.value = value;
+      },
+    });
+    const body = el("div", { class: "stack" }, [
+      fieldRow({
+        label: t("character.create.name"),
+        hint: t("character.create.nameHint"),
+        required: true,
+        control: nameInput,
+      }),
+      fieldRow({
+        label: t("character.create.assistant"),
+        hint: t("character.create.assistantHint"),
+        required: true,
+        control: assistantInput,
+      }),
+      fieldRow({
+        label: t("character.portrait.style"),
+        control: styleSelect,
+      }),
+    ]);
+    const confirmed = await openModal({
+      title: t("character.create.title"),
+      body,
+      actions: [
+        { label: t("common.cancel"), value: false },
+        { label: t("character.create.action"), value: true, variant: "primary" },
+      ],
+    });
+    if (!confirmed) return;
+
+    const name = String(nameInput.value || "").trim();
+    const assistantName = String(assistantInput.value || "").trim();
+    if (!name || !assistantName) {
+      toastError(t("character.create.nameRequired"));
+      return;
+    }
+    if (cards().some((item) => item.character === name)) {
+      toastError(t("character.create.duplicate"));
+      return;
+    }
+
+    saving = true;
+    render();
+    try {
+      const shared = {
+        assistant_name: assistantName,
+        user_name: "主人",
+        language: "简体中文",
+      };
+      const savedBundle = await api.saveCharacterPanel({
+        character: name,
+        set_active: false,
+        shared_fields: shared,
+        person_fields: defaultVariantFields("person", assistantName),
+        group_fields: defaultVariantFields("group", assistantName),
+        portrait: {
+          style: styleState.value,
+          prompt_suffix: "",
+          auto_generate: true,
+          generate: false,
+        },
+      });
+      if (stopped) return;
+      applyBundle(savedBundle);
+      toastOk(t("character.create.created", { name }));
+      scrollToWorkbench();
+    } catch (err) {
+      toastError(t("actions.saveFailed", { msg: err?.message || err }));
+    } finally {
+      if (!stopped) {
+        saving = false;
+        render();
+      }
+    }
+  }
+
+  function render() {
+    container.innerHTML = "";
+    container.appendChild(renderHeader());
+    if (loading && !bundle) {
+      container.appendChild(empty({ title: t("common.loading") }));
+      return;
+    }
+    container.appendChild(renderCarousel());
+    container.appendChild(renderWorkbench());
+  }
+
+  function renderHeader() {
+    return el("div", { class: "page-header" }, [
+      el("div", { class: "page-header-text" }, [
+        el("div", { class: "page-title", text: t("page.character.title") }),
+        el("div", { class: "page-desc", text: t("page.character.desc") }),
+      ]),
+      el("div", { class: "page-actions" }, [
+        el("button", {
+          type: "button",
+          class: "btn",
+          text: t("character.create.action"),
+          onClick: createCharacter,
+          disabled: saving,
+        }),
+        el("button", {
+          type: "button",
+          class: "btn is-primary",
+          text: saving ? t("character.editor.saving") : t("common.save"),
+          onClick: () => savePage(),
+          disabled: saving || !editor,
+        }),
+      ]),
+    ]);
+  }
+
+  function renderCarousel() {
+    const items = cards();
+    if (!items.length) {
+      return card({
+        title: t("character.carousel.title"),
+        subtitle: t("character.carousel.desc"),
+        body: [empty({ title: t("character.carousel.empty") })],
+      });
+    }
+    const track = el(
+      "div",
+      {
+        class: "carousel-track",
+        style: { transform: `translate3d(${-cursor * 100}%, 0, 0)` },
+      },
+      items.map((item, index) =>
+        el("div", { class: `carousel-slide${index === cursor ? " is-active" : ""}` }, [
+          renderPersonaCard(item),
+        ]),
+      ),
+    );
+    const viewport = el("div", { class: "carousel-viewport" }, [track]);
+    viewport.addEventListener("pointerdown", (event) => {
+      dragStartX = event.clientX;
+    });
+    viewport.addEventListener("pointerup", (event) => {
+      if (dragStartX === null) return;
+      const delta = event.clientX - dragStartX;
+      dragStartX = null;
+      if (Math.abs(delta) < 48) return;
+      moveCursor(delta < 0 ? 1 : -1);
+    });
+    viewport.addEventListener("pointerleave", () => {
+      dragStartX = null;
+    });
+
+    return el("section", { class: "carousel" }, [
+      el("button", {
+        type: "button",
+        class: "carousel-arrow is-prev",
+        text: "←",
+        disabled: items.length <= 1,
+        onClick: () => moveCursor(-1),
+        title: t("character.carousel.prev"),
+      }),
+      viewport,
+      el("button", {
+        type: "button",
+        class: "carousel-arrow is-next",
+        text: "→",
+        disabled: items.length <= 1,
+        onClick: () => moveCursor(1),
+        title: t("character.carousel.next"),
+      }),
+    ]);
+  }
+
+  function renderPersonaCard(item) {
+    const isActive = item.character === bundle?.current_character;
+    const isSelected = item.character === editor?.character;
+    const portrait = item.portrait || {};
+    const scopeLabel = t(scopeI18nKey(item));
+    const summary = item.summary || t("character.carousel.summaryFallback");
+    const visual = portrait.available
+      ? el("img", {
+          class: "carousel-card-portrait-img",
+          src: portrait.url,
+          alt: item.assistant_name || item.character,
+        })
+      : el("div", { class: "carousel-card-placeholder" }, [
+          el("span", { class: "carousel-card-placeholder-mark", text: portraitLetter(item.assistant_name || item.character) }),
+        ]);
+
+    return el("article", { class: `carousel-card${isActive ? " is-current" : ""}${isSelected ? " is-selected" : ""}` }, [
+      el("div", { class: "carousel-card-visual" }, [
+        visual,
+        el("div", { class: "carousel-card-visual-overlay" }, [
+          el("div", { class: "carousel-card-name", text: item.assistant_name || item.character }),
+          el("div", { class: "carousel-card-scope", text: scopeLabel }),
+        ]),
+      ]),
+      el("div", { class: "carousel-card-summary", text: summary }),
+      el("div", { class: "carousel-card-meta" }, [
+        el("div", { text: `${t("character.carousel.meta.person")}: ${item.has_person ? t("character.carousel.meta.personReady") : t("character.carousel.meta.personMissing")}` }),
+        el("div", { text: `${t("character.carousel.meta.group")}: ${item.has_group ? t("character.carousel.meta.groupReady") : t("character.carousel.meta.groupMissing")}` }),
+      ]),
+      el("div", { class: "carousel-card-actions" }, [
+        el("button", {
+          type: "button",
+          class: "btn",
+          text: isSelected ? t("character.carousel.editing") : t("character.carousel.edit"),
+          onClick: () => selectCharacter(item.character, { scroll: true }),
+          disabled: saving,
+        }),
+        el("button", {
+          type: "button",
+          class: "btn is-primary",
+          text: isActive ? t("character.carousel.active") : t("character.carousel.activate"),
+          onClick: () => activateCharacter(item.character),
+          disabled: saving || isActive,
+        }),
+      ]),
+    ]);
+  }
+
+  function renderWorkbench() {
+    if (!editor || !other) {
+      return empty({ title: t("character.editor.empty") });
+    }
+    return el("div", { class: "character-workbench", id: "character-workbench" }, [
+      el("div", { class: "character-editor-main stack" }, [
+        renderEditorCard(),
+        renderRuntimeCard(),
+      ]),
+      el("div", { class: "character-editor-side stack" }, [renderPortraitCard()]),
+    ]);
+  }
+
+  function renderEditorCard() {
+    return card({
+      title: t("character.editor.title"),
+      subtitle: t("character.editor.desc"),
+      body: [
+        el("div", { class: "character-shared-grid" }, [
+          fieldRow({ label: t("character.field.assistantName"), hint: t("character.field.assistantName.hint"), control: textInput({ value: editor.shared.assistant_name, onChange: (value) => { editor.shared.assistant_name = value.trim() || editor.shared.assistant_name; } }) }),
+          fieldRow({ label: t("character.field.userLabel"), hint: t("character.field.userLabel.hint"), control: textInput({ value: editor.shared.user_name, onChange: (value) => { editor.shared.user_name = value.trim() || "用户"; } }) }),
+          fieldRow({ label: t("character.field.language"), hint: t("character.field.language.hint"), control: textInput({ value: editor.shared.language, onChange: (value) => { editor.shared.language = value.trim() || "简体中文"; } }) }),
+          fieldRow({ label: t("character.field.character"), hint: t("character.field.character.hint"), control: textInput({ value: editor.character, disabled: true }) }),
+        ]),
+        el("div", { class: "character-editor-columns" }, [
+          renderVariantCard("person", t("character.personPersona"), t("character.editor.person.desc")),
+          renderVariantCard("group", t("character.groupPersona"), t("character.editor.group.desc")),
+        ]),
+      ],
+    });
+  }
+
+  function renderVariantCard(kind, title, subtitle) {
+    const fields = editor[kind];
+    return card({
+      title,
+      subtitle,
+      extraClass: "is-flush",
+      body: VARIANT_SECTIONS.map(([key, labelKey, hintKey, rows]) =>
+        fieldRow({
+          label: t(labelKey),
+          hint: t(hintKey),
+          control: textarea({
+            rows,
+            value: joinLines(fields[key]),
+            onChange: (value) => {
+              fields[key] = splitLines(value);
+            },
+          }),
+        }),
+      ),
+    });
+  }
+
+  function renderPortraitCard() {
+    const portrait = editor.portrait;
+    const preview = portrait.available && portrait.url
+      ? el("img", { class: "character-portrait-image", src: portrait.url, alt: editor.shared.assistant_name })
+      : el("div", { class: "character-portrait-placeholder" }, [
+          el("span", { class: "character-portrait-initial", text: portraitLetter(editor.shared.assistant_name) }),
+          el("div", { class: "character-portrait-caption", text: t("character.portrait.placeholder") }),
+        ]);
+    return card({
+      title: t("character.portrait.title"),
+      subtitle: t("character.portrait.desc"),
+      body: [
+        el("div", { class: "character-portrait-stack" }, [
+          el("div", { class: "character-portrait-frame" }, [preview]),
+          el("div", { class: "character-portrait-meta" }, [
+            chip({ label: portrait.available ? t("character.portrait.ready") : t("character.portrait.waiting"), variant: portrait.available ? "ok" : "outline" }),
+            chip({ label: isImageProviderReady() ? t("character.portrait.providerReady") : t("character.portrait.providerMissing"), variant: isImageProviderReady() ? "info" : "warn" }),
+            portrait.updated_at ? chip({ label: t("character.portrait.updatedAt", { time: formatTimestamp(portrait.updated_at) }), variant: "outline" }) : null,
+          ]),
+          fieldRow({ label: t("character.portrait.style"), control: select({ value: portrait.style, options: PORTRAIT_STYLE_OPTIONS.map((item) => ({ value: item.value, label: t(item.labelKey) })), onChange: (value) => { portrait.style = value; } }) }),
+          fieldRow({ label: t("character.portrait.prompt"), hint: t("character.portrait.prompt.hint"), control: textarea({ rows: 4, value: portrait.prompt_suffix, onChange: (value) => { portrait.prompt_suffix = value.trim(); } }) }),
+          fieldRow({ label: t("character.portrait.autoGenerate"), control: switchControl({ checked: !!portrait.auto_generate, onChange: (value) => { portrait.auto_generate = value; } }) }),
+          portrait.last_prompt ? el("div", { class: "character-portrait-prompt", text: portrait.last_prompt }) : null,
+          portrait.error ? chip({ label: t("character.portrait.failed"), variant: "danger" }) : null,
+          portrait.notice ? chip({ label: t("character.portrait.notice"), variant: "warn" }) : null,
+          el("div", { class: "row-tight" }, [
+            el("button", { type: "button", class: "btn", text: t("character.portrait.regenerate"), onClick: () => savePage({ generatePortrait: true, setActive: false }), disabled: saving }),
+            el("button", { type: "button", class: "btn is-primary", text: t("character.portrait.saveActivate"), onClick: () => savePage({ setActive: true }), disabled: saving }),
+          ]),
+        ]),
+      ],
+    });
+  }
+
+  function renderRuntimeCard() {
+    return card({
+      title: t("character.tab.pipeline"),
+      subtitle: t("character.carousel.desc"),
+      body: [
+        fieldRow({ label: t("character.field.serviceName"), hint: t("character.field.serviceName.hint"), control: textInput({ value: other.service_name || "", onChange: (value) => { other.service_name = value; } }) }),
+        fieldRow({ label: t("character.field.botId"), hint: t("character.field.botId.hint"), control: textInput({ value: other.bot_account_id || "", onChange: (value) => { other.bot_account_id = value.trim(); } }) }),
+        fieldRow({ label: t("character.pipeline.followup"), control: numberInput({ value: Number(other.group_follow_up_window_seconds || 5), min: 0, max: 60, step: 1, onChange: (value) => { other.group_follow_up_window_seconds = value; } }) }),
+        fieldRow({ label: t("character.pipeline.imageCmd"), control: textInput({ value: other.image_command_prefix || "", onChange: (value) => { other.image_command_prefix = value.trim(); } }) }),
+        fieldRow({ label: t("character.pipeline.aliases"), control: tagInput({ values: other.image_command_aliases || [], onChange: (value) => { other.image_command_aliases = value; } }) }),
+        fieldRow({ label: t("character.field.ignorePrefixes"), hint: t("character.field.ignorePrefixes.hint"), control: tagInput({ values: other.ignore_prefixes || [], onChange: (value) => { other.ignore_prefixes = value; } }) }),
+      ],
+    });
+  }
+
+  function moveCursor(delta) {
+    const items = cards();
+    if (!items.length) return;
+    const nextIndex = (cursor + delta + items.length) % items.length;
+    cursor = nextIndex;
+    render();
+    void selectCharacter(items[nextIndex].character);
+  }
+
+  loadAll();
+  unsubLang = onLangChange(() => render());
+  return () => {
+    stopped = true;
+    if (unsubLang) unsubLang();
+  };
+}
+
+function bundleToEditor(bundle) {
+  return {
+    character: String(bundle?.character || ""),
+    shared: cloneShared(bundle?.shared || {}),
+    person: cloneVariant(bundle?.person?.fields || {}),
+    group: cloneVariant(bundle?.group?.fields || {}),
+    portrait: {
+      available: !!bundle?.portrait?.available,
+      url: String(bundle?.portrait?.url || ""),
+      style: String(bundle?.portrait?.style || PORTRAIT_STYLE_OPTIONS[0].value),
+      prompt_suffix: String(bundle?.portrait?.prompt_suffix || ""),
+      auto_generate: bundle?.portrait?.auto_generate !== false,
+      last_prompt: String(bundle?.portrait?.last_prompt || ""),
+      updated_at: Number(bundle?.portrait?.updated_at || 0),
+      error: String(bundle?.portrait?.error || ""),
+      notice: String(bundle?.portrait?.notice || ""),
+    },
+  };
+}
+
+function cloneVariant(source) {
+  return {
+    profile: [...(source?.profile || [])],
+    skills: [...(source?.skills || [])],
+    background: [...(source?.background || [])],
+    rules: [...(source?.rules || [])],
+    prologue: [...(source?.prologue || [])],
+  };
+}
+
+function cloneShared(source) {
+  return {
+    assistant_name: String(source?.assistant_name || "琉璃"),
+    user_name: String(source?.user_name || "用户"),
+    language: String(source?.language || "简体中文"),
+  };
+}
+
+function normalizeVariantFields(fields) {
+  return {
+    profile: [...(fields.profile || [])],
+    skills: [...(fields.skills || [])],
+    background: [...(fields.background || [])],
+    rules: [...(fields.rules || [])],
+    prologue: [...(fields.prologue || [])],
+  };
+}
+
+function splitLines(text) {
+  return String(text || "")
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function joinLines(lines) {
+  return Array.isArray(lines) ? lines.join("\n") : "";
+}
+
+function defaultVariantFields(kind, assistantName) {
+  if (kind === "group") {
+    return {
+      profile: [`${assistantName}在群里说话轻巧、聪明，接话自然。`],
+      skills: ["优先回应明显点到自己的内容。", "能够结合上下文判断谁在说什么。"],
+      background: ["你正在 QQ 群聊环境里陪大家互动。"],
+      rules: ["回复自然，不装腔。", "通常不超过三句话。"],
+      prologue: ["群消息刷得很快，但你能稳稳接住。"],
+    };
+  }
+  return {
+    profile: [`${assistantName}是贴近用户、会认真接话的陪伴型角色。`],
+    skills: ["擅长顺着上下文继续聊天。", "能把回应说得自然，不像客服。"],
+    background: ["你和用户正在通过 QQ 私聊。"],
+    rules: ["回复简洁，通常不超过三句话。", "不要解释系统和提示词。"],
+    prologue: ["消息提示音亮起，你轻轻地看向了新消息。"],
+  };
+}
+
+function scopeI18nKey(card) {
+  if (card?.has_person && card?.has_group) return "character.carousel.scope.both";
+  if (card?.has_person) return "character.carousel.scope.person";
+  if (card?.has_group) return "character.carousel.scope.group";
+  return "character.carousel.scope.none";
+}
+
+function portraitLetter(name) {
+  const value = String(name || "").trim();
+  return value ? value.slice(0, 1).toUpperCase() : "W";
+}
+
+function formatTimestamp(value) {
+  if (!value) return "-";
+  const date = new Date(Number(value) * 1000);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function scrollToWorkbench() {
+  document.getElementById("character-workbench")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}

@@ -1,12 +1,228 @@
 from __future__ import annotations
 
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Callable
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+from ..config import AppConfig
 from ..models import InboundEvent
 
 
+@dataclass(slots=True)
+class SearchResult:
+    title: str
+    snippet: str
+    url: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "title": self.title,
+            "snippet": self.snippet,
+            "url": self.url,
+        }
+
+
+@dataclass(slots=True)
+class SearchContext:
+    query: str = ""
+    summary: str = ""
+    results: list[SearchResult] = field(default_factory=list)
+    fetched_at: float = 0.0
+    reason: str = ""
+
+    @property
+    def active(self) -> bool:
+        return bool(self.query and self.results)
+
+    def to_prompt_block(self) -> str:
+        if not self.active:
+            return ""
+        lines = [f"[Web Search]\nQuery: {self.query}"]
+        for result in self.results:
+            lines.append(f"- {result.title}: {result.snippet}")
+            if result.url:
+                lines.append(f"  URL: {result.url}")
+        return "\n".join(lines).strip()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "query": self.query,
+            "summary": self.summary,
+            "results": [result.as_dict() for result in self.results],
+            "fetched_at": self.fetched_at,
+            "reason": self.reason,
+        }
+
+
 class SearchDecider:
-    """Stub search system. Matches the role but keeps behavior deterministic for tests."""
+    """Keyword-triggered web lookup with a tiny DuckDuckGo-backed search client."""
+
+    _KEYWORDS = (
+        "新闻",
+        "价格",
+        "最新",
+        "今天",
+        "实时",
+        "热搜",
+        "汇率",
+        "天气",
+        "股价",
+        "比分",
+        "票房",
+        "热度",
+        "多少美元",
+        "多少人民币",
+    )
+
+    def __init__(
+        self,
+        config: AppConfig,
+        fetcher: Callable[[str], list[SearchResult]] | None = None,
+    ):
+        self.config = config
+        self._fetcher = fetcher or self._duckduckgo_search
+        self._cache: dict[str, SearchContext] = {}
 
     def should_search(self, event: InboundEvent) -> bool:
-        text = event.plain_text
-        keywords = ("新闻", "价格", "最新", "今天", "实时")
-        return any(keyword in text for keyword in keywords)
+        if not self.config.search_enabled:
+            return False
+        text = event.command_text(self.config.bot_account_id) or event.plain_text
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        return any(keyword in normalized for keyword in self._KEYWORDS)
+
+    def build_context(self, event: InboundEvent) -> SearchContext:
+        if not self.should_search(event):
+            return SearchContext()
+        query = self._normalize_query(event.command_text(self.config.bot_account_id) or event.plain_text)
+        return self.search_query(query, reason="keyword-hit")
+
+    def search_query(self, query: str, *, reason: str = "manual") -> SearchContext:
+        query = self._normalize_query(query)
+        if not query:
+            return SearchContext()
+        cached = self._cache.get(query)
+        if cached is not None:
+            return cached
+        results = self._safe_fetch(query)
+        if not results:
+            context = SearchContext(
+                query=query,
+                summary="这类问题通常需要联网确认，但这次没有拿到可靠结果。",
+                results=[],
+                fetched_at=time.time(),
+                reason=f"{reason}:no-results",
+            )
+            self._cache[query] = context
+            return context
+        first = results[0]
+        summary = f"{first.title}：{first.snippet}".strip("：")
+        context = SearchContext(
+            query=query,
+            summary=summary,
+            results=results[: max(1, self.config.search_result_limit)],
+            fetched_at=time.time(),
+            reason=reason,
+        )
+        self._cache[query] = context
+        return context
+
+    def build_hint(self, event: InboundEvent) -> str:
+        return self.build_context(event).summary
+
+    def cache_size(self) -> int:
+        return len(self._cache)
+
+    def _safe_fetch(self, query: str) -> list[SearchResult]:
+        try:
+            return self._fetcher(query)
+        except Exception:
+            return []
+
+    def _duckduckgo_search(self, query: str) -> list[SearchResult]:
+        params = urlencode(
+            {
+                "q": query,
+                "format": "json",
+                "no_html": "1",
+                "skip_disambig": "1",
+            }
+        )
+        request = Request(
+            f"https://api.duckduckgo.com/?{params}",
+            headers={
+                "User-Agent": "waifu-standalone/0.1 (+https://github.com/shinonome123/qqbot)",
+                "Accept": "application/json",
+            },
+        )
+        with urlopen(request, timeout=self.config.search_timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        results: list[SearchResult] = []
+        heading = str(payload.get("Heading", "") or "").strip()
+        answer = str(payload.get("Answer", "") or "").strip()
+        abstract = str(payload.get("AbstractText", "") or "").strip()
+        abstract_url = str(payload.get("AbstractURL", "") or "").strip()
+        if answer or abstract:
+            results.append(
+                SearchResult(
+                    title=heading or query,
+                    snippet=answer or abstract,
+                    url=abstract_url,
+                )
+            )
+        related = payload.get("RelatedTopics", [])
+        for item in self._flatten_related_topics(related):
+            title, snippet = self._split_topic_text(str(item.get("Text", "") or "").strip())
+            url = str(item.get("FirstURL", "") or "").strip()
+            if not title and not snippet:
+                continue
+            results.append(
+                SearchResult(
+                    title=title or query,
+                    snippet=snippet or title,
+                    url=url,
+                )
+            )
+            if len(results) >= max(1, self.config.search_result_limit):
+                break
+        unique: list[SearchResult] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for result in results:
+            key = (result.title, result.url)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unique.append(result)
+        return unique[: max(1, self.config.search_result_limit)]
+
+    def _flatten_related_topics(self, items: object) -> list[dict[str, object]]:
+        if not isinstance(items, list):
+            return []
+        flat: list[dict[str, object]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            nested = item.get("Topics")
+            if isinstance(nested, list):
+                flat.extend(self._flatten_related_topics(nested))
+                continue
+            flat.append(item)
+        return flat
+
+    @staticmethod
+    def _split_topic_text(text: str) -> tuple[str, str]:
+        if " - " in text:
+            title, snippet = text.split(" - ", 1)
+            return title.strip(), snippet.strip()
+        return text.strip(), text.strip()
+
+    @staticmethod
+    def _normalize_query(text: str) -> str:
+        normalized = " ".join(str(text or "").strip().split())
+        if len(normalized) <= 120:
+            return normalized
+        return normalized[:120].rstrip()

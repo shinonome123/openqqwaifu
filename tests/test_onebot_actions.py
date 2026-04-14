@@ -99,6 +99,24 @@ class OneBotActionsTests(unittest.TestCase):
         with self.assertRaises(OneBotActionError):
             self.port.send(message)
 
+    def test_error_message_does_not_echo_response_payload(self) -> None:
+        _CaptureHandler.response_body = {
+            "status": "failed",
+            "retcode": 1200,
+            "headers": {"Authorization": "Bearer secret-token"},
+        }
+
+        with self.assertRaises(OneBotActionError) as ctx:
+            self.port.send(
+                OutboundMessage(
+                    launcher_id="10001",
+                    launcher_type="person",
+                    text="received",
+                )
+            )
+
+        self.assertEqual(str(ctx.exception), "onebot action failed")
+
     def test_access_token_is_sent_as_bearer_header(self) -> None:
         host, port = self.server.server_address
         client = OneBotActionClient(f"http://{host}:{port}", access_token="secret-token")

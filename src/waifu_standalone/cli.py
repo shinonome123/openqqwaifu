@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from .app import build_runtime_service
+from .app import build_default_service, build_runtime_service
 from .cells.config import ConfigManager
 from .config import AppConfig
 from .gateways.onebot_actions import OneBotActionClient
@@ -35,6 +36,31 @@ def main() -> None:
     config = _load_config(args.config)
     if args.command == "check-sidecar":
         _check_sidecar(config)
+        return
+
+    if args.command == "export-skill-pack":
+        service, _ = build_default_service(config)
+        bundle = service.export_skill_pack(
+            skill_ids=args.skill_id,
+            include_builtin=args.include_builtin,
+            name=args.name,
+            description=args.description,
+        )
+        output = json.dumps(bundle, ensure_ascii=False, indent=2)
+        if args.output:
+            target = Path(args.output)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(output + "\n", encoding="utf-8")
+            print(f"skill pack written to {target.resolve()}")
+        else:
+            print(output)
+        return
+
+    if args.command == "import-skill-pack":
+        service, _ = build_default_service(config)
+        payload = Path(args.input).read_text(encoding="utf-8")
+        result = service.import_skill_pack(payload, overwrite=not args.no_overwrite)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
     service, outbound = build_runtime_service(config, store_root=args.store_root)
@@ -97,6 +123,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     check = subparsers.add_parser("check-sidecar")
     check.add_argument("--config", default=None)
+
+    export_pack = subparsers.add_parser("export-skill-pack")
+    export_pack.add_argument("--config", default=None)
+    export_pack.add_argument("--output", default=None)
+    export_pack.add_argument("--skill-id", action="append", default=[])
+    export_pack.add_argument("--include-builtin", action="store_true")
+    export_pack.add_argument("--name", default="")
+    export_pack.add_argument("--description", default="")
+
+    import_pack = subparsers.add_parser("import-skill-pack")
+    import_pack.add_argument("--config", default=None)
+    import_pack.add_argument("--input", required=True)
+    import_pack.add_argument("--no-overwrite", action="store_true")
 
     parser.set_defaults(command="serve", config=None, store_root=None)
     return parser

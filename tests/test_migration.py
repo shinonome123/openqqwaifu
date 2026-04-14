@@ -40,24 +40,35 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(payload["ignore_prefix"], ["/", "!"])
             self.assertEqual(payload["character"], "default")
 
-    def test_importer_migrates_history_and_metadata(self) -> None:
+    def test_importer_migrates_history_and_card_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             waifu_root = Path(tmpdir) / "waifu"
             data_dir = waifu_root / "data"
             config_dir = data_dir / "config"
+            cards_dir = waifu_root / "cards"
             config_dir.mkdir(parents=True)
+            cards_dir.mkdir(parents=True)
 
             (config_dir / "waifu.yaml").write_text(
                 "\n".join(
                     [
                         "response_rate: 1",
-                        "assistant_name: \"luna\"",
+                        "character: \"default\"",
                     ]
                 ),
                 encoding="utf-8",
             )
             (config_dir / "waifu_612475113.yaml").write_text(
                 "group_response_delay: 3\n",
+                encoding="utf-8",
+            )
+            (cards_dir / "default_group.yaml").write_text(
+                "\n".join(
+                    [
+                        "assistant_name: neko",
+                        "user_name: 爸爸",
+                    ]
+                ),
                 encoding="utf-8",
             )
             (data_dir / "short_term_memory_612475113.json").write_text(
@@ -85,11 +96,23 @@ class MigrationTests(unittest.TestCase):
             loaded = store.load("612475113", "group")
 
             self.assertTrue(result.imported)
-            self.assertEqual(loaded.preferred_name, "luna")
+            self.assertEqual(loaded.preferred_name, "")
             self.assertEqual(loaded.metadata["history_source"], "short_term_memory")
             self.assertEqual(loaded.metadata["waifu_config"]["group_response_delay"], 3)
             self.assertEqual(loaded.metadata["long_term_memory"][0]["summary"], "talked before")
+            self.assertEqual(loaded.metadata["card"]["assistant_name"], "neko")
+            self.assertEqual(loaded.metadata["card"]["user_name"], "爸爸")
             self.assertEqual(loaded.history[0], "user: [time]hello")
+
+    def test_importer_rejects_invalid_launcher_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            waifu_root = Path(tmpdir) / "waifu"
+            waifu_root.mkdir(parents=True)
+            store = FileMemoryStore(Path(tmpdir) / "sessions")
+            importer = WaifuDataImporter(store, waifu_root)
+
+            with self.assertRaises(ValueError):
+                importer.import_launcher("612475113", "weird")
 
 
 if __name__ == "__main__":

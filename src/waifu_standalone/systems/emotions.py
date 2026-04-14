@@ -8,8 +8,19 @@ class EmotionSensor:
         text = event.plain_text.lower()
         if not text:
             return EmotionState(primary="neutral", intensity=0.0)
-        if "draw" in text:
-            return EmotionState(primary="anticipation", intensity=0.8)
-        if "call me" in text:
-            return EmotionState(primary="love", intensity=0.6)
-        return EmotionState(primary="trust", intensity=0.4)
+
+        strong_rules = (
+            (("爱你", "喜欢你", "想你", "抱抱"), EmotionState(primary="love", intensity=0.75)),
+            (("开心", "高兴", "快乐", "嘿嘿"), EmotionState(primary="joy", intensity=0.7)),
+            (("难过", "伤心", "委屈", "呜呜"), EmotionState(primary="sadness", intensity=0.7)),
+            (("生气", "愤怒", "烦死了", "火大"), EmotionState(primary="anger", intensity=0.75)),
+            (("害怕", "紧张", "焦虑", "担心"), EmotionState(primary="anxiety", intensity=0.7)),
+            (("draw", "生图", "画图"), EmotionState(primary="anticipation", intensity=0.65)),
+        )
+        for keywords, state in strong_rules:
+            if any(keyword in text for keyword in keywords):
+                return state
+
+        if memory.preferred_name:
+            return EmotionState(primary="trust", intensity=0.55)
+        return EmotionState(primary="neutral", intensity=0.25)

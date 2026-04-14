@@ -33,7 +33,7 @@ class OneBotActionClient:
             raw = response.read().decode("utf-8")
         result = json.loads(raw) if raw else {"status": "ok"}
         if result.get("status") not in {None, "ok"} or result.get("retcode") not in {None, 0}:
-            raise OneBotActionError(f"onebot action failed: {result}")
+            raise OneBotActionError("onebot action failed")
         return result
 
     def get_status(self) -> dict[str, object]:

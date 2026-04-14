@@ -90,6 +90,8 @@ class WaifuDataImporter:
 
     def import_launcher(self, launcher_id: str, launcher_type: str | None = None) -> ImportResult:
         resolved_type = launcher_type or self.default_launcher_type
+        if resolved_type not in {"group", "person"}:
+            raise ValueError("launcher_type must be 'group' or 'person'")
         session = self.store.load(launcher_id, resolved_type)
         session.metadata["imported_from"] = "waifu"
         session.metadata["waifu_root"] = str(self.waifu_root)
@@ -112,8 +114,13 @@ class WaifuDataImporter:
         if long_term:
             session.metadata["long_term_memory"] = long_term
 
-        if isinstance(config.get("assistant_name"), str):
-            session.preferred_name = str(config["assistant_name"])
+        card_identity = self._load_card_identity(config, resolved_type)
+        if card_identity:
+            session.metadata["card"] = card_identity
+            if isinstance(card_identity.get("assistant_name"), str):
+                session.metadata["assistant_name"] = str(card_identity["assistant_name"])
+            if isinstance(card_identity.get("user_name"), str):
+                session.metadata["user_name"] = str(card_identity["user_name"])
 
         saved = self.store.save(session)
         session_path = str(self.store.session_path(saved.launcher_id, saved.launcher_type))
@@ -136,7 +143,10 @@ class WaifuDataImporter:
         path = self.waifu_root / "data" / f"short_term_memory_{launcher_id}.json"
         if not path.exists():
             return []
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except OSError:
+            return []
         history: list[str] = []
         for item in payload:
             role = str(item.get("role", "unknown"))
@@ -148,11 +158,39 @@ class WaifuDataImporter:
         path = self.waifu_root / "data" / f"memories_{launcher_id}.json"
         if not path.exists():
             return []
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except OSError:
+            return []
         return list(payload.get("long_term", []))
 
     def _load_conversations(self, launcher_id: str) -> list[str]:
         path = self.waifu_root / "data" / f"conversations_{launcher_id}.log"
         if not path.exists():
             return []
-        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+
+    def _load_card_identity(self, config: dict[str, object], launcher_type: str) -> dict[str, object]:
+        character = str(config.get("character", "default") or "default").strip() or "default"
+        if character == "off":
+            return {}
+        for path in self._candidate_card_paths(character, launcher_type):
+            if not path.exists():
+                continue
+            payload = parse_simple_yaml(path)
+            payload["character"] = character
+            payload["source"] = str(path)
+            return payload
+        return {"character": character}
+
+    def _candidate_card_paths(self, character: str, launcher_type: str) -> list[Path]:
+        return [
+            self.waifu_root / "cards" / f"{character}_{launcher_type}.yaml",
+            self.waifu_root / "cards" / f"{character}.yaml",
+            self.waifu_root / "data" / "cards" / f"{character}_{launcher_type}.yaml",
+            self.waifu_root / "data" / "cards" / f"{character}.yaml",
+        ]
