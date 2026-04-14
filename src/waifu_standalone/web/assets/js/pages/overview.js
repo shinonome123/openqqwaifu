@@ -139,6 +139,31 @@ function renderIdentity(dash) {
         dash?.summarization_mode ? chip({ label: t("overview.flag.summarize"), variant: "info" }) : null,
         dash?.search_enabled ? chip({ label: t("overview.flag.search"), variant: "ok" }) : null,
       ]),
+      el("div", { class: "row" }, [
+        chip({
+          label: dash?.group_reply_requires_mention
+            ? t("overview.message.mentionRequired")
+            : t("overview.message.openGroups"),
+          variant: "outline",
+        }),
+        chip({
+          label: t("overview.message.followup", { seconds: dash?.reply_window_seconds ?? 0 }),
+          variant: "outline",
+        }),
+        chip({
+          label: t("overview.message.delay", { seconds: dash?.group_response_delay_seconds ?? 0 }),
+          variant: "outline",
+        }),
+        dash?.multimodal_enabled
+          ? chip({ label: t("overview.message.multimodal"), variant: "info" })
+          : null,
+        Number(dash?.repeat_trigger_count ?? 0) > 0
+          ? chip({
+              label: t("overview.message.repeat", { count: dash?.repeat_trigger_count ?? 0 }),
+              variant: "warn",
+            })
+          : null,
+      ]),
     ],
   });
 }
@@ -148,6 +173,8 @@ function renderProviders(dash) {
   const img = dash?.image_generation || {};
   const sidecar = dash?.qq_sidecar || {};
   const sessionCount = dash?.session_count ?? 0;
+  const knowledgeCount = dash?.knowledge_count ?? 0;
+  const memberCount = dash?.member_count ?? 0;
   return card({
     title: t("overview.providers.title"),
     subtitle: t("overview.providers.desc"),
@@ -160,7 +187,16 @@ function renderProviders(dash) {
         !sidecar.dry_run,
         sidecar.dry_run ? t("overview.provider.dry") : t("overview.provider.live"),
       ),
-      providerRow(t("overview.provider.memory"), true, true, `${sessionCount} sessions`),
+      providerRow(
+        t("overview.provider.memory"),
+        true,
+        true,
+        t("overview.provider.memoryMeta", {
+          sessions: sessionCount,
+          knowledge: knowledgeCount,
+          members: memberCount,
+        }),
+      ),
     ],
   });
 }

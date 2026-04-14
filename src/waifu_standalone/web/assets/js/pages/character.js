@@ -37,6 +37,7 @@ export function mount(root) {
   let other = null;
   let ai = null;
   let cursor = 0;
+  let motionDirection = "next";
   let saving = false;
   let loading = true;
   let dragStartX = null;
@@ -325,7 +326,7 @@ export function mount(root) {
       dragStartX = null;
     });
 
-    return el("section", { class: "carousel" }, [
+    return el("section", { class: `carousel is-moving-${motionDirection}` }, [
       el("button", {
         type: "button",
         class: "carousel-arrow is-prev",
@@ -352,6 +353,13 @@ export function mount(root) {
     const portrait = item.portrait || {};
     const scopeLabel = t(scopeI18nKey(item));
     const summary = item.summary || t("character.carousel.summaryFallback");
+    const badges = [];
+    if (isActive) {
+      badges.push(chip({ label: t("character.carousel.active"), variant: "accent" }));
+    }
+    if (isSelected && !isActive) {
+      badges.push(chip({ label: t("character.carousel.editing"), variant: "outline" }));
+    }
     const visual = portrait.available
       ? el("img", {
           class: "carousel-card-portrait-img",
@@ -366,14 +374,17 @@ export function mount(root) {
       el("div", { class: "carousel-card-visual" }, [
         visual,
         el("div", { class: "carousel-card-visual-overlay" }, [
-          el("div", { class: "carousel-card-name", text: item.assistant_name || item.character }),
-          el("div", { class: "carousel-card-scope", text: scopeLabel }),
+          badges.length ? el("div", { class: "carousel-card-badges" }, badges) : null,
+          el("div", { class: "carousel-card-copy" }, [
+            el("div", { class: "carousel-card-name", text: item.assistant_name || item.character }),
+            el("div", { class: "carousel-card-scope", text: scopeLabel }),
+          ]),
         ]),
       ]),
-      el("div", { class: "carousel-card-summary", text: summary }),
+      el("div", { class: "carousel-card-summary", text: summary, title: summary }),
       el("div", { class: "carousel-card-meta" }, [
-        el("div", { text: `${t("character.carousel.meta.person")}: ${item.has_person ? t("character.carousel.meta.personReady") : t("character.carousel.meta.personMissing")}` }),
-        el("div", { text: `${t("character.carousel.meta.group")}: ${item.has_group ? t("character.carousel.meta.groupReady") : t("character.carousel.meta.groupMissing")}` }),
+        el("div", { class: "carousel-card-meta-item", text: `${t("character.carousel.meta.person")}: ${item.has_person ? t("character.carousel.meta.personReady") : t("character.carousel.meta.personMissing")}` }),
+        el("div", { class: "carousel-card-meta-item", text: `${t("character.carousel.meta.group")}: ${item.has_group ? t("character.carousel.meta.groupReady") : t("character.carousel.meta.groupMissing")}` }),
       ]),
       el("div", { class: "carousel-card-actions" }, [
         el("button", {
@@ -489,7 +500,53 @@ export function mount(root) {
       body: [
         fieldRow({ label: t("character.field.serviceName"), hint: t("character.field.serviceName.hint"), control: textInput({ value: other.service_name || "", onChange: (value) => { other.service_name = value; } }) }),
         fieldRow({ label: t("character.field.botId"), hint: t("character.field.botId.hint"), control: textInput({ value: other.bot_account_id || "", onChange: (value) => { other.bot_account_id = value.trim(); } }) }),
+        fieldRow({
+          label: t("character.field.groupReplyRequiresMention"),
+          hint: t("character.field.groupReplyRequiresMention.hint"),
+          control: switchControl({
+            checked: other.group_reply_requires_mention !== false,
+            onChange: (value) => {
+              other.group_reply_requires_mention = value;
+            },
+          }),
+        }),
         fieldRow({ label: t("character.pipeline.followup"), control: numberInput({ value: Number(other.group_follow_up_window_seconds || 5), min: 0, max: 60, step: 1, onChange: (value) => { other.group_follow_up_window_seconds = value; } }) }),
+        fieldRow({
+          label: t("character.field.groupReplyDelay"),
+          hint: t("character.field.groupReplyDelay.hint"),
+          control: numberInput({
+            value: Number(other.group_response_delay_seconds || 0),
+            min: 0,
+            max: 15,
+            step: 0.5,
+            onChange: (value) => {
+              other.group_response_delay_seconds = value;
+            },
+          }),
+        }),
+        fieldRow({
+          label: t("character.field.repeatTrigger"),
+          hint: t("character.field.repeatTrigger.hint"),
+          control: numberInput({
+            value: Number(other.repeat_trigger_count || 0),
+            min: 0,
+            max: 10,
+            step: 1,
+            onChange: (value) => {
+              other.repeat_trigger_count = value;
+            },
+          }),
+        }),
+        fieldRow({
+          label: t("character.field.multimodal"),
+          hint: t("character.field.multimodal.hint"),
+          control: switchControl({
+            checked: other.multimodal_enabled !== false,
+            onChange: (value) => {
+              other.multimodal_enabled = value;
+            },
+          }),
+        }),
         fieldRow({ label: t("character.pipeline.imageCmd"), control: textInput({ value: other.image_command_prefix || "", onChange: (value) => { other.image_command_prefix = value.trim(); } }) }),
         fieldRow({ label: t("character.pipeline.aliases"), control: tagInput({ values: other.image_command_aliases || [], onChange: (value) => { other.image_command_aliases = value; } }) }),
         fieldRow({ label: t("character.field.ignorePrefixes"), hint: t("character.field.ignorePrefixes.hint"), control: tagInput({ values: other.ignore_prefixes || [], onChange: (value) => { other.ignore_prefixes = value; } }) }),
@@ -501,6 +558,7 @@ export function mount(root) {
     const items = cards();
     if (!items.length) return;
     const nextIndex = (cursor + delta + items.length) % items.length;
+    motionDirection = delta > 0 ? "next" : "prev";
     cursor = nextIndex;
     render();
     void selectCharacter(items[nextIndex].character);

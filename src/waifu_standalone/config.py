@@ -70,6 +70,7 @@ class AppConfig:
     assistant_name: str = "琉璃"
     character: str = "default"
     bot_account_id: str = ""
+    group_reply_requires_mention: bool = True
     skills_enabled: bool = True
     max_active_skills: int = 3
     search_enabled: bool = True
@@ -82,6 +83,9 @@ class AppConfig:
     image_command_aliases: list[str] = field(default_factory=lambda: ["生图", "draw"])
     ignore_prefixes: list[str] = field(default_factory=lambda: ["!", "！", "/"])
     group_follow_up_window_seconds: float = 5.0
+    group_response_delay_seconds: float = 0.0
+    repeat_trigger_count: int = 0
+    multimodal_enabled: bool = True
     history_window_messages: int = 8
     memory_recall_limit: int = 3
     max_thinking_words: int = 30

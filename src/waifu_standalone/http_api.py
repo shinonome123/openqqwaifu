@@ -51,6 +51,7 @@ def parse_onebot_event(payload: dict[str, Any]) -> InboundEvent:
     launcher_id = str(payload.get("group_id") or payload.get("user_id") or "unknown")
     sender = payload.get("sender") or {}
     sender_id = str(sender.get("user_id") or payload.get("user_id") or "unknown")
+    raw_message = str(payload.get("raw_message") or "")
     segments = _parse_segments(payload)
     sender_name = str(sender.get("card") or sender.get("nickname") or "user")
     if _looks_mojibake(sender_name):
@@ -62,6 +63,8 @@ def parse_onebot_event(payload: dict[str, Any]) -> InboundEvent:
         sender_id=sender_id,
         sender_name=sender_name,
         segments=segments,
+        message_id=str(payload.get("message_id") or ""),
+        raw_message=raw_message,
     )
 
 
@@ -263,6 +266,9 @@ class HttpApi:
         detail = self.service.save_memory_session(launcher_type, launcher_id, payload)
         return dict(detail) if detail else None
 
+    def save_knowledge_entry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.service.save_knowledge_entry(payload))
+
     def get_abilities_panel(self) -> dict[str, Any]:
         return dict(self.service.get_abilities_panel())
 
@@ -349,7 +355,14 @@ class HttpApi:
         return {
             "current_user": user,
             "users": self.auth.list_users() if user.get("role") == "admin" else [user],
+            **self.service.get_member_directory_panel(),
         }
+
+    def save_directory_member(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.service.save_directory_member(payload))
+
+    def sync_group_members(self, group_id: str) -> dict[str, Any]:
+        return dict(self.service.sync_group_members(group_id))
 
     def change_password(self, username: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self.auth is None:
@@ -660,6 +673,39 @@ def make_handler(api: HttpApi):
                 if payload is None:
                     return
                 self._write_json(HTTPStatus.OK, api.save_other_panel(payload))
+                return
+
+            if parsed.path == "/api/users/directory/save":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                try:
+                    self._write_json(HTTPStatus.OK, {"status": "ok", "member": api.save_directory_member(payload)})
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+
+            if parsed.path == "/api/users/directory/sync":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                try:
+                    self._write_json(
+                        HTTPStatus.OK,
+                        api.sync_group_members(str(payload.get("group_id", "") or "")),
+                    )
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+
+            if parsed.path == "/api/knowledge/save":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                try:
+                    self._write_json(HTTPStatus.OK, {"status": "ok", "entry": api.save_knowledge_entry(payload)})
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                 return
 
             if parsed.path == "/api/marketplace/import":

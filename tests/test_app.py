@@ -108,6 +108,46 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertEqual(len(outbound.sent), 2)
 
+    def test_group_reply_can_be_opened_without_mentions(self) -> None:
+        config = AppConfig(
+            bot_account_id="3518944354",
+            group_reply_requires_mention=False,
+        )
+        service, outbound = build_default_service(config)
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="hello there")],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(outbound.sent), 1)
+
+    def test_repeat_trigger_replies_when_same_group_line_is_repeated(self) -> None:
+        config = AppConfig(repeat_trigger_count=2, group_reply_requires_mention=False)
+        service, outbound = build_default_service(config)
+        event = InboundEvent(
+            launcher_id="612475113",
+            launcher_type="group",
+            sender_id="783190298",
+            sender_name="tester",
+            segments=[MessageSegment(kind="text", text="hello")],
+        )
+
+        first = service.handle_event(event)
+        second = service.handle_event(event)
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertIn("重复2次", second.text)
+        self.assertEqual(len(outbound.sent), 2)
+
     def test_dashboard_snapshot_surfaces_runtime_state(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, _ = build_default_service(config)
@@ -133,6 +173,49 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["session_count"], 1)
         self.assertEqual(snapshot["recent_outbound_count"], 1)
         self.assertIn("612475113", snapshot["active_follow_up_launchers"])
+        self.assertTrue(snapshot["group_reply_requires_mention"])
+        self.assertEqual(snapshot["message_behavior"]["follow_up_window_seconds"], 5.0)
+        self.assertEqual(snapshot["knowledge_count"], 0)
+        self.assertEqual(snapshot["member_count"], 1)
+
+    def test_group_onboarding_prompts_and_saves_preferred_name(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+
+        first = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+        )
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="luna")],
+            )
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None
+        assert second is not None
+        self.assertEqual(first.text, "What should I call you?")
+        self.assertIn("luna", second.text)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "luna")
+        self.assertEqual(member["onboarding_status"], "ready")
+        self.assertEqual(len(outbound.sent), 2)
 
     def test_imported_card_identity_is_used_for_person_session(self) -> None:
         service, _ = build_default_service(AppConfig())
@@ -213,6 +296,31 @@ class WaifuServiceTests(unittest.TestCase):
 
         self.assertTrue(isinstance(long_term, list) and long_term)
         self.assertLessEqual(len(session.history), 4)
+        self.assertEqual(service.state_store.knowledge_count(), 1)
+
+    def test_save_other_panel_round_trips_group_runtime_settings(self) -> None:
+        service, _ = build_default_service(AppConfig())
+
+        panel = service.save_other_panel(
+            {
+                "service_name": "openqqwaifu",
+                "assistant_name": "琉璃",
+                "bot_account_id": "3518944354",
+                "group_reply_requires_mention": False,
+                "image_command_prefix": "生图",
+                "image_command_aliases": ["生图", "draw"],
+                "ignore_prefixes": ["!", "/"],
+                "group_follow_up_window_seconds": 9,
+                "group_response_delay_seconds": 1.5,
+                "repeat_trigger_count": 3,
+                "multimodal_enabled": False,
+            }
+        )
+
+        self.assertFalse(panel["group_reply_requires_mention"])
+        self.assertEqual(panel["group_response_delay_seconds"], 1.5)
+        self.assertEqual(panel["repeat_trigger_count"], 3)
+        self.assertFalse(panel["multimodal_enabled"])
 
     def test_runtime_service_uses_capture_outbound_in_dry_run_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

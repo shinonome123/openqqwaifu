@@ -28,12 +28,14 @@ from waifu_standalone.models import InboundEvent, MessageSegment
 
 class _ActionCaptureHandler(BaseHTTPRequestHandler):
     requests: list[tuple[str, dict[str, object]]] = []
+    response_by_path: dict[str, dict[str, object]] = {}
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
         self.__class__.requests.append((self.path, payload))
-        body = json.dumps({"status": "ok"}).encode("utf-8")
+        response = self.__class__.response_by_path.get(self.path, {"status": "ok"})
+        body = json.dumps(response).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -47,6 +49,7 @@ class _ActionCaptureHandler(BaseHTTPRequestHandler):
 class ServerIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         _ActionCaptureHandler.requests = []
+        _ActionCaptureHandler.response_by_path = {}
         self.action_server = ThreadingHTTPServer(("127.0.0.1", 0), _ActionCaptureHandler)
         self.action_thread = threading.Thread(target=self.action_server.serve_forever, daemon=True)
         self.action_thread.start()
@@ -163,7 +166,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 with urllib.request.urlopen(f"http://{host}:{port}/", timeout=5) as response:
                     body = response.read().decode("utf-8")
 
-                self.assertIn("AI Girlfriend Console", body)
+                self.assertIn("openqqwaifu", body)
                 self.assertIn("/assets/js/main.js", body)
             finally:
                 server.shutdown()
@@ -251,6 +254,110 @@ class ServerIntegrationTests(unittest.TestCase):
                 _, sidecar_body = self._open_json(opener, f"http://{host}:{port}/api/panels/sidecar")
                 self.assertIn("inbound_host", sidecar_body)
                 self.assertIn("reverse_ws_url", sidecar_body)
+
+                _, other_body = self._open_json(opener, f"http://{host}:{port}/api/panels/other")
+                self.assertIn("group_reply_requires_mention", other_body)
+                self.assertIn("repeat_trigger_count", other_body)
+
+                _, memory_body = self._open_json(opener, f"http://{host}:{port}/api/panels/memory")
+                self.assertIn("knowledge_entries", memory_body)
+                self.assertIn("member_count", memory_body)
+
+                _, user_body = self._open_json(opener, f"http://{host}:{port}/api/panels/user")
+                self.assertIn("members", user_body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_directory_and_knowledge_endpoints_work_over_http(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_runtime_service(AppConfig(data_root=tmpdir))
+            api = HttpApi(service)
+            server = run_server(api, "127.0.0.1", 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                host, port = server.server_address
+                opener = self._build_auth_opener(host, port)
+
+                _, member_body = self._open_json(
+                    opener,
+                    f"http://{host}:{port}/api/users/directory/save",
+                    method="POST",
+                    payload={
+                        "group_id": "612475113",
+                        "user_id": "783190298",
+                        "qq_nickname": "tester",
+                        "preferred_name": "luna",
+                        "onboarding_status": "ready",
+                    },
+                )
+                self.assertEqual(member_body["member"]["preferred_name"], "luna")
+
+                _, knowledge_body = self._open_json(
+                    opener,
+                    f"http://{host}:{port}/api/knowledge/save",
+                    method="POST",
+                    payload={
+                        "scope_type": "member",
+                        "scope_id": "612475113:783190298",
+                        "memory_type": "preference",
+                        "summary": "luna likes cats",
+                        "tags": ["cats"],
+                        "confidence": 0.8,
+                    },
+                )
+                self.assertEqual(knowledge_body["entry"]["summary"], "luna likes cats")
+
+                _, memory_panel = self._open_json(opener, f"http://{host}:{port}/api/panels/memory")
+                self.assertEqual(memory_panel["knowledge_count"], 1)
+
+                _, user_panel = self._open_json(opener, f"http://{host}:{port}/api/panels/user")
+                self.assertEqual(user_panel["member_count"], 1)
+                self.assertEqual(user_panel["members"][0]["preferred_name"], "luna")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_group_member_sync_endpoint_uses_sidecar_action_api(self) -> None:
+        host, port = self.action_server.server_address
+        _ActionCaptureHandler.response_by_path["/get_group_member_list"] = {
+            "status": "ok",
+            "data": [
+                {"user_id": 783190298, "nickname": "tester", "card": "Luna"},
+                {"user_id": 10001, "nickname": "guest", "card": ""},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                qq_sidecar=QQSidecarConfig(
+                    dry_run=False,
+                    outbound_base_url=f"http://{host}:{port}",
+                ),
+            )
+            service, _ = build_runtime_service(config)
+            api = HttpApi(service)
+            server = run_server(api, "127.0.0.1", 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request_host, request_port = server.server_address
+                opener = self._build_auth_opener(request_host, request_port)
+                _, sync_body = self._open_json(
+                    opener,
+                    f"http://{request_host}:{request_port}/api/users/directory/sync",
+                    method="POST",
+                    payload={"group_id": "612475113"},
+                )
+
+                self.assertEqual(sync_body["count"], 2)
+                self.assertEqual(_ActionCaptureHandler.requests[-1][0], "/get_group_member_list")
+
+                _, user_panel = self._open_json(opener, f"http://{request_host}:{request_port}/api/panels/user")
+                self.assertEqual(user_panel["member_count"], 2)
             finally:
                 server.shutdown()
                 server.server_close()

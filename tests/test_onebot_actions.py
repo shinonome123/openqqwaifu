@@ -142,6 +142,17 @@ class OneBotActionsTests(unittest.TestCase):
             ["/get_version_info", "/get_login_info", "/get_status"],
         )
 
+    def test_group_member_helpers_use_expected_payloads(self) -> None:
+        self.client.get_group_member_list("612475113")
+        self.client.get_group_member_info("612475113", "783190298", no_cache=True)
+
+        self.assertEqual(_CaptureHandler.requests[0][0], "/get_group_member_list")
+        self.assertEqual(_CaptureHandler.requests[0][1]["group_id"], 612475113)
+        self.assertEqual(_CaptureHandler.requests[1][0], "/get_group_member_info")
+        self.assertEqual(_CaptureHandler.requests[1][1]["group_id"], 612475113)
+        self.assertEqual(_CaptureHandler.requests[1][1]["user_id"], 783190298)
+        self.assertTrue(_CaptureHandler.requests[1][1]["no_cache"])
+
 
 if __name__ == "__main__":
     unittest.main()

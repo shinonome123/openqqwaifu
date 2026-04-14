@@ -25,6 +25,8 @@ class InboundEvent:
     sender_id: str
     sender_name: str
     segments: list[MessageSegment]
+    message_id: str = ""
+    raw_message: str = ""
 
     @property
     def plain_text(self) -> str:
@@ -64,17 +66,25 @@ class InboundEvent:
         return "".join(parts).strip()
 
     def to_memory_text(self) -> str:
+        has_images = self.image_count > 0
         parts: list[str] = []
         for segment in self.segments:
             if segment.kind == "text" and segment.text:
                 parts.append(segment.text)
             elif segment.kind == "image":
-                parts.append("[图片]")
-            elif segment.kind == "mention":
+                continue
+            elif segment.kind == "mention" and not has_images:
                 display = segment.mention_display.strip() or segment.mention_target.strip()
                 if display:
                     parts.append(f"@{display}")
-        return "".join(parts).strip()
+        text = "".join(parts).strip()
+        if not has_images:
+            return text
+        count = self.image_count
+        image_label = "发送了图片" if count == 1 else f"发送了{count}张图片"
+        if text:
+            return f"{image_label}，并且说：“{text}”。"
+        return f"{image_label}。"
 
     def image_payloads(self) -> list[str]:
         payloads: list[str] = []

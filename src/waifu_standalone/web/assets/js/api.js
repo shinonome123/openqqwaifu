@@ -65,9 +65,13 @@ export const api = {
   saveAiPanel: (payload) => request("POST", "/api/panels/ai", payload),
 
   getMemoryPanel: () => request("GET", "/api/panels/memory"),
+  saveKnowledgeEntry: (payload) => request("POST", "/api/knowledge/save", payload),
   getAbilitiesPanel: () => request("GET", "/api/panels/abilities"),
   saveAbilitiesPanel: (payload) => request("POST", "/api/panels/abilities", payload),
   getUserPanel: () => request("GET", "/api/panels/user"),
+  saveDirectoryMember: (payload) => request("POST", "/api/users/directory/save", payload),
+  syncDirectoryGroup: (groupId) =>
+    request("POST", "/api/users/directory/sync", { group_id: groupId }),
 
   getSkillsPanel: () => request("GET", "/api/panels/skills"),
   getSidecarPanel: (refresh = false) =>

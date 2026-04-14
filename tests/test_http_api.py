@@ -137,6 +137,7 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(event.command_text("3518944354"), "draw: sunny sky")
         self.assertEqual(event.image_count, 1)
         self.assertEqual(event.image_payloads(), ["data:image/png;base64,aaaa"])
+        self.assertEqual(event.to_memory_text(), "发送了图片，并且说：“draw: sunny sky”。")
 
     def test_skill_listing_is_available(self) -> None:
         skills = self.api.list_skills()

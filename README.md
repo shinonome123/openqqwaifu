@@ -4,58 +4,107 @@
 
 # openqqwaifu
 
-`openqqwaifu` 是一个独立运行的 QQ Waifu 框架，目标是把原本耦合在宿主平台里的角色卡、记忆、技能、控制台和 OneBot/NapCat 对接能力拆出来，形成一套可以自行维护、扩展和部署的项目。
+`openqqwaifu` 是一个独立运行的 QQ Waifu 项目，目标是把原本依附在宿主里的角色卡、记忆、技能、控制台和 OneBot/NapCat 对接能力拆出来，形成一套可以单独部署、单独演进的运行时。
 
-当前这版已经不是纯脚手架，而是可运行的独立控制台：
+当前仓库已经不是空骨架，而是一个可运行的独立控制台和消息服务。
 
-- 支持 OneBot 风格入站事件与 NapCat/HTTP 出站发送
-- 支持本地登录、首次部署初始化管理员、控制台多标签页配置
-- 支持人物卡轮播、私聊卡/群聊卡表单化编辑、立绘生成与绑定
-- 支持短期记忆、长期记忆归档、会话查看与修改
-- 支持技能系统、工具分发、Skill Pack 导入导出与远程技能源
-- 支持联网搜索、思维分析、生图命令和 QQ 机器人运行链路
+## 当前已实现
 
-## 项目定位
+### 1. 独立控制台
 
-这不是一个“只给 LangBot 做插件”的仓库，而是一个准备独立发展的 `QQ Waifu runtime + control plane`：
+- 本地账号登录和首次管理员初始化
+- 总览、人物卡、个人用户、AI 接入、记忆、能力、技能、NapCat、事件、高级页面
+- 人物卡轮播、结构化编辑、切换动效和立绘工位
 
-- `cells`：模型接入、角色卡、技能、市场、工具与配置单元
-- `organs`：记忆与思维相关的编排
-- `systems`：情绪、搜索等系统级能力
-- `gateways`：OneBot/NapCat 边界与消息发送
-- `web`：本地控制台前端
+### 2. OneBot / NapCat 接入
 
-## 当前能力
+- 支持 OneBot 风格入站事件
+- 支持通过 NapCat HTTP API 发送群聊和私聊消息
+- 支持 sidecar 连通性检查
+- 支持群成员同步接口，直接从 QQ sidecar 拉取当前群成员列表
 
-### 控制台
+### 3. 记忆系统第一阶段
 
-- 本地用户名/密码登录
-- 首次部署初始化管理员
-- 总览、人物卡、用户、AI 接入、记忆、能力、技能、NapCat、事件、高级面板
-- 品牌 logo 与主题切换
+当前记忆已经拆成三层：
 
-### 人物卡
+- `session_history`
+  - 原始会话和短期上下文
+- `user_directory`
+  - 结构化成员档案
+  - `group_id / user_id / qq_nickname / group_card / preferred_name / onboarding_status / profile_summary`
+- `knowledge_base`
+  - 长期知识条目
+  - `scope_type / scope_id / memory_type / summary / tags / confidence / source_message_ids`
 
-- 人物卡轮播与启用切换
-- 私聊卡 / 群聊卡分离
-- 表单化编辑，不要求用户直接写 YAML
-- 立绘工位：根据人物卡信息调用已接入的生图模型生成角色立绘
+实现方式：
 
-### 智能能力
+- 运行时支持内存版和 SQLite 版双存储
+- 前端可以直接查看和编辑成员库、知识库
+- 长期摘要会写入知识库
+- 回复时会同时召回会话长期记忆和知识库条目
 
-- LLM 回复链
-- 生图链
-- 联网搜索
-- 思维分析
-- 长期记忆归档与召回
-- 会话偏好称呼与群成员信息记录
+### 4. 首版成员 onboarding
 
-### 技能生态
+当前已接入最小可用流程：
 
-- Markdown Skill
-- Tool dispatch
-- Skill Pack 导入 / 导出
-- 远程 Skill Source / Marketplace 检索
+1. 群成员可以手动同步进成员库
+2. 某个成员第一次 `@` 机器人且没有稳定称呼时
+3. 机器人会先问一句：`What should I call you?`
+4. 用户下一条消息会写入成员库的 `preferred_name`
+5. 后续称呼优先从成员库读取，不再混用长期记忆里的称呼
+
+这一步的目的，是先把“称呼”和“长期知识”彻底分开。
+
+## 当前架构
+
+```text
+QQ Client
+   |
+   v
+NapCat / OneBot
+   |
+   +--> /onebot/events
+            |
+            v
+      message router / session manager
+            |
+            +--> session_history
+            +--> user_directory
+            +--> knowledge_base
+            |
+            v
+      generator / reply pipeline
+            |
+            v
+      NapCat HTTP API
+```
+
+关键边界：
+
+- 模型可以读取 `user_directory` 和 `knowledge_base`
+- 模型可以通过提取流程写 `knowledge_base`
+- 模型不应直接改 `preferred_name`
+- `preferred_name` 只能来自成员同步、onboarding 或后台人工修改
+
+## 目录结构
+
+```text
+src/waifu_standalone/
+  app.py                    # 运行时组装与主服务逻辑
+  http_api.py               # HTTP API / OneBot 入口
+  state_store.py            # user_directory + knowledge_base 存储
+  gateways/onebot_actions.py
+  organs/                   # memory / thoughts
+  systems/                  # emotions / searching
+  web/                      # 控制台前端
+
+tests/
+  test_app.py
+  test_http_api.py
+  test_onebot_actions.py
+  test_server_integration.py
+  test_state_store.py
+```
 
 ## 快速开始
 
@@ -75,68 +124,80 @@ python .\run_cli.py dump-config .\data\config.json
 
 ### 3. 启动服务
 
-默认配置下会以 `dry_run=true` 运行，也就是：
-
-- 接收入站事件
-- 在内存中记录出站消息
-- 不直接向 QQ 侧车发送真实消息
+默认是 `dry_run=true`，也就是服务会处理消息，但不会真实向 QQ 发出消息。
 
 ```powershell
 python .\run_cli.py serve --config .\data\config.json
 ```
 
-### 4. 打开控制台
+启动后访问：
 
-服务启动后，直接访问配置中的 HTTP 地址。首次部署会要求先创建管理员账号。
+- [http://127.0.0.1:8080/](http://127.0.0.1:8080/)
+
+首次进入会先要求创建管理员账号。
 
 ## NapCat / OneBot 对接
 
-本项目默认推荐把协议层交给 NapCat，业务层留在 `openqqwaifu`：
+推荐把协议层交给 NapCat，业务层留在 `openqqwaifu`：
 
 ```text
 QQ Client
   |
   v
 NapCat
-  |  \
-  |   \-- HTTP API -> send_group_msg / send_private_msg
+  | \
+  |  \--> HTTP API -> send_group_msg / send_private_msg
   |
-  +------ HTTP event push -> openqqwaifu /onebot/events
+  +-----> HTTP event push -> openqqwaifu /onebot/events
 ```
 
-本地检查 NapCat 侧车连通性：
+检查 sidecar：
 
 ```powershell
 python .\run_cli.py check-sidecar --config .\examples\config.napcat.local.json
 ```
 
-使用 Docker Compose：
+如果使用 Docker：
 
 ```powershell
 docker compose -f .\compose.napcat.yml up --build
 ```
 
-详细说明见 [docs/NAPCAT_INTEGRATION.md](./docs/NAPCAT_INTEGRATION.md)。
+## 已有数据迁移
 
-## 导入已有 Waifu 数据
-
-如果你已经有运行中的 Waifu 数据目录，可以直接迁入会话与配置：
+如果你手上已经有旧版 Waifu 数据目录，可以把会话和部分配置导入进来：
 
 ```powershell
 python .\run_cli.py import-waifu --waifu-root C:\path\to\Typer_Body__Waifu! --store-root .\data\sessions
 ```
 
-## 适合谁
+## 当前适合做什么
 
-`openqqwaifu` 适合这几类场景：
+这个仓库现在适合：
 
-- 想把 QQ Waifu 从原宿主平台里独立出来
-- 想自己维护人物卡、技能和控制台
-- 想继续扩展“Skill + Tool + Memory + Image”生态
-- 想把 NapCat / OneBot 作为协议边界，减少上层业务耦合
+- 作为独立 `QQ Waifu runtime + control plane` 的主线继续开发
+- 用 NapCat / OneBot 做 QQ 协议边界
+- 在前端直接管理角色卡、成员库和知识库
+- 继续把线上 `langbot + waifu` 的核心运行时能力迁过来
 
-## 当前状态
+## 下一步
 
-当前仓库已经可以作为独立版主线继续推进，但它仍处在快速迭代阶段。接口、配置字段和控制台细节还会继续收敛。
+当前最值得继续补的是两块：
 
-如果你准备直接用于现网，请先根据自己的模型接入、NapCat 环境和安全策略做一轮配置审查。
+1. 自动群成员同步
+   - 基于 NapCat 的群成员事件和群成员列表接口
+2. 模型驱动的结构化知识提取
+   - 自动把稳定事实、偏好、事件写入 `knowledge_base`
+
+然后再继续往下做：
+
+- `memory_graph`
+- `proactive / events`
+- `value_game`
+- `narrator`
+
+## 相关文档
+
+- [docs/NAPCAT_INTEGRATION.md](./docs/NAPCAT_INTEGRATION.md)
+- [docs/MEMORY_SYSTEM_PLAN.md](./docs/MEMORY_SYSTEM_PLAN.md)
+- [docs/MIGRATION_GAP_ANALYSIS.md](./docs/MIGRATION_GAP_ANALYSIS.md)

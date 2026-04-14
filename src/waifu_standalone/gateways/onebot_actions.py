@@ -45,6 +45,19 @@ class OneBotActionClient:
     def get_version_info(self) -> dict[str, object]:
         return self.post_action("get_version_info", {})
 
+    def get_group_member_list(self, group_id: int | str) -> dict[str, object]:
+        return self.post_action("get_group_member_list", {"group_id": _coerce_target_id(group_id)})
+
+    def get_group_member_info(self, group_id: int | str, user_id: int | str, *, no_cache: bool = False) -> dict[str, object]:
+        return self.post_action(
+            "get_group_member_info",
+            {
+                "group_id": _coerce_target_id(group_id),
+                "user_id": _coerce_target_id(user_id),
+                "no_cache": bool(no_cache),
+            },
+        )
+
 
 class OneBotHttpOutboundPort:
     def __init__(self, client: OneBotActionClient):
@@ -68,7 +81,11 @@ class OneBotHttpOutboundPort:
         return segments
 
     def _coerce_target_id(self, launcher_id: str) -> int | str:
-        try:
-            return int(launcher_id)
-        except ValueError:
-            return launcher_id
+        return _coerce_target_id(launcher_id)
+
+
+def _coerce_target_id(value: int | str) -> int | str:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return str(value)
