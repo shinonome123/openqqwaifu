@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+data/*
+!data/.gitkeep
+
+napcat/*
+!napcat/.gitkeep
+napcat/config/*
+!napcat/config/.gitkeep
+napcat/qq/*
+!napcat/qq/.gitkeep
+

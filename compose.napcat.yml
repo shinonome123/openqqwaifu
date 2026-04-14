@@ -1,0 +1,27 @@
+services:
+  waifu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: waifu-standalone
+    command: ["python", "run_cli.py", "serve", "--config", "/app/examples/config.napcat.compose.json"]
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      - napcat
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    environment:
+      ACCOUNT: "${ACCOUNT}"
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+      - "6099:6099"
+    volumes:
+      - ./napcat/qq:/app/.config/QQ
+      - ./napcat/config:/app/napcat/config
+    restart: unless-stopped

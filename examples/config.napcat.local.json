@@ -1,0 +1,16 @@
+{
+  "service_name": "waifu-standalone",
+  "image_command_prefix": "draw",
+  "data_root": "data",
+  "qq_sidecar": {
+    "mode": "onebot-http",
+    "adapter_name": "napcat",
+    "inbound_host": "127.0.0.1",
+    "inbound_port": 8080,
+    "outbound_base_url": "http://127.0.0.1:3000",
+    "outbound_timeout_seconds": 10.0,
+    "access_token": "",
+    "reverse_ws_url": "ws://127.0.0.1:3001/onebot/v11/ws",
+    "dry_run": false
+  }
+}
