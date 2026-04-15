@@ -625,13 +625,124 @@
 .character-shared-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 14px;
+  gap: 6px 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
 }
 
-.character-editor-columns {
+.character-shared-grid .field-row {
+  grid-template-columns: 140px minmax(0, 1fr);
+  padding: 6px 0;
+  border-bottom: none;
+  align-items: start;
+}
+
+.character-shared-grid .field-label {
+  padding-top: 8px;
+}
+
+@media (max-width: 720px) {
+  .character-shared-grid .field-row {
+    grid-template-columns: 1fr;
+  }
+  .character-shared-grid .field-label {
+    padding-top: 0;
+  }
+}
+
+.variant-matrix {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  grid-template-columns: 180px minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 18px;
+  row-gap: 14px;
+  align-items: start;
+  padding-top: 4px;
+}
+
+.variant-matrix-corner {
+  border-bottom: 1px solid var(--border);
+}
+
+.variant-matrix-head-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.variant-matrix-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+  letter-spacing: -0.005em;
+}
+
+.variant-matrix-subtitle {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.variant-matrix-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+}
+
+.variant-matrix-label-text {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-strong);
+  line-height: 1.4;
+}
+
+.variant-matrix-label-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.variant-matrix-cell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.variant-matrix-cell textarea {
+  width: 100%;
+  min-height: 0;
+}
+
+.variant-matrix-cell-label {
+  display: none;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted-strong);
+  margin-bottom: 4px;
+}
+
+@media (max-width: 900px) {
+  .variant-matrix {
+    grid-template-columns: 1fr;
+    row-gap: 10px;
+  }
+
+  .variant-matrix-corner,
+  .variant-matrix-head-cell {
+    display: none;
+  }
+
+  .variant-matrix-label {
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .variant-matrix-cell-label {
+    display: block;
+  }
 }
 
 .character-portrait-frame {
@@ -714,8 +825,7 @@
 }
 
 @media (max-width: 840px) {
-  .character-shared-grid,
-  .character-editor-columns {
+  .character-shared-grid {
     grid-template-columns: 1fr;
   }
 
