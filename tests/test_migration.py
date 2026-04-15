@@ -114,6 +114,52 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 importer.import_launcher("612475113", "weird")
 
+    def test_importer_handles_malformed_json_memory_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            waifu_root = Path(tmpdir) / "waifu"
+            data_dir = waifu_root / "data"
+            config_dir = data_dir / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "waifu.yaml").write_text("character: \"default\"\n", encoding="utf-8")
+            (data_dir / "short_term_memory_612475113.json").write_text("{broken", encoding="utf-8")
+            (data_dir / "memories_612475113.json").write_text("{broken", encoding="utf-8")
+
+            store = FileMemoryStore(Path(tmpdir) / "sessions")
+            importer = WaifuDataImporter(store, waifu_root)
+
+            result = importer.import_launcher("612475113", "group")
+
+            self.assertTrue(result.imported)
+            loaded = store.load("612475113", "group")
+            self.assertEqual(loaded.history, [])
+            self.assertEqual(loaded.metadata.get("long_term_memory", []), [])
+
+    def test_importer_handles_unexpected_json_shapes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            waifu_root = Path(tmpdir) / "waifu"
+            data_dir = waifu_root / "data"
+            config_dir = data_dir / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "waifu.yaml").write_text("character: \"default\"\n", encoding="utf-8")
+            (data_dir / "short_term_memory_612475113.json").write_text(
+                json.dumps({"history": ["bad shape"]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (data_dir / "memories_612475113.json").write_text(
+                json.dumps(["bad shape"], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            store = FileMemoryStore(Path(tmpdir) / "sessions")
+            importer = WaifuDataImporter(store, waifu_root)
+
+            result = importer.import_launcher("612475113", "group")
+
+            self.assertTrue(result.imported)
+            loaded = store.load("612475113", "group")
+            self.assertEqual(loaded.history, [])
+            self.assertEqual(loaded.metadata.get("long_term_memory", []), [])
+
 
 if __name__ == "__main__":
     unittest.main()

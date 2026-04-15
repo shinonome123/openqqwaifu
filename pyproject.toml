@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openqqwaifu"
 version = "0.1.0"
-description = "openqqwaifu：独立运行的 QQ Waifu 控制台与 OneBot/NapCat 机器人框架。"
+description = "openqqwaifu: 独立运行的 QQ Waifu 控制台与 OneBot/NapCat 运行时"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

@@ -37,6 +37,7 @@ export function mount(root) {
     container.appendChild(header());
     container.appendChild(llmCard());
     container.appendChild(imageCard());
+    container.appendChild(embeddingCard());
   }
 
   function header() {
@@ -61,6 +62,7 @@ export function mount(root) {
       await api.saveAiPanel({
         llm: state.llm,
         image_generation: state.image_generation,
+        embedding: state.embedding,
       });
       toastOk(t("actions.savedOk"));
       load();
@@ -75,6 +77,9 @@ export function mount(root) {
 
   function llmCard() {
     const llm = state.llm || {};
+    const backend = llm.backend || "dify";
+    const modelOptions = llmModelOptions(backend);
+    const presetValue = resolveModelPresetValue(llm.model || "", modelOptions);
     return card({
       title: t("ai.llm.title"),
       subtitle: t("ai.llm.desc"),
@@ -97,14 +102,40 @@ export function mount(root) {
         fieldRow({
           label: t("ai.field.backend"),
           control: select({
-            value: llm.backend || "dify",
+            value: backend,
             options: [
               { value: "dify", label: "Dify" },
               { value: "openai", label: "OpenAI-compatible" },
               { value: "claude", label: "Anthropic" },
               { value: "custom", label: "Custom" },
             ],
-            onChange: (v) => patch("llm", { backend: v }),
+            onChange: (v) => {
+              patch("llm", { backend: v });
+              render();
+            },
+          }),
+        }),
+        fieldRow({
+          label: t("ai.field.modelPreset"),
+          hint: t("ai.field.modelPreset.hint"),
+          control: select({
+            value: presetValue,
+            options: modelOptions,
+            onChange: (v) => {
+              if (v !== "__custom__") {
+                patch("llm", { model: v });
+              }
+              render();
+            },
+          }),
+        }),
+        fieldRow({
+          label: t("ai.field.model"),
+          hint: t("ai.field.model.hint"),
+          control: textInput({
+            value: llm.model || "",
+            placeholder: llmModelPlaceholder(backend),
+            onChange: (v) => patch("llm", { model: v.trim() }),
           }),
         }),
         fieldRow({
@@ -123,18 +154,22 @@ export function mount(root) {
             onChange: (v) => patch("llm", { api_key: v }),
           }),
         }),
-        fieldRow({
-          label: t("ai.field.appType"),
-          control: select({
-            value: llm.app_type || "chat",
-            options: [
-              { value: "chat", label: "chat" },
-              { value: "completion", label: "completion" },
-              { value: "workflow", label: "workflow" },
-            ],
-            onChange: (v) => patch("llm", { app_type: v }),
-          }),
-        }),
+        ...(backend === "dify"
+          ? [
+              fieldRow({
+                label: t("ai.field.appType"),
+                control: select({
+                  value: llm.app_type || "chat",
+                  options: [
+                    { value: "chat", label: "chat" },
+                    { value: "completion", label: "completion" },
+                    { value: "workflow", label: "workflow" },
+                  ],
+                  onChange: (v) => patch("llm", { app_type: v }),
+                }),
+              }),
+            ]
+          : []),
         fieldRow({
           label: t("ai.field.timeout"),
           control: numberInput({
@@ -238,6 +273,74 @@ export function mount(root) {
     });
   }
 
+  function embeddingCard() {
+    const embedding = state.embedding || {};
+    return card({
+      title: t("ai.embedding.title"),
+      subtitle: t("ai.embedding.desc"),
+      actions: [
+        el("button", {
+          type: "button",
+          class: "btn is-sm",
+          text: t("common.test"),
+          onClick: () => doTest("embedding", state.embedding?.base_url, state.embedding?.api_key),
+        }),
+      ],
+      body: [
+        fieldRow({
+          label: t("ai.field.enabled"),
+          control: switchControl({
+            checked: !!embedding.enabled,
+            onChange: (v) => patch("embedding", { enabled: v }),
+          }),
+        }),
+        fieldRow({
+          label: t("ai.field.backend"),
+          control: select({
+            value: embedding.backend || "openai",
+            options: [
+              { value: "openai", label: "OpenAI-compatible" },
+              { value: "custom", label: "Custom" },
+            ],
+            onChange: (v) => patch("embedding", { backend: v }),
+          }),
+        }),
+        fieldRow({
+          label: t("ai.field.baseUrl"),
+          control: textInput({
+            value: embedding.base_url || "",
+            placeholder: "https://api.example.com/v1",
+            onChange: (v) => patch("embedding", { base_url: v }),
+          }),
+        }),
+        fieldRow({
+          label: t("ai.field.apiKey"),
+          control: textInput({
+            type: "password",
+            value: embedding.api_key || "",
+            onChange: (v) => patch("embedding", { api_key: v }),
+          }),
+        }),
+        fieldRow({
+          label: t("ai.field.model"),
+          control: textInput({
+            value: embedding.model || "",
+            onChange: (v) => patch("embedding", { model: v }),
+          }),
+        }),
+        fieldRow({
+          label: t("ai.field.timeout"),
+          control: numberInput({
+            value: Number(embedding.timeout_seconds || 30),
+            min: 1,
+            max: 300,
+            onChange: (v) => patch("embedding", { timeout_seconds: v }),
+          }),
+        }),
+      ],
+    });
+  }
+
   async function doTest(kind, baseUrl, apiKey) {
     if (!baseUrl) {
       toastError(t("ai.test.fail", { msg: "base_url is empty" }));
@@ -263,4 +366,50 @@ export function mount(root) {
     stopped = true;
     if (unsubLang) unsubLang();
   };
+}
+
+function llmModelOptions(backend) {
+  const presets = {
+    dify: [
+      { value: "", label: t("ai.modelPreset.appDefault") },
+      { value: "__custom__", label: t("ai.modelPreset.custom") },
+    ],
+    openai: [
+      { value: "gpt-4.1-mini", label: "gpt-4.1-mini" },
+      { value: "gpt-4.1", label: "gpt-4.1" },
+      { value: "gpt-4o-mini", label: "gpt-4o-mini" },
+      { value: "gpt-4o", label: "gpt-4o" },
+      { value: "o4-mini", label: "o4-mini" },
+      { value: "__custom__", label: t("ai.modelPreset.custom") },
+    ],
+    claude: [
+      { value: "claude-sonnet-4-0", label: "claude-sonnet-4-0" },
+      { value: "claude-3-7-sonnet-latest", label: "claude-3-7-sonnet-latest" },
+      { value: "claude-3-5-haiku-latest", label: "claude-3-5-haiku-latest" },
+      { value: "__custom__", label: t("ai.modelPreset.custom") },
+    ],
+    custom: [
+      { value: "grok-3-mini", label: "grok-3-mini" },
+      { value: "grok-3", label: "grok-3" },
+      { value: "gpt-4.1-mini", label: "gpt-4.1-mini" },
+      { value: "claude-sonnet-4-0", label: "claude-sonnet-4-0" },
+      { value: "__custom__", label: t("ai.modelPreset.custom") },
+    ],
+  };
+  return presets[backend] || presets.custom;
+}
+
+function resolveModelPresetValue(model, options) {
+  const current = String(model || "").trim();
+  return options.some((item) => item.value === current) ? current : "__custom__";
+}
+
+function llmModelPlaceholder(backend) {
+  const placeholders = {
+    dify: "Optional override model name",
+    openai: "gpt-4.1-mini",
+    claude: "claude-sonnet-4-0",
+    custom: "grok-3-mini",
+  };
+  return placeholders[backend] || placeholders.custom;
 }

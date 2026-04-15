@@ -12,8 +12,12 @@ class QQSidecarConfig:
     outbound_base_url: str = "http://127.0.0.1:3000"
     outbound_timeout_seconds: float = 10.0
     access_token: str = ""
+    webui_base_url: str = "http://127.0.0.1:6099"
+    webui_api_prefix: str = "/api"
+    webui_timeout_seconds: float = 10.0
+    webui_token: str = ""
     reverse_ws_url: str = "ws://127.0.0.1:3001/onebot/v11/ws"
-    dry_run: bool = True
+    dry_run: bool = False
 
 
 @dataclass(slots=True)
@@ -22,6 +26,7 @@ class LLMConfig:
     backend: str = "dify"
     base_url: str = ""
     api_key: str = ""
+    model: str = ""
     app_type: str = "chat"
     timeout_seconds: float = 45.0
 
@@ -36,6 +41,16 @@ class ImageGenerationConfig:
     response_format: str = "b64_json"
     aspect_ratio: str = "1:1"
     resolution: str = ""
+
+
+@dataclass(slots=True)
+class EmbeddingConfig:
+    enabled: bool = False
+    backend: str = "openai"
+    base_url: str = ""
+    api_key: str = ""
+    model: str = "text-embedding-3-small"
+    timeout_seconds: float = 30.0
 
 
 @dataclass(slots=True)
@@ -79,9 +94,22 @@ class AppConfig:
     thinking_mode: bool = True
     conversation_analysis: bool = True
     summarization_mode: bool = False
+    event_mode: bool = True
+    event_buffer_limit: int = 120
+    narrator_mode: bool = True
+    narrator_style: str = "subtle"
+    narrator_detail_level: int = 2
+    value_game_mode: bool = True
+    value_game_reply_bonus: float = 0.08
+    memory_graph_mode: bool = True
+    memory_graph_limit: int = 8
+    proactive_mode: bool = False
+    proactive_inactive_hours: float = 6.0
+    proactive_candidate_limit: int = 6
+    proactive_min_affinity: float = 0.12
     image_command_prefix: str = "生图"
-    image_command_aliases: list[str] = field(default_factory=lambda: ["生图", "draw"])
-    ignore_prefixes: list[str] = field(default_factory=lambda: ["!", "！", "/"])
+    image_command_aliases: list[str] = field(default_factory=lambda: ["draw"])
+    ignore_prefixes: list[str] = field(default_factory=lambda: ["!", "？", "/"])
     group_follow_up_window_seconds: float = 5.0
     group_response_delay_seconds: float = 0.0
     repeat_trigger_count: int = 0
@@ -94,5 +122,6 @@ class AppConfig:
     data_root: str = "data"
     llm: LLMConfig = field(default_factory=LLMConfig)
     image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     marketplace: MarketplaceConfig = field(default_factory=MarketplaceConfig)
     qq_sidecar: QQSidecarConfig = field(default_factory=QQSidecarConfig)

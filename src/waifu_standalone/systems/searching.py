@@ -77,6 +77,10 @@ class SearchDecider:
         "多少人民币",
     )
 
+    _CACHE_MAX_SIZE = 128
+    _CACHE_TTL_SECONDS = 300.0
+    _CACHE_FAILURE_TTL_SECONDS = 60.0
+
     def __init__(
         self,
         config: AppConfig,
@@ -107,7 +111,11 @@ class SearchDecider:
             return SearchContext()
         cached = self._cache.get(query)
         if cached is not None:
-            return cached
+            is_failure = not cached.results
+            ttl = self._CACHE_FAILURE_TTL_SECONDS if is_failure else self._CACHE_TTL_SECONDS
+            if time.time() - cached.fetched_at < ttl:
+                return cached
+            del self._cache[query]
         results = self._safe_fetch(query)
         if not results:
             context = SearchContext(
@@ -117,7 +125,7 @@ class SearchDecider:
                 fetched_at=time.time(),
                 reason=f"{reason}:no-results",
             )
-            self._cache[query] = context
+            self._cache_put(query, context)
             return context
         first = results[0]
         summary = f"{first.title}：{first.snippet}".strip("：")
@@ -128,7 +136,7 @@ class SearchDecider:
             fetched_at=time.time(),
             reason=reason,
         )
-        self._cache[query] = context
+        self._cache_put(query, context)
         return context
 
     def build_hint(self, event: InboundEvent) -> str:
@@ -136,6 +144,12 @@ class SearchDecider:
 
     def cache_size(self) -> int:
         return len(self._cache)
+
+    def _cache_put(self, query: str, context: SearchContext) -> None:
+        if len(self._cache) >= self._CACHE_MAX_SIZE:
+            oldest_key = min(self._cache, key=lambda k: self._cache[k].fetched_at)
+            del self._cache[oldest_key]
+        self._cache[query] = context
 
     def _safe_fetch(self, query: str) -> list[SearchResult]:
         try:

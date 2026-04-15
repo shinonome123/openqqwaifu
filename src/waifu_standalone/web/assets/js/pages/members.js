@@ -141,6 +141,7 @@ export function mount(root) {
               el("div", { class: "session-id", text: `${member.group_id || "person"}:${member.user_id}` }),
             ]),
             el("td", {}, [chip({ label: member.onboarding_status || "new", variant: member.preferred_name ? "ok" : "outline" })]),
+            el("td", { class: "session-meta", text: `${Number(member.affinity_score || 0).toFixed(2)} / ${bondStage(member.affinity_score)}` }),
             el("td", { class: "session-meta", text: formatDateTime(member.last_seen_at) }),
           ],
         ),
@@ -153,6 +154,7 @@ export function mount(root) {
               el("tr", {}, [
                 el("th", { text: t("user.directory.member") }),
                 el("th", { text: t("user.directory.status") }),
+                el("th", { text: t("user.directory.affinity") }),
                 el("th", { text: t("user.directory.lastSeen") }),
               ]),
             ]),
@@ -265,6 +267,19 @@ export function mount(root) {
           }),
         }),
         fieldRow({
+          label: t("user.directory.affinity"),
+          hint: t("user.directory.affinityHint"),
+          control: numberInput({
+            value: Number(memberDraft.affinity_score || 0),
+            min: -1,
+            max: 1,
+            step: 0.01,
+            onChange: (value) => {
+              memberDraft.affinity_score = value;
+            },
+          }),
+        }),
+        fieldRow({
           label: t("user.directory.notesCount"),
           control: numberInput({
             value: Number(memberDraft.notes_count || 0),
@@ -276,6 +291,7 @@ export function mount(root) {
           }),
         }),
         el("div", { class: "user-meta" }, [
+          chip({ label: `${t("user.directory.bondStage")}: ${bondStage(memberDraft.affinity_score)}`, variant: "ok" }),
           chip({ label: `${t("user.directory.lastSeen")}: ${formatDateTime(memberDraft.last_seen_at)}`, variant: "outline" }),
           chip({ label: `${t("user.directory.lastAddressed")}: ${formatDateTime(memberDraft.last_addressed_at)}`, variant: "outline" }),
         ]),
@@ -302,4 +318,13 @@ function formatDateTime(value) {
 
 function memberKey(member) {
   return `${member?.group_id || ""}:${member?.user_id || ""}`;
+}
+
+function bondStage(score) {
+  const value = Number(score || 0);
+  if (value < 0.12) return "new";
+  if (value < 0.3) return "warming";
+  if (value < 0.55) return "familiar";
+  if (value < 0.8) return "close";
+  return "devoted";
 }

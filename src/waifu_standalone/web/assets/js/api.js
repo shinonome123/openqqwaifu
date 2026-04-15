@@ -51,6 +51,13 @@ export const api = {
   runtime: () => request("GET", "/api/runtime"),
   recentEvents: (limit = 50) =>
     request("GET", `/api/events/recent?limit=${encodeURIComponent(limit)}`),
+  behaviorEvents: (limit = 80, launcherType = "", launcherId = "") => {
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    if (launcherType) params.set("launcher_type", launcherType);
+    if (launcherId) params.set("launcher_id", launcherId);
+    return request("GET", `/api/events/behavior?${params.toString()}`);
+  },
 
   getCharacterPanel: (character = "") =>
     request(
@@ -60,6 +67,7 @@ export const api = {
         : "/api/panels/character",
     ),
   saveCharacterPanel: (payload) => request("POST", "/api/panels/character", payload),
+  previewCharacter: (payload) => request("POST", "/api/character/preview", payload),
 
   getAiPanel: () => request("GET", "/api/panels/ai"),
   saveAiPanel: (payload) => request("POST", "/api/panels/ai", payload),
@@ -68,6 +76,9 @@ export const api = {
   saveKnowledgeEntry: (payload) => request("POST", "/api/knowledge/save", payload),
   getAbilitiesPanel: () => request("GET", "/api/panels/abilities"),
   saveAbilitiesPanel: (payload) => request("POST", "/api/panels/abilities", payload),
+  getProactivePanel: (limit = 12) =>
+    request("GET", `/api/panels/proactive?limit=${encodeURIComponent(limit)}`),
+  generateProactiveDraft: (payload) => request("POST", "/api/proactive/draft", payload),
   getUserPanel: () => request("GET", "/api/panels/user"),
   saveDirectoryMember: (payload) => request("POST", "/api/users/directory/save", payload),
   syncDirectoryGroup: (groupId) =>
@@ -77,6 +88,12 @@ export const api = {
   getSidecarPanel: (refresh = false) =>
     request("GET", refresh ? "/api/panels/sidecar?refresh=1" : "/api/panels/sidecar"),
   saveSidecarPanel: (payload) => request("POST", "/api/panels/sidecar", payload),
+  getQqLoginPanel: (refresh = false) =>
+    request("GET", refresh ? "/api/panels/qq-login?refresh=1" : "/api/panels/qq-login"),
+  saveQqLoginPanel: (payload) => request("POST", "/api/panels/qq-login", payload),
+  refreshQqLoginPanel: () => request("POST", "/api/qq-login/refresh", {}),
+  qqLoginQrcodeImageUrl: (stamp = "") =>
+    `/api/qq-login/qrcode-image${stamp ? `?t=${encodeURIComponent(stamp)}` : ""}`,
 
   getOtherPanel: () => request("GET", "/api/panels/other"),
   saveOtherPanel: (payload) => request("POST", "/api/panels/other", payload),

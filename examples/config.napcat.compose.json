@@ -1,6 +1,8 @@
 {
-  "service_name": "waifu-standalone",
-  "image_command_prefix": "draw",
+  "service_name": "openqqwaifu",
+  "assistant_name": "琉璃",
+  "image_command_prefix": "生图",
+  "image_command_aliases": ["生图", "draw"],
   "data_root": "/app/data",
   "qq_sidecar": {
     "mode": "onebot-http",
@@ -10,6 +12,10 @@
     "outbound_base_url": "http://napcat:3000",
     "outbound_timeout_seconds": 10.0,
     "access_token": "",
+    "webui_base_url": "http://napcat:6099",
+    "webui_api_prefix": "/api",
+    "webui_timeout_seconds": 10.0,
+    "webui_token": "",
     "reverse_ws_url": "ws://napcat:3001/onebot/v11/ws",
     "dry_run": false
   }

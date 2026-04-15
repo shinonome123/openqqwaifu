@@ -48,7 +48,10 @@ class RequestTooLarge(ValueError):
 
 def parse_onebot_event(payload: dict[str, Any]) -> InboundEvent:
     launcher_type = "group" if payload.get("message_type") == "group" else "person"
-    launcher_id = str(payload.get("group_id") or payload.get("user_id") or "unknown")
+    if launcher_type == "group":
+        launcher_id = str(payload.get("group_id") or payload.get("user_id") or "unknown")
+    else:
+        launcher_id = str(payload.get("user_id") or "unknown")
     sender = payload.get("sender") or {}
     sender_id = str(sender.get("user_id") or payload.get("user_id") or "unknown")
     raw_message = str(payload.get("raw_message") or "")
@@ -168,6 +171,23 @@ class HttpApi:
     def recent_events(self, limit: int = 50) -> dict[str, Any]:
         return {"events": list(self.service.recent_events(limit=limit))}
 
+    def behavior_events(
+        self,
+        *,
+        limit: int = 80,
+        launcher_type: str = "",
+        launcher_id: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "events": list(
+                self.service.get_behavior_events(
+                    limit=limit,
+                    launcher_type=launcher_type,
+                    launcher_id=launcher_id,
+                )
+            )
+        }
+
     def runtime_stats(self) -> dict[str, Any]:
         return dict(self.service.runtime_stats())
 
@@ -175,8 +195,8 @@ class HttpApi:
         kind = str(payload.get("kind") or "").strip().lower()
         base_url = str(payload.get("base_url") or "").strip()
         api_key = str(payload.get("api_key") or "").strip()
-        if kind not in {"llm", "image"}:
-            raise ValueError("kind must be 'llm' or 'image'")
+        if kind not in {"llm", "image", "embedding"}:
+            raise ValueError("kind must be 'llm', 'image' or 'embedding'")
         if not base_url:
             raise ValueError("base_url is required")
         return _probe_http_endpoint(base_url, api_key)
@@ -253,6 +273,9 @@ class HttpApi:
     def get_character_portrait(self, character: str) -> tuple[bytes, str] | None:
         return self.service.get_character_portrait(character)
 
+    def preview_character_panel(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.service.preview_character_panel(payload))
+
     def get_ai_panel(self) -> dict[str, Any]:
         return dict(self.service.get_ai_panel())
 
@@ -275,6 +298,12 @@ class HttpApi:
     def save_abilities_panel(self, payload: dict[str, Any]) -> dict[str, Any]:
         return dict(self.service.save_abilities_panel(payload))
 
+    def get_proactive_panel(self, limit: int = 12) -> dict[str, Any]:
+        return dict(self.service.get_proactive_panel(limit=limit))
+
+    def generate_proactive_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.service.generate_proactive_draft(payload))
+
     def get_skills_panel(self) -> dict[str, Any]:
         return dict(self.service.get_skills_panel())
 
@@ -289,6 +318,18 @@ class HttpApi:
 
     def save_sidecar_panel(self, payload: dict[str, Any]) -> dict[str, Any]:
         return dict(self.service.save_sidecar_panel(payload))
+
+    def get_qq_login_panel(self, *, refresh: bool = False) -> dict[str, Any]:
+        return dict(self.service.get_qq_login_panel(refresh=refresh))
+
+    def save_qq_login_panel(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.service.save_qq_login_panel(payload))
+
+    def refresh_qq_login_panel(self) -> dict[str, Any]:
+        return dict(self.service.refresh_qq_login_panel())
+
+    def get_qq_login_qrcode_image(self) -> tuple[bytes, str] | None:
+        return self.service.get_qq_login_qrcode_image()
 
     def get_other_panel(self) -> dict[str, Any]:
         return dict(self.service.get_other_panel())
@@ -445,6 +486,29 @@ def make_handler(api: HttpApi):
                 self._write_json(HTTPStatus.OK, api.recent_events(limit=limit))
                 return
 
+            if parsed.path == "/api/events/behavior":
+                query = parse_qs(parsed.query, keep_blank_values=False)
+                limit = _coerce_limit(query.get("limit", ["80"])[0])
+                launcher_type = str(query.get("launcher_type", [""])[0] or "").strip()
+                launcher_id = str(query.get("launcher_id", [""])[0] or "").strip()
+                if launcher_type:
+                    try:
+                        launcher_type = _validate_launcher_type(launcher_type)
+                    except ValueError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                        return
+                if launcher_id:
+                    try:
+                        launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
+                    except ValueError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                        return
+                self._write_json(
+                    HTTPStatus.OK,
+                    api.behavior_events(limit=limit, launcher_type=launcher_type, launcher_id=launcher_id),
+                )
+                return
+
             if parsed.path == "/api/panels/character":
                 query = parse_qs(parsed.query, keep_blank_values=False)
                 character = query.get("character", [""])[0]
@@ -463,6 +527,12 @@ def make_handler(api: HttpApi):
                 self._write_json(HTTPStatus.OK, api.get_abilities_panel())
                 return
 
+            if parsed.path == "/api/panels/proactive":
+                query = parse_qs(parsed.query, keep_blank_values=False)
+                limit = _coerce_limit(query.get("limit", ["12"])[0])
+                self._write_json(HTTPStatus.OK, api.get_proactive_panel(limit=limit))
+                return
+
             if parsed.path == "/api/panels/skills":
                 self._write_json(HTTPStatus.OK, api.get_skills_panel())
                 return
@@ -471,6 +541,25 @@ def make_handler(api: HttpApi):
                 query = parse_qs(parsed.query, keep_blank_values=False)
                 refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
                 self._write_json(HTTPStatus.OK, api.get_sidecar_panel(refresh=refresh))
+                return
+
+            if parsed.path == "/api/panels/qq-login":
+                query = parse_qs(parsed.query, keep_blank_values=False)
+                refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
+                self._write_json(HTTPStatus.OK, api.get_qq_login_panel(refresh=refresh))
+                return
+
+            if parsed.path == "/api/qq-login/qrcode-image":
+                try:
+                    asset = api.get_qq_login_qrcode_image()
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return
+                if asset is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return
+                body, content_type = asset
+                self._write_bytes(HTTPStatus.OK, body, content_type)
                 return
 
             if parsed.path == "/api/panels/other":
@@ -647,6 +736,16 @@ def make_handler(api: HttpApi):
                 self._write_json(HTTPStatus.OK, api.save_character_panel(payload))
                 return
 
+            if parsed.path == "/api/character/preview":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                try:
+                    self._write_json(HTTPStatus.OK, api.preview_character_panel(payload))
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+
             if parsed.path == "/api/panels/ai":
                 payload = self._read_json_body()
                 if payload is None:
@@ -661,11 +760,36 @@ def make_handler(api: HttpApi):
                 self._write_json(HTTPStatus.OK, api.save_abilities_panel(payload))
                 return
 
+            if parsed.path == "/api/proactive/draft":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                try:
+                    self._write_json(HTTPStatus.OK, api.generate_proactive_draft(payload))
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+
             if parsed.path == "/api/panels/sidecar":
                 payload = self._read_json_body()
                 if payload is None:
                     return
                 self._write_json(HTTPStatus.OK, api.save_sidecar_panel(payload))
+                return
+
+            if parsed.path == "/api/panels/qq-login":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                self._write_json(HTTPStatus.OK, api.save_qq_login_panel(payload))
+                return
+
+            if parsed.path == "/api/qq-login/refresh":
+                self._read_json_body(allow_empty=True)
+                try:
+                    self._write_json(HTTPStatus.OK, api.refresh_qq_login_panel())
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                 return
 
             if parsed.path == "/api/panels/other":

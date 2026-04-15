@@ -3,24 +3,46 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: waifu-standalone
-    command: ["python", "run_cli.py", "serve", "--config", "/app/examples/config.napcat.compose.json"]
+    container_name: openqqwaifu
+    command: ["python", "run_cli.py", "serve", "--config", "/app/data/docker-compose-config.json"]
+    environment:
+      OPENQQWAIFU_DATA_ROOT: /app/data
+      OPENQQWAIFU_CONTAINER_HOSTNAME: openqqwaifu
+      OPENQQWAIFU_QQ_SIDECAR_CALLBACK_BASE_URL: http://openqqwaifu:8080
+      OPENQQWAIFU_QQ_SIDECAR_WEBUI_BASE_URL: http://napcat:6099
+      OPENQQWAIFU_QQ_SIDECAR_WEBUI_API_PREFIX: /api
+      OPENQQWAIFU_QQ_SIDECAR_WEBUI_TIMEOUT_SECONDS: ${OPENQQWAIFU_QQ_SIDECAR_WEBUI_TIMEOUT_SECONDS:-10}
+      OPENQQWAIFU_QQ_SIDECAR_WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN:-}
     volumes:
       - ./data:/app/data
+      - ./napcat/config:/app/napcat-sidecar/config
     ports:
-      - "8080:8080"
+      - "${OPENQQWAIFU_PORT:-8080}:8080"
+    restart: unless-stopped
     depends_on:
       - napcat
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).status == 200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   napcat:
     image: mlikiowa/napcat-docker:latest
     container_name: napcat
     environment:
-      ACCOUNT: "${ACCOUNT}"
+      ACCOUNT: "${ACCOUNT:-}"
     ports:
-      - "3000:3000"
-      - "3001:3001"
-      - "6099:6099"
+      - "${NAPCAT_HTTP_PORT:-3000}:3000"
+      - "${NAPCAT_WS_PORT:-3001}:3001"
+      - "${NAPCAT_WEBUI_PORT:-6099}:6099"
     volumes:
       - ./napcat/qq:/app/.config/QQ
       - ./napcat/config:/app/napcat/config

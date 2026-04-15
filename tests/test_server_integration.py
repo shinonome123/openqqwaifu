@@ -46,6 +46,13 @@ class _ActionCaptureHandler(BaseHTTPRequestHandler):
         return
 
 
+class _FakeChatClient:
+    enabled = True
+
+    def invoke(self, query: str, *, user: str = "waifu-user") -> str:
+        return "你好呀"
+
+
 class ServerIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         _ActionCaptureHandler.requests = []
@@ -98,11 +105,16 @@ class ServerIntegrationTests(unittest.TestCase):
             config = AppConfig(
                 data_root=tmpdir,
                 qq_sidecar=QQSidecarConfig(
-                    dry_run=False,
                     outbound_base_url=f"http://{host}:{port}",
                 ),
             )
+            config.llm.enabled = True
+            config.llm.backend = "openai"
+            config.llm.base_url = "http://127.0.0.1:1"
+            config.llm.api_key = "test-key"
+            config.llm.model = "test-model"
             service, _ = build_runtime_service(config)
+            service.generator._dify_client = _FakeChatClient()
             api = HttpApi(service)
             server = run_server(api, "127.0.0.1", 0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -175,7 +187,12 @@ class ServerIntegrationTests(unittest.TestCase):
 
     def test_dashboard_api_returns_runtime_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            service, _ = build_runtime_service(AppConfig(data_root=tmpdir))
+            service, _ = build_runtime_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    qq_sidecar=QQSidecarConfig(outbound_base_url=""),
+                )
+            )
             service.handle_event(
                 InboundEvent(
                     launcher_id="612475113",
@@ -197,7 +214,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 self.assertEqual(body["assistant_name"], "琉璃")
                 self.assertEqual(body["session_count"], 1)
                 self.assertEqual(body["recent_outbound_count"], 1)
-                self.assertEqual(body["tools"]["count"], 3)
+                self.assertEqual(body["tools"]["count"], 4)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -334,7 +351,6 @@ class ServerIntegrationTests(unittest.TestCase):
             config = AppConfig(
                 data_root=tmpdir,
                 qq_sidecar=QQSidecarConfig(
-                    dry_run=False,
                     outbound_base_url=f"http://{host}:{port}",
                 ),
             )
@@ -398,7 +414,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 host, port = server.server_address
                 opener = self._build_auth_opener(host, port)
                 _, tools = self._open_json(opener, f"http://{host}:{port}/api/tools")
-                self.assertEqual(tools["count"], 3)
+                self.assertEqual(tools["count"], 4)
 
                 _, pack_template = self._open_json(opener, f"http://{host}:{port}/api/skill-packs/template")
                 self.assertEqual(pack_template["format"], "waifu-skill-pack")
@@ -465,7 +481,12 @@ class ServerIntegrationTests(unittest.TestCase):
 
     def test_session_detail_endpoint_returns_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            service, _ = build_runtime_service(AppConfig(data_root=tmpdir))
+            service, _ = build_runtime_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    qq_sidecar=QQSidecarConfig(outbound_base_url=""),
+                )
+            )
             service.handle_event(
                 InboundEvent(
                     launcher_id="612475113",

@@ -21,6 +21,6 @@ class EmotionSensor:
             if any(keyword in text for keyword in keywords):
                 return state
 
-        if memory.preferred_name:
+        if len(memory.history) >= 4:
             return EmotionState(primary="trust", intensity=0.55)
         return EmotionState(primary="neutral", intensity=0.25)

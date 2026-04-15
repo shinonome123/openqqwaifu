@@ -145,10 +145,14 @@ class WaifuDataImporter:
             return []
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except OSError:
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
             return []
         history: list[str] = []
         for item in payload:
+            if not isinstance(item, dict):
+                continue
             role = str(item.get("role", "unknown"))
             content = str(item.get("content", "")).strip()
             history.append(f"{role}: {content}")
@@ -160,9 +164,14 @@ class WaifuDataImporter:
             return []
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except OSError:
+        except (OSError, json.JSONDecodeError):
             return []
-        return list(payload.get("long_term", []))
+        if not isinstance(payload, dict):
+            return []
+        raw_long_term = payload.get("long_term", [])
+        if not isinstance(raw_long_term, list):
+            return []
+        return [dict(item) for item in raw_long_term if isinstance(item, dict)]
 
     def _load_conversations(self, launcher_id: str) -> list[str]:
         path = self.waifu_root / "data" / f"conversations_{launcher_id}.log"

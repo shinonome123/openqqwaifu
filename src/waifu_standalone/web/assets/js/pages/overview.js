@@ -183,9 +183,9 @@ function renderProviders(dash) {
       providerRow(t("overview.provider.image"), img.enabled, img.ready, img.model || img.base_url || ""),
       providerRow(
         t("overview.provider.sidecar"),
-        true,
-        !sidecar.dry_run,
-        sidecar.dry_run ? t("overview.provider.dry") : t("overview.provider.live"),
+        !!sidecar.outbound_base_url,
+        !!sidecar.outbound_base_url,
+        sidecar.outbound_base_url || t("overview.provider.live"),
       ),
       providerRow(
         t("overview.provider.memory"),

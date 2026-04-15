@@ -8,6 +8,7 @@ import {
   numberInput,
   tagInput,
   select,
+  segmented,
   switchControl,
   chip,
   empty,
@@ -41,6 +42,8 @@ export function mount(root) {
   let saving = false;
   let loading = true;
   let dragStartX = null;
+  let previewing = false;
+  let preview = null;
 
   root.innerHTML = "";
   const container = el("div", { class: "page" });
@@ -62,6 +65,7 @@ export function mount(root) {
     const currentName = String(nextBundle?.character || "");
     const nextIndex = items.findIndex((item) => item.character === currentName);
     cursor = nextIndex >= 0 ? nextIndex : 0;
+    preview = syncPreviewState(preview, nextBundle);
   }
 
   async function loadAll(character = "") {
@@ -254,6 +258,94 @@ export function mount(root) {
     }
   }
 
+  function currentAssistantName() {
+    return String(editor?.shared?.assistant_name || bundle?.shared?.assistant_name || "Waifu");
+  }
+
+  function syncPreviewState(current, nextBundle) {
+    const shared = nextBundle?.shared || {};
+    const characterName = String(nextBundle?.character || "");
+    const defaultUserName = String(shared.user_name || "User");
+    if (!current || current.character !== characterName) {
+      return {
+        character: characterName,
+        launcher_type: "person",
+        user_name: defaultUserName,
+        message: "",
+        history: [],
+        analysis_hint: "",
+        llm_ready: false,
+      };
+    }
+    return {
+      ...current,
+      character: characterName,
+      user_name: current.user_name || defaultUserName,
+    };
+  }
+
+  function resetPreview({ keepIdentity = true } = {}) {
+    if (!preview) {
+      preview = syncPreviewState(null, bundle);
+      return;
+    }
+    preview = {
+      ...preview,
+      user_name: keepIdentity ? preview.user_name : String(editor?.shared?.user_name || "User"),
+      message: "",
+      history: [],
+      analysis_hint: "",
+    };
+  }
+
+  async function runPreview() {
+    if (!editor || previewing) return;
+    const message = String(preview?.message || "").trim();
+    if (!message) {
+      toastError(t("character.preview.messageRequired"));
+      return;
+    }
+    previewing = true;
+    render();
+    try {
+      const result = await api.previewCharacter({
+        character: editor.character,
+        launcher_type: preview.launcher_type,
+        user_name: preview.user_name,
+        message,
+        history: preview.history,
+        shared_fields: cloneShared(editor.shared),
+        person_fields: normalizeVariantFields(editor.person),
+        group_fields: normalizeVariantFields(editor.group),
+      });
+      if (stopped) return;
+      preview = {
+        ...preview,
+        user_name: result?.user_name || preview.user_name,
+        message: "",
+        history: Array.isArray(result?.transcript)
+          ? result.transcript.map((item) => ({
+              role: String(item?.role || "").trim() || "assistant",
+              text: String(item?.text || "").trim(),
+            })).filter((item) => item.text)
+          : [
+              ...preview.history,
+              { role: "user", text: message },
+              { role: "assistant", text: String(result?.reply_text || "").trim() },
+            ],
+        analysis_hint: String(result?.analysis_hint || "").trim(),
+        llm_ready: !!result?.llm_ready,
+      };
+    } catch (err) {
+      toastError(t("actions.saveFailed", { msg: err?.message || err }));
+    } finally {
+      if (!stopped) {
+        previewing = false;
+        render();
+      }
+    }
+  }
+
   function render() {
     container.innerHTML = "";
     container.appendChild(renderHeader());
@@ -266,10 +358,20 @@ export function mount(root) {
   }
 
   function renderHeader() {
+    const runtimeName = String(other?.service_name || "");
+    const configPath = String(other?.config_path || "");
+    const dataRoot = String(other?.data_root || "");
+    const activeCharacter = String(bundle?.current_character || "");
     return el("div", { class: "page-header" }, [
       el("div", { class: "page-header-text" }, [
         el("div", { class: "page-title", text: t("page.character.title") }),
         el("div", { class: "page-desc", text: t("page.character.desc") }),
+        el("div", { class: "row" }, [
+          runtimeName ? chip({ label: runtimeName, variant: "info" }) : null,
+          activeCharacter ? chip({ label: `live:${activeCharacter}`, variant: "ok" }) : null,
+          dataRoot ? chip({ label: dataRoot, variant: "outline" }) : null,
+          configPath ? chip({ label: configPath, variant: "outline" }) : null,
+        ]),
       ]),
       el("div", { class: "page-actions" }, [
         el("button", {
@@ -414,7 +516,7 @@ export function mount(root) {
         renderEditorCard(),
         renderRuntimeCard(),
       ]),
-      el("div", { class: "character-editor-side stack" }, [renderPortraitCard()]),
+      el("div", { class: "character-editor-side stack" }, [renderPreviewCard(), renderPortraitCard()]),
     ]);
   }
 
@@ -511,11 +613,112 @@ export function mount(root) {
     });
   }
 
+  function renderPreviewCard() {
+    if (!preview) {
+      preview = syncPreviewState(null, bundle);
+    }
+    const assistantName = currentAssistantName();
+    const transcript = Array.isArray(preview?.history) ? preview.history : [];
+    const transcriptBody = transcript.length
+      ? transcript.map((entry) => {
+          const role = String(entry?.role || "").trim().toLowerCase();
+          const text = String(entry?.text || "").trim();
+          if (!text) return null;
+          const isAssistant = role === "assistant";
+          return el("div", { class: `character-preview-line${isAssistant ? " is-assistant" : " is-user"}` }, [
+            el("div", { class: "character-preview-speaker", text: isAssistant ? assistantName : (preview.user_name || editor?.shared?.user_name || "User") }),
+            el("div", { class: "character-preview-bubble", text }),
+          ]);
+        }).filter(Boolean)
+      : [el("div", { class: "character-preview-empty", text: t("character.preview.empty") })];
+    const composer = textarea({
+      rows: 4,
+      value: preview.message,
+      placeholder: t("character.preview.messagePlaceholder"),
+      onInput: (value) => {
+        preview.message = value;
+      },
+    });
+    return card({
+      title: t("character.preview.title"),
+      subtitle: t("character.preview.desc"),
+      actions: [
+        chip({
+          label: preview.llm_ready ? t("character.preview.providerLive") : t("character.preview.providerFallback"),
+          variant: preview.llm_ready ? "info" : "outline",
+        }),
+      ],
+      body: [
+        fieldRow({
+          label: t("character.preview.mode"),
+          control: segmented({
+            value: preview.launcher_type,
+            options: [
+              { value: "person", label: t("character.preview.mode.person") },
+              { value: "group", label: t("character.preview.mode.group") },
+            ],
+            onChange: (value) => {
+              preview.launcher_type = value;
+              preview.history = [];
+              preview.analysis_hint = "";
+              render();
+            },
+          }),
+        }),
+        fieldRow({
+          label: t("character.preview.userName"),
+          hint: t("character.preview.userName.hint"),
+          control: textInput({
+            value: preview.user_name,
+            onInput: (value) => {
+              preview.user_name = value;
+            },
+          }),
+        }),
+        el("div", { class: "character-preview-transcript" }, transcriptBody),
+        preview.analysis_hint
+          ? el("div", { class: "character-preview-analysis" }, [
+              el("div", { class: "character-preview-analysis-label", text: t("character.preview.analysis") }),
+              el("div", { class: "character-preview-analysis-text", text: preview.analysis_hint }),
+            ])
+          : null,
+        fieldRow({
+          label: t("character.preview.message"),
+          hint: t("character.preview.message.hint"),
+          control: composer,
+        }),
+        el("div", { class: "character-preview-actions" }, [
+          el("button", {
+            type: "button",
+            class: "btn",
+            text: t("character.preview.clear"),
+            onClick: () => {
+              resetPreview();
+              render();
+            },
+            disabled: previewing || (!preview.history.length && !preview.message),
+          }),
+          el("button", {
+            type: "button",
+            class: "btn is-primary",
+            text: previewing ? t("character.preview.sending") : t("character.preview.send"),
+            onClick: runPreview,
+            disabled: previewing,
+          }),
+        ]),
+      ],
+    });
+  }
+
   function renderRuntimeCard() {
     return card({
       title: t("character.tab.pipeline"),
       subtitle: t("character.carousel.desc"),
       body: [
+        el("div", { class: "stack" }, [
+          chip({ label: t("character.runtime.note"), variant: "info" }),
+          el("div", { class: "page-desc", text: t("character.runtime.tip") }),
+        ]),
         fieldRow({ label: t("character.field.serviceName"), hint: t("character.field.serviceName.hint"), control: textInput({ value: other.service_name || "", onChange: (value) => { other.service_name = value; } }) }),
         fieldRow({ label: t("character.field.botId"), hint: t("character.field.botId.hint"), control: textInput({ value: other.bot_account_id || "", onChange: (value) => { other.bot_account_id = value.trim(); } }) }),
         fieldRow({

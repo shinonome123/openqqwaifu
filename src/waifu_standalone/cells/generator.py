@@ -21,6 +21,8 @@ class Generator:
         self._dify_client = DifyChatClient(
             base_url=config.llm.base_url,
             api_key=config.llm.api_key,
+            model=config.llm.model,
+            backend=config.llm.backend,
             timeout_seconds=config.llm.timeout_seconds,
             app_type=config.llm.app_type,
         )
@@ -56,10 +58,13 @@ class Generator:
         memory_hints: list[str],
         speaker_notes: list[str],
         active_skills: list[SkillSpec] | None = None,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+        allow_fallback: bool = True,
     ) -> str:
-        card = self._cards.load(event.launcher_type, session)
+        card = card_override or self._cards.load(event.launcher_type, session)
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
-        address = self._resolve_address(event, session, card)
+        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         active_skills = active_skills or []
         if self.llm_ready:
             prompt = self._build_analysis_query(
@@ -80,7 +85,9 @@ class Generator:
                     return self._clip(cleaned, limit=self.config.max_thinking_words)
             except DifyChatError:
                 pass
-        return self._fallback_analysis(event, latest_message, memory_hints, speaker_notes)
+        if allow_fallback:
+            return self._fallback_analysis(event, latest_message, memory_hints, speaker_notes)
+        return ""
 
     def generate_reply(
         self,
@@ -89,6 +96,8 @@ class Generator:
         emotion: EmotionState,
         *,
         assistant_name: str,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
         search_hint: str = "",
         search_context: str = "",
         conversation_view: str = "",
@@ -96,10 +105,11 @@ class Generator:
         speaker_notes: list[str] | None = None,
         analysis_hint: str = "",
         active_skills: list[SkillSpec] | None = None,
+        allow_fallback: bool = True,
     ) -> str:
-        card = self._cards.load(event.launcher_type, session)
+        card = card_override or self._cards.load(event.launcher_type, session)
         resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
-        address = self._resolve_address(event, session, card)
+        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
         memory_hints = memory_hints or []
         speaker_notes = speaker_notes or []
@@ -129,17 +139,19 @@ class Generator:
                     return cleaned
             except DifyChatError:
                 pass
-        return self._fallback_reply(
-            event,
-            session,
-            emotion,
-            card=card,
-            assistant_name=resolved_assistant_name,
-            address=address,
-            search_hint=search_hint,
-            memory_hints=memory_hints,
-            analysis_hint=analysis_hint,
-        )
+        if allow_fallback:
+            return self._fallback_reply(
+                event,
+                session,
+                emotion,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=address,
+                search_hint=search_hint,
+                memory_hints=memory_hints,
+                analysis_hint=analysis_hint,
+            )
+        return ""
 
     def summarize_history(
         self,
@@ -207,6 +219,51 @@ class Generator:
             except DifyChatError:
                 pass
         return f"{address}要的图片生成好了~是一个“{self._clip(prompt)}”呢。"
+
+    def generate_onboarding_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        stage: str,
+        candidate_name: str = "",
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+        allow_fallback: bool = True,
+    ) -> str:
+        card = card_override or self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        base_address = str(address_override or "").strip() or self._resolve_address(event, session, card)
+        latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
+        if self.llm_ready:
+            prompt = self._build_onboarding_query(
+                event,
+                session,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=base_address,
+                latest_message=latest_message,
+                stage=stage,
+                candidate_name=candidate_name,
+            )
+            try:
+                response = self._dify_client.invoke(
+                    prompt,
+                    user=f"onboarding-{stage}-{event.sender_id or 'waifu-user'}",
+                )
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return cleaned
+            except DifyChatError:
+                pass
+        if allow_fallback:
+            return self._fallback_onboarding_reply(
+                stage=stage,
+                address=base_address,
+                candidate_name=candidate_name,
+            )
+        return ""
 
     def _build_analysis_query(
         self,
@@ -284,6 +341,61 @@ class Generator:
             prompt_parts.append(skill_block)
         return "\n\n".join(part for part in prompt_parts if part.strip())
 
+    def _build_onboarding_query(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+        latest_message: str,
+        stage: str,
+        candidate_name: str,
+    ) -> str:
+        conversation_view = self._conversation_excerpt(session.history, assistant_name=assistant_name)
+        system_prompt = card.system_prompt(
+            launcher_type=event.launcher_type,
+            address=candidate_name or address,
+            memories=[],
+            emotion=EmotionState(),
+            search_hint="",
+            conversation_view=conversation_view,
+            speaker_notes=[],
+            latest_message=latest_message,
+        )
+        parts = [system_prompt, "[Onboarding]"]
+        if stage == "ask_name":
+            parts.extend(
+                [
+                    "你还不知道对方希望你如何称呼 ta。",
+                    f"对方当前显示昵称：{event.sender_name or address}",
+                    f"对方刚刚说：{latest_message or '（空）'}",
+                    "请用一句自然中文、保持角色语气，先接住对方的话，再问对方想让你怎么称呼 ta。",
+                    "不要输出英文，不要解释内部流程，不要说自己在 onboarding。",
+                ]
+            )
+        elif stage == "confirm_name":
+            parts.extend(
+                [
+                    f"对方刚刚明确告诉你，希望被称呼为：{candidate_name}",
+                    f"当前显示昵称：{event.sender_name or address}",
+                    "请用一句自然中文、保持角色语气，确认你记住了这个称呼。",
+                    "可以轻微延续聊天，但不要复述规则，不要输出英文。",
+                ]
+            )
+        else:
+            parts.extend(
+                [
+                    "你还没有确认到对方真正希望的称呼。",
+                    f"对方上一句是：{latest_message or '（空）'}",
+                    "不要把这句话本身直接当成名字。",
+                    "请用一句自然中文、保持角色语气，礼貌地再问一次希望你怎么称呼 ta。",
+                ]
+            )
+        parts.append("只输出下一句回复。")
+        return "\n\n".join(part for part in parts if part.strip())
+
     def _build_summary_query(self, history_lines: list[str], *, assistant_name: str) -> str:
         payload = "\n".join(history_lines)
         return (
@@ -310,8 +422,9 @@ class Generator:
     ) -> str:
         text = event.command_text(self.config.bot_account_id).strip()
         if self._asks_for_name(text):
-            if session.preferred_name:
-                return f"嗯，我记住了，以后就叫你{session.preferred_name}。"
+            default_address = card.user_name if event.launcher_type == "person" and card.user_name else (event.sender_name or "你")
+            if address and address != default_address:
+                return f"嗯，我记住了，以后就叫你{address}。"
             return f"你想让我怎么称呼你呀，直接告诉{assistant_name}就好。"
 
         if event.image_count > 0 and text:
@@ -366,10 +479,23 @@ class Generator:
             parts.append("自然接住对方的话")
         return "，".join(parts)
 
+    def _fallback_onboarding_reply(
+        self,
+        *,
+        stage: str,
+        address: str,
+        candidate_name: str,
+    ) -> str:
+        if stage == "confirm_name" and candidate_name:
+            return f"好呀，{candidate_name}，我记住你了，以后就这样叫你。"
+        if stage == "retry_name":
+            return f"等等呀，{address}，我还没记住你的称呼呢，你直接告诉我想让我怎么叫你吧。"
+        return f"你好呀，{address}，你想让我怎么称呼你呢？"
+
     def _fallback_summary(self, history_lines: list[str]) -> tuple[str, list[str]]:
         cleaned = [line.strip() for line in history_lines if line.strip()]
         preview = "；".join(cleaned[:3])
-        summary = self._clip(preview or cleaned[0], limit=60)
+        summary = self._clip(preview or (cleaned[0] if cleaned else ""), limit=60)
         tags = self._extract_tags(" ".join(cleaned))
         return summary, tags[:6]
 
@@ -427,11 +553,20 @@ class Generator:
         return "\n".join(lines).strip()
 
     def _resolve_address(self, event: InboundEvent, session: SessionMemory, card: CharacterCard) -> str:
-        if session.preferred_name:
-            return session.preferred_name
         if event.launcher_type == "person" and card.user_name:
             return card.user_name
         return event.sender_name or "你"
+
+    @staticmethod
+    def _conversation_excerpt(history_lines: list[str], *, assistant_name: str, limit: int = 6) -> str:
+        lines: list[str] = []
+        for raw_line in history_lines[-max(1, int(limit)) :]:
+            speaker, content = str(raw_line or "").partition(": ")[::2]
+            speaker = speaker.strip() or "user"
+            if speaker == "assistant":
+                speaker = assistant_name
+            lines.append(f"{speaker}: {content.strip()}")
+        return "\n".join(line for line in lines if line.strip())
 
     @staticmethod
     def _clean_response(text: str) -> str:

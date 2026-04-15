@@ -25,6 +25,8 @@ class Thoughts:
         memory_hints: list[str],
         speaker_notes: list[str],
         active_skills: list[SkillSpec] | None = None,
+        address: str = "",
+        allow_fallback: bool = True,
     ) -> str:
         if not self.config.thinking_mode:
             return ""
@@ -34,8 +36,10 @@ class Thoughts:
             event,
             session,
             assistant_name=assistant_name,
+            address_override=address,
             conversation_view=conversation_view,
             memory_hints=memory_hints,
             speaker_notes=speaker_notes,
             active_skills=active_skills or [],
+            allow_fallback=allow_fallback,
         )

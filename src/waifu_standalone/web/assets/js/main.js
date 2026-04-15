@@ -14,6 +14,7 @@ import * as memory from "./pages/memory.js";
 import * as skills from "./pages/skills.js";
 import * as abilities from "./pages/abilities.js";
 import * as sidecar from "./pages/sidecar.js";
+import * as qqLogin from "./pages/qq_login.js";
 import * as events from "./pages/events.js";
 import * as advanced from "./pages/advanced.js";
 import * as userPage from "./pages/user.js";
@@ -82,6 +83,13 @@ const ROUTES = [
     labelKey: "nav.skills",
     icon: iconPath("M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7z"),
     mount: skills.mount,
+  },
+  {
+    id: "qq-login",
+    group: "runtime",
+    labelKey: "nav.qqLogin",
+    icon: iconPath("M12 2a10 10 0 1 0 10 10 M8 12h8 M12 8v8"),
+    mount: qqLogin.mount,
   },
   {
     id: "sidecar",

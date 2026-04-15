@@ -287,8 +287,8 @@ command-arg-mode: raw
         tools = service.list_tools()
         tool_ids = {item["id"] for item in tools["items"]}
 
-        self.assertEqual(tools["count"], 3)
-        self.assertSetEqual(tool_ids, {"image", "search", "summary"})
+        self.assertEqual(tools["count"], 4)
+        self.assertSetEqual(tool_ids, {"image", "search", "summary", "skill-list"})
 
 
 if __name__ == "__main__":

@@ -169,8 +169,20 @@ class CardManager:
         items.sort(key=lambda item: str(item["character"]))
         return items
 
+    def active_character(self) -> str:
+        payload = self._load_active_state()
+        stored = str(payload.get("character") or "").strip()
+        if stored:
+            return self._normalize_character_name(stored)
+        return self._normalize_character_name(self.config.character or "default")
+
+    def set_active_character(self, character: str) -> str:
+        resolved = self._normalize_character_name(character)
+        self._save_active_state({"character": resolved, "updated_at": time.time()})
+        return resolved
+
     def get_editor_bundle(self, character: str) -> dict[str, object]:
-        resolved = self._normalize_character_name(character or self.config.character or "default")
+        resolved = self._normalize_character_name(character or self.active_character())
         person_variant = self._editor_variant(resolved, "person")
         group_variant = self._editor_variant(resolved, "group")
         meta = self._load_character_meta(resolved)
@@ -182,6 +194,37 @@ class CardManager:
             "portrait": self._portrait_payload(resolved, meta),
             "available": self.list_characters(),
         }
+
+    def build_preview_card(
+        self,
+        *,
+        shared_fields: dict[str, Any] | None,
+        variant_fields: dict[str, Any] | None,
+    ) -> CharacterCard:
+        normalized = _normalize_editor_fields(
+            {
+                "assistant_name": (shared_fields or {}).get("assistant_name"),
+                "user_name": (shared_fields or {}).get("user_name"),
+                "language": (shared_fields or {}).get("language"),
+                "profile": (variant_fields or {}).get("profile"),
+                "skills": (variant_fields or {}).get("skills"),
+                "background": (variant_fields or {}).get("background"),
+                "rules": (variant_fields or {}).get("rules"),
+                "prologue": (variant_fields or {}).get("prologue"),
+            }
+        )
+        return CharacterCard(
+            assistant_name=str(normalized["assistant_name"]),
+            user_name=str(normalized["user_name"]),
+            language=str(normalized["language"]),
+            profile=list(normalized["profile"]),
+            skills=list(normalized["skills"]),
+            background=list(normalized["background"]),
+            rules=list(normalized["rules"]),
+            prologue=list(normalized["prologue"]),
+            extras={},
+            source="preview",
+        )
 
     def save_editor_bundle(
         self,
@@ -317,6 +360,9 @@ class CardManager:
     def _portraits_root(self) -> Path:
         return self._cards_root() / "portraits"
 
+    def _active_state_path(self) -> Path:
+        return self._cards_root() / "active_character.json"
+
     def _meta_path(self, character: str) -> Path:
         return self._cards_root() / f"{character}.meta.json"
 
@@ -341,7 +387,7 @@ class CardManager:
         }
 
     def _load_card_data(self, launcher_type: str, session: SessionMemory) -> dict[str, Any]:
-        character = self._normalize_character_name(self.config.character or "default")
+        character = self.active_character()
         metadata_card = session.metadata.get("card", {})
         if isinstance(metadata_card, dict):
             source = metadata_card.get("source")
@@ -445,6 +491,21 @@ class CardManager:
 
     def _save_character_meta(self, character: str, payload: dict[str, Any]) -> None:
         path = self._meta_path(character)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _load_active_state(self) -> dict[str, Any]:
+        path = self._active_state_path()
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_active_state(self, payload: dict[str, Any]) -> None:
+        path = self._active_state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

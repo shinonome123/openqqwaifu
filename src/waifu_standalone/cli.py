@@ -85,7 +85,7 @@ def main() -> None:
 
 
 def _load_config(path: str | None) -> AppConfig:
-    return ConfigManager(path).load() if path else AppConfig()
+    return ConfigManager(path).load()
 
 
 def _check_sidecar(config: AppConfig) -> None:

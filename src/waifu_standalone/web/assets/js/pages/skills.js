@@ -55,7 +55,7 @@ export function mount(root) {
   async function search() {
     try {
       const payload = await api.searchMarketplace(query, "", 12);
-      results = payload?.results || [];
+      results = payload?.items || [];
       render();
     } catch (err) {
       toastError(err?.message || String(err));
@@ -111,11 +111,12 @@ export function mount(root) {
     }
 
     container.appendChild(renderSkillsList());
+    container.appendChild(renderToolsList());
     container.appendChild(renderMarketplace());
   }
 
   function renderSkillsList() {
-    const skills = panel?.skills?.skills || panel?.skills || [];
+    const skills = panel?.skills?.items || [];
     if (!Array.isArray(skills) || !skills.length) {
       return card({
         title: t("nav.skills"),
@@ -146,8 +147,36 @@ export function mount(root) {
           ]),
           el("div", { class: "row" }, [
             chip({ label: skill.id, variant: "outline" }),
-            skill.source ? chip({ label: skill.source, variant: "info" }) : null,
-            skill.version ? chip({ label: `v${skill.version}`, variant: "outline" }) : null,
+            skill.source_kind ? chip({ label: skill.source_kind, variant: "info" }) : null,
+            skill.source ? chip({ label: skill.source, variant: "outline" }) : null,
+            skill.command_dispatch === "tool"
+              ? chip({ label: `tool:${skill.command_tool || "unknown"}`, variant: "ok" })
+              : chip({ label: "prompt", variant: "outline" }),
+          ]),
+        ]),
+      ),
+    });
+  }
+
+  function renderToolsList() {
+    const tools = panel?.tools?.items || [];
+    if (!Array.isArray(tools) || !tools.length) {
+      return card({
+        title: t("skills.tools.title"),
+        body: [empty({ title: t("common.empty") })],
+      });
+    }
+    return card({
+      title: `${t("skills.tools.title")} (${tools.length})`,
+      subtitle: t("skills.tools.desc"),
+      body: tools.map((tool) =>
+        el("div", { class: "rule-card" }, [
+          el("div", { class: "rule-card-head" }, [
+            el("div", {}, [
+              el("div", { class: "rule-card-title", text: tool.name || tool.id }),
+              el("div", { class: "rule-card-desc", text: tool.description || "" }),
+            ]),
+            chip({ label: tool.id || "tool", variant: "info" }),
           ]),
         ]),
       ),
@@ -190,7 +219,7 @@ export function mount(root) {
                 type: "button",
                 class: "btn is-sm is-primary",
                 text: t("common.add"),
-                onClick: () => importFromResult(item.source_id || sources[0]?.source_id || "", item.github_url || item.raw_url || ""),
+                onClick: () => importFromResult(item.source_id || sources[0]?.id || "", item.github_url || item.raw_url || ""),
               }),
             ]),
             el("div", { class: "row" }, [

@@ -102,7 +102,6 @@ export function mount(root) {
     try {
       await api.saveSession(selected.launcher_type, selected.launcher_id, {
         history: [],
-        preferred_name: detail?.preferred_name || "",
         metadata: detail?.metadata || {},
       });
       toastOk(t("memory.detail.cleared"));
@@ -115,19 +114,49 @@ export function mount(root) {
 
   async function onRename(newName) {
     if (!selected) return;
+    if (selected.launcher_type !== "person") {
+      toastError(t("memory.detail.renameUnsupported"));
+      return;
+    }
     try {
-      const updated = await api.saveSession(selected.launcher_type, selected.launcher_id, {
-        preferred_name: newName,
-        history: detail?.history || [],
-        metadata: detail?.metadata || {},
-      });
-      detail = updated?.session || { ...detail, preferred_name: newName };
+      const payload = {
+        group_id: "",
+        user_id: selected.launcher_id,
+        preferred_name: String(newName || "").trim(),
+        onboarding_status: String(newName || "").trim() ? "ready" : "new",
+      };
+      const updated = await api.saveDirectoryMember(payload);
+      const member = updated?.member || payload;
+      detail = {
+        ...detail,
+        preferred_name: member.preferred_name || "",
+      };
       toastOk(t("memory.detail.renamed"));
       render();
-      load();
+      await load();
     } catch (err) {
       toastError(t("actions.saveFailed", { msg: err?.message || err }));
     }
+  }
+
+  function renderRenameSection() {
+    if (!selected) return null;
+    if (selected.launcher_type !== "person") {
+      return el("div", { class: "muted", text: t("memory.detail.renameHintGroup") });
+    }
+    const renameInput = textInput({
+      value: detail?.preferred_name || "",
+      placeholder: t("memory.table.name"),
+    });
+    return el("div", { class: "row-tight" }, [
+      renameInput,
+      el("button", {
+        type: "button",
+        class: "btn is-sm",
+        text: t("memory.detail.rename"),
+        onClick: () => onRename(renameInput.value),
+      }),
+    ]);
   }
 
   async function onSaveKnowledge() {
@@ -263,11 +292,6 @@ export function mount(root) {
       });
     }
 
-    const renameInput = textInput({
-      value: detail?.preferred_name || "",
-      placeholder: t("memory.table.name"),
-    });
-
     return card({
       title: `${selected.launcher_type}:${selected.launcher_id}`,
       subtitle: detail?.preferred_name || "",
@@ -280,17 +304,39 @@ export function mount(root) {
         }),
       ],
       body: [
-        el("div", { class: "row-tight" }, [
-          renameInput,
-          el("button", {
-            type: "button",
-            class: "btn is-sm",
-            text: t("memory.detail.rename"),
-            onClick: () => onRename(renameInput.value),
-          }),
-        ]),
+        renderRenameSection(),
         transcript,
+        renderGraphPanel(detail?.memory_graph),
       ],
+    });
+  }
+
+  function renderGraphPanel(graph) {
+    if (!graph?.enabled) {
+      return el("div", { class: "muted", text: t("memory.graph.empty") });
+    }
+    const highlights = el("div", { class: "row-tight", style: { flexWrap: "wrap" } });
+    (graph.highlights || []).forEach((item) => {
+      highlights.appendChild(chip({ label: String(item || ""), variant: "outline" }));
+    });
+    const nodeList = el("div", { class: "stack-list", style: { marginTop: "12px" } });
+    (graph.nodes || []).forEach((node) => {
+      nodeList.appendChild(
+        el("div", { class: "card is-compact" }, [
+          el("div", { class: "card-body" }, [
+            el("div", { class: "row-tight" }, [
+              chip({ label: node.kind || "node", variant: "accent" }),
+              el("strong", { text: node.label || "-" }),
+            ]),
+          ]),
+        ]),
+      );
+    });
+    return card({
+      title: t("memory.graph.title"),
+      subtitle: `${t("memory.graph.nodes")}: ${(graph.nodes || []).length} / ${t("memory.graph.edges")}: ${(graph.edges || []).length}`,
+      body: [highlights, nodeList],
+      extraClass: "is-compact",
     });
   }
 

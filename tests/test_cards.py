@@ -42,14 +42,15 @@ class CardTests(unittest.TestCase):
             self.assertEqual(payload["Rules"], ["回答保持简洁"])
 
     def test_card_manager_loads_builtin_default_card(self) -> None:
-        manager = CardManager(AppConfig())
-        session = SessionMemory(launcher_id="1", launcher_type="person")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = CardManager(AppConfig(data_root=tmpdir))
+            session = SessionMemory(launcher_id="1", launcher_type="person")
 
-        card = manager.load("person", session)
+            card = manager.load("person", session)
 
-        self.assertEqual(card.assistant_name, "琉璃")
-        self.assertTrue(card.profile)
-        self.assertIn("QQ", " ".join(card.background))
+            self.assertEqual(card.assistant_name, "琉璃")
+            self.assertTrue(card.profile)
+            self.assertIn("QQ", " ".join(card.background))
 
     def test_card_manager_prefers_data_root_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,14 +77,39 @@ class CardTests(unittest.TestCase):
             self.assertEqual(card.profile, ["爱撒娇"])
 
     def test_editor_bundle_exposes_structured_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = CardManager(AppConfig(data_root=tmpdir))
+
+            bundle = manager.get_editor_bundle("default")
+
+            self.assertEqual(bundle["shared"]["assistant_name"], "琉璃")
+            self.assertIn("profile", bundle["person"]["fields"])
+            self.assertIn("rules", bundle["group"]["fields"])
+            self.assertFalse(bundle["portrait"]["available"])
+
+    def test_build_preview_card_uses_editor_fields(self) -> None:
         manager = CardManager(AppConfig())
 
-        bundle = manager.get_editor_bundle("default")
+        card = manager.build_preview_card(
+            shared_fields={
+                "assistant_name": "Aurora",
+                "user_name": "Captain",
+                "language": "简体中文",
+            },
+            variant_fields={
+                "profile": ["calm and sharp"],
+                "skills": ["keeps continuity"],
+                "background": ["chatting in a private thread"],
+                "rules": ["stay concise"],
+                "prologue": ["the terminal lights up softly"],
+            },
+        )
 
-        self.assertEqual(bundle["shared"]["assistant_name"], "琉璃")
-        self.assertIn("profile", bundle["person"]["fields"])
-        self.assertIn("rules", bundle["group"]["fields"])
-        self.assertFalse(bundle["portrait"]["available"])
+        self.assertEqual(card.assistant_name, "Aurora")
+        self.assertEqual(card.user_name, "Captain")
+        self.assertEqual(card.language, "简体中文")
+        self.assertEqual(card.profile, ["calm and sharp"])
+        self.assertEqual(card.source, "preview")
 
     def test_save_editor_bundle_accepts_structured_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -123,6 +149,27 @@ class CardTests(unittest.TestCase):
             self.assertEqual(bundle["portrait"]["style"], "dream-anime")
             self.assertTrue((Path(tmpdir) / "cards" / "aurora_person.yaml").exists())
             self.assertTrue((Path(tmpdir) / "cards" / "aurora_group.yaml").exists())
+
+    def test_active_character_is_shared_through_cards_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = CardManager(AppConfig(data_root=tmpdir, character="default"))
+
+            manager.save_editor_bundle(
+                "aurora",
+                shared_fields={
+                    "assistant_name": "Aurora",
+                    "user_name": "Captain",
+                    "language": "zh",
+                },
+                person_fields={"profile": ["calm"]},
+                group_fields={"profile": ["quick"]},
+            )
+            manager.set_active_character("aurora")
+
+            next_manager = CardManager(AppConfig(data_root=tmpdir, character="default"))
+
+            self.assertEqual(next_manager.active_character(), "aurora")
+            self.assertEqual(next_manager.get_editor_bundle("")["character"], "aurora")
 
     def test_portrait_asset_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
