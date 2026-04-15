@@ -429,34 +429,52 @@ export function mount(root) {
           fieldRow({ label: t("character.field.language"), hint: t("character.field.language.hint"), control: textInput({ value: editor.shared.language, onChange: (value) => { editor.shared.language = value.trim() || "简体中文"; } }) }),
           fieldRow({ label: t("character.field.character"), hint: t("character.field.character.hint"), control: textInput({ value: editor.character, disabled: true }) }),
         ]),
-        el("div", { class: "character-editor-columns" }, [
-          renderVariantCard("person", t("character.personPersona"), t("character.editor.person.desc")),
-          renderVariantCard("group", t("character.groupPersona"), t("character.editor.group.desc")),
-        ]),
+        renderVariantMatrix(),
       ],
     });
   }
 
-  function renderVariantCard(kind, title, subtitle) {
-    const fields = editor[kind];
-    return card({
-      title,
-      subtitle,
-      extraClass: "is-flush",
-      body: VARIANT_SECTIONS.map(([key, labelKey, hintKey, rows]) =>
-        fieldRow({
-          label: t(labelKey),
-          hint: t(hintKey),
-          control: textarea({
+  function renderVariantMatrix() {
+    const children = [
+      el("div", { class: "variant-matrix-corner" }),
+      el("div", { class: "variant-matrix-head-cell" }, [
+        el("div", { class: "variant-matrix-title", text: t("character.personPersona") }),
+        el("div", { class: "variant-matrix-subtitle", text: t("character.editor.person.desc") }),
+      ]),
+      el("div", { class: "variant-matrix-head-cell" }, [
+        el("div", { class: "variant-matrix-title", text: t("character.groupPersona") }),
+        el("div", { class: "variant-matrix-subtitle", text: t("character.editor.group.desc") }),
+      ]),
+    ];
+    VARIANT_SECTIONS.forEach(([key, labelKey, hintKey, rows]) => {
+      children.push(
+        el("div", { class: "variant-matrix-label" }, [
+          el("div", { class: "variant-matrix-label-text", text: t(labelKey) }),
+          el("div", { class: "variant-matrix-label-hint", text: t(hintKey) }),
+        ]),
+        el("div", { class: "variant-matrix-cell" }, [
+          el("div", { class: "variant-matrix-cell-label", text: t("character.personPersona") }),
+          textarea({
             rows,
-            value: joinLines(fields[key]),
+            value: joinLines(editor.person[key]),
             onChange: (value) => {
-              fields[key] = splitLines(value);
+              editor.person[key] = splitLines(value);
             },
           }),
-        }),
-      ),
+        ]),
+        el("div", { class: "variant-matrix-cell" }, [
+          el("div", { class: "variant-matrix-cell-label", text: t("character.groupPersona") }),
+          textarea({
+            rows,
+            value: joinLines(editor.group[key]),
+            onChange: (value) => {
+              editor.group[key] = splitLines(value);
+            },
+          }),
+        ]),
+      );
     });
+    return el("div", { class: "variant-matrix" }, children);
   }
 
   function renderPortraitCard() {

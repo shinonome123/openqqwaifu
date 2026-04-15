@@ -42,6 +42,7 @@ const EN = {
   "nav.events": "Events",
   "nav.character": "Character",
   "nav.user": "User",
+  "nav.members": "Members",
   "nav.ai": "AI Access",
   "nav.memory": "Memory",
   "nav.abilities": "Abilities",
@@ -59,6 +60,8 @@ const EN = {
   "page.character.desc": "Edit personas, account binding and command pipeline.",
   "page.user.title": "User",
   "page.user.desc": "Current account, role and password management.",
+  "page.members.title": "Members",
+  "page.members.desc": "Browse and curate the structured group-member directory.",
   "page.ai.title": "AI Access",
   "page.ai.desc": "Configure LLM and image providers.",
   "page.memory.title": "Memory",
@@ -308,6 +311,7 @@ const ZH = {
   "nav.events": "事件",
   "nav.character": "人物卡",
   "nav.user": "个人用户",
+  "nav.members": "成员数据库",
   "nav.ai": "AI 接入",
   "nav.memory": "记忆",
   "nav.abilities": "能力",
@@ -325,6 +329,8 @@ const ZH = {
   "page.character.desc": "编辑角色设定、账号绑定和指令管线。",
   "page.user.title": "个人用户",
   "page.user.desc": "查看当前账号、权限并修改密码。",
+  "page.members.title": "成员数据库",
+  "page.members.desc": "查看和整理群成员结构化档案。",
   "page.ai.title": "AI 接入",
   "page.ai.desc": "配置聊天模型和生图模型。",
   "page.memory.title": "记忆",
@@ -669,7 +675,7 @@ Object.assign(ZH, {
 });
 
 Object.assign(EN, {
-  "page.user.desc": "Current account access plus editable member directory and onboarding state.",
+  "page.user.desc": "Current account, role and password management.",
   "page.memory.desc": "Inspect sessions, curated knowledge entries and long-term recall.",
   "overview.provider.memoryMeta": "{sessions} sessions · {knowledge} facts · {members} members",
   "user.directory.title": "Member directory",
@@ -726,7 +732,7 @@ Object.assign(EN, {
 });
 
 Object.assign(ZH, {
-  "page.user.desc": "查看当前账号权限，并维护群成员数据库和 onboarding 状态。",
+  "page.user.desc": "查看当前账号、权限并修改密码。",
   "page.memory.desc": "查看会话、长期知识条目和记忆召回内容。",
   "overview.provider.memoryMeta": "{sessions} 个会话 · {knowledge} 条知识 · {members} 个成员",
   "user.directory.title": "成员数据库",
