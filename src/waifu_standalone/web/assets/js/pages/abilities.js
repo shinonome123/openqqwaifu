@@ -44,6 +44,9 @@ export function mount(root) {
         thinking_mode: !!state.thinking_mode,
         conversation_analysis: !!state.conversation_analysis,
         summarization_mode: !!state.summarization_mode,
+        member_auto_sync: !!state.member_auto_sync,
+        knowledge_auto_extract: !!state.knowledge_auto_extract,
+        knowledge_auto_extract_limit: Number(state.knowledge_auto_extract_limit || 2),
         event_mode: !!state.event_mode,
         event_buffer_limit: Number(state.event_buffer_limit || 120),
         narrator_mode: !!state.narrator_mode,
@@ -118,6 +121,32 @@ export function mount(root) {
             control: switchControl({
               checked: !!state.summarization_mode,
               onChange: (v) => patch({ summarization_mode: v }),
+            }),
+          }),
+          fieldRow({
+            label: t("abilities.field.memberAutoSync"),
+            hint: t("abilities.field.memberAutoSync.hint"),
+            control: switchControl({
+              checked: !!state.member_auto_sync,
+              onChange: (v) => patch({ member_auto_sync: v }),
+            }),
+          }),
+          fieldRow({
+            label: t("abilities.field.knowledgeAutoExtract"),
+            hint: t("abilities.field.knowledgeAutoExtract.hint"),
+            control: switchControl({
+              checked: !!state.knowledge_auto_extract,
+              onChange: (v) => patch({ knowledge_auto_extract: v }),
+            }),
+          }),
+          fieldRow({
+            label: t("abilities.field.knowledgeAutoExtractLimit"),
+            hint: t("abilities.field.knowledgeAutoExtractLimit.hint"),
+            control: numberInput({
+              value: Number(state.knowledge_auto_extract_limit || 2),
+              min: 1,
+              max: 8,
+              onChange: (v) => patch({ knowledge_auto_extract_limit: v }),
             }),
           }),
           fieldRow({

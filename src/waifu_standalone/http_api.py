@@ -141,6 +141,11 @@ class HttpApi:
 
     def handle_json(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         post_type = payload.get("post_type")
+        if post_type == "notice":
+            try:
+                return HTTPStatus.ACCEPTED, dict(self.service.handle_notice_payload(payload))
+            except Exception as exc:
+                return HTTPStatus.BAD_GATEWAY, {"status": "delivery_failed", "reason": str(exc)}
         if post_type and post_type != "message":
             return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 

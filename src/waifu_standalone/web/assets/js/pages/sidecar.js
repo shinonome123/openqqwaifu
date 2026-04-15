@@ -9,6 +9,7 @@ export function mount(root) {
   let stopped = false;
   let unsubLang = null;
   let state = null;
+  let other = null;
   let probe = null;
 
   root.innerHTML = "";
@@ -17,7 +18,10 @@ export function mount(root) {
 
   async function load() {
     try {
-      state = await api.getSidecarPanel(false);
+      [state, other] = await Promise.all([
+        api.getSidecarPanel(false),
+        api.getOtherPanel(),
+      ]);
       if (stopped) return;
       render();
     } catch (err) {
@@ -27,19 +31,27 @@ export function mount(root) {
 
   async function save() {
     try {
-      state = await api.saveSidecarPanel({
-        adapter_name: state?.adapter_name || "napcat",
-        outbound_base_url: state?.outbound_base_url || "",
-        outbound_timeout_seconds: Number(state?.outbound_timeout_seconds || 10),
-        access_token: state?.access_token || "",
-        inbound_host: state?.inbound_host || "127.0.0.1",
-        inbound_port: Number(state?.inbound_port || 8080),
-        webui_base_url: state?.webui_base_url || "",
-        webui_api_prefix: state?.webui_api_prefix ?? "/api",
-        webui_timeout_seconds: Number(state?.webui_timeout_seconds || 10),
-        webui_token: state?.webui_token || "",
-        reverse_ws_url: state?.reverse_ws_url || "",
-      });
+      const [savedState, savedOther] = await Promise.all([
+        api.saveSidecarPanel({
+          adapter_name: state?.adapter_name || "napcat",
+          outbound_base_url: state?.outbound_base_url || "",
+          outbound_timeout_seconds: Number(state?.outbound_timeout_seconds || 10),
+          access_token: state?.access_token || "",
+          inbound_host: state?.inbound_host || "127.0.0.1",
+          inbound_port: Number(state?.inbound_port || 8080),
+          webui_base_url: state?.webui_base_url || "",
+          webui_api_prefix: state?.webui_api_prefix ?? "/api",
+          webui_timeout_seconds: Number(state?.webui_timeout_seconds || 10),
+          webui_token: state?.webui_token || "",
+          reverse_ws_url: state?.reverse_ws_url || "",
+        }),
+        api.saveOtherPanel({
+          ...(other || {}),
+          bot_account_id: other?.bot_account_id || "",
+        }),
+      ]);
+      state = savedState;
+      other = savedOther;
       toastOk(t("actions.savedOk"));
       render();
     } catch (err) {
@@ -59,6 +71,10 @@ export function mount(root) {
 
   function patch(next) {
     state = { ...state, ...next };
+  }
+
+  function patchOther(next) {
+    other = { ...(other || {}), ...next };
   }
 
   function render() {
@@ -101,6 +117,14 @@ export function mount(root) {
             control: textInput({
               value: state.adapter_name || "napcat",
               onChange: (v) => patch({ adapter_name: v }),
+            }),
+          }),
+          fieldRow({
+            label: t("character.field.botId"),
+            hint: t("character.field.botId.hint"),
+            control: textInput({
+              value: other?.bot_account_id || "",
+              onChange: (v) => patchOther({ bot_account_id: v.trim() }),
             }),
           }),
           fieldRow({
@@ -150,39 +174,6 @@ export function mount(root) {
               value: state.reverse_ws_url || "",
               placeholder: "ws://127.0.0.1:3001/onebot/v11/ws",
               onChange: (v) => patch({ reverse_ws_url: v }),
-            }),
-          }),
-          fieldRow({
-            label: t("sidecar.field.webuiBaseUrl"),
-            control: textInput({
-              value: state.webui_base_url || "",
-              placeholder: "http://127.0.0.1:6099",
-              onChange: (v) => patch({ webui_base_url: v }),
-            }),
-          }),
-          fieldRow({
-            label: t("sidecar.field.webuiApiPrefix"),
-            control: textInput({
-              value: state.webui_api_prefix ?? "/api",
-              placeholder: "/api",
-              onChange: (v) => patch({ webui_api_prefix: v }),
-            }),
-          }),
-          fieldRow({
-            label: t("sidecar.field.webuiTimeout"),
-            control: numberInput({
-              value: Number(state.webui_timeout_seconds || 10),
-              min: 1,
-              max: 120,
-              onChange: (v) => patch({ webui_timeout_seconds: v }),
-            }),
-          }),
-          fieldRow({
-            label: t("sidecar.field.webuiToken"),
-            control: textInput({
-              type: "password",
-              value: state.webui_token || "",
-              onChange: (v) => patch({ webui_token: v }),
             }),
           }),
         ],

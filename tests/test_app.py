@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -318,34 +319,36 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(len(outbound.sent), 2)
 
     def test_dashboard_snapshot_surfaces_runtime_state(self) -> None:
-        config = AppConfig(bot_account_id="3518944354")
-        service, _ = build_default_service(config)
-        service.handle_event(
-            InboundEvent(
-                launcher_id="612475113",
-                launcher_type="group",
-                sender_id="783190298",
-                sender_name="tester",
-                segments=[
-                    MessageSegment(kind="mention", mention_target="3518944354"),
-                    MessageSegment(kind="text", text=" hello"),
-                ],
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(bot_account_id="3518944354", data_root=tmpdir, character="default")
+            service, _ = build_default_service(config)
+            service.cards.set_active_character("default")
+            service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[
+                        MessageSegment(kind="mention", mention_target="3518944354"),
+                        MessageSegment(kind="text", text=" hello"),
+                    ],
+                )
             )
-        )
 
-        snapshot = service.dashboard_snapshot()
+            snapshot = service.dashboard_snapshot()
 
-        self.assertEqual(snapshot["assistant_name"], "琉璃")
-        self.assertEqual(snapshot["character"], "default")
-        self.assertEqual(snapshot["thinking_mode"], True)
-        self.assertEqual(snapshot["summarization_mode"], False)
-        self.assertEqual(snapshot["session_count"], 1)
-        self.assertEqual(snapshot["recent_outbound_count"], 1)
-        self.assertIn("612475113", snapshot["active_follow_up_launchers"])
-        self.assertTrue(snapshot["group_reply_requires_mention"])
-        self.assertEqual(snapshot["message_behavior"]["follow_up_window_seconds"], 5.0)
-        self.assertEqual(snapshot["knowledge_count"], 0)
-        self.assertEqual(snapshot["member_count"], 1)
+            self.assertEqual(snapshot["assistant_name"], service.cards.load("group", service.memory.load("612475113", "group", character_id="default")).assistant_name)
+            self.assertEqual(snapshot["character"], "default")
+            self.assertEqual(snapshot["thinking_mode"], True)
+            self.assertEqual(snapshot["summarization_mode"], False)
+            self.assertEqual(snapshot["session_count"], 1)
+            self.assertEqual(snapshot["recent_outbound_count"], 1)
+            self.assertIn("612475113", snapshot["active_follow_up_launchers"])
+            self.assertTrue(snapshot["group_reply_requires_mention"])
+            self.assertEqual(snapshot["message_behavior"]["follow_up_window_seconds"], 5.0)
+            self.assertEqual(snapshot["knowledge_count"], 0)
+            self.assertEqual(snapshot["member_count"], 1)
 
     def test_behavior_graph_and_value_game_update_after_reply(self) -> None:
         config = AppConfig(
@@ -541,27 +544,104 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(member["onboarding_status"], "pending_name")
         self.assertEqual(len(outbound.sent), 2)
 
-    def test_imported_card_identity_is_used_for_person_session(self) -> None:
-        service, _ = build_default_service(AppConfig())
-        session = service.memory.load("783190298", "person")
-        session.metadata["card"] = {
-            "assistant_name": "neko",
-            "user_name": "爸爸",
-        }
-        service.memory.store.save(session)
+    def test_preference_message_writes_back_member_knowledge(self) -> None:
+        config = AppConfig(group_reply_requires_mention=False, knowledge_auto_extract=True)
+        service, _ = build_default_service(config)
 
         result = service.handle_event(
             InboundEvent(
-                launcher_id="783190298",
-                launcher_type="person",
+                launcher_id="612475113",
+                launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="hello there")],
+                segments=[MessageSegment(kind="text", text="我喜欢雨天和猫")],
             )
         )
 
         self.assertIsNotNone(result)
-        self.assertIn("爸爸", result.text)
+        knowledge_entries = service.state_store.list_knowledge(
+            limit=8,
+            character_id=service.cards.active_character(),
+        )
+        self.assertEqual(len(knowledge_entries), 1)
+        self.assertEqual(knowledge_entries[0]["scope_type"], "member")
+        self.assertEqual(knowledge_entries[0]["scope_id"], "612475113:783190298")
+        self.assertIn("Likes", knowledge_entries[0]["summary"])
+        member = service.state_store.get_member(
+            group_id="612475113",
+            user_id="783190298",
+            character_id=service.cards.active_character(),
+        )
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertGreaterEqual(int(member["notes_count"]), 1)
+        self.assertTrue(str(member["profile_summary"] or "").strip())
+
+    def test_group_increase_notice_for_bot_triggers_auto_sync(self) -> None:
+        config = AppConfig(bot_account_id="3518944354", member_auto_sync=True)
+        service, _ = build_default_service(config)
+        calls: list[str] = []
+
+        def fake_sync(current_service, group_id: str) -> dict[str, object]:  # type: ignore[no-untyped-def]
+            calls.append(group_id)
+            return {"status": "ok", "group_id": group_id, "count": 2}
+
+        with patch.object(type(service), "sync_group_members", fake_sync):
+            result = service.handle_notice_payload(
+                {
+                    "post_type": "notice",
+                    "notice_type": "group_increase",
+                    "self_id": "3518944354",
+                    "group_id": "612475113",
+                    "user_id": "3518944354",
+                }
+            )
+
+        self.assertEqual(calls, ["612475113"])
+        self.assertEqual(result["reason"], "bot_joined_group")
+
+    def test_active_character_card_identity_wins_for_person_session(self) -> None:
+        service, _ = build_default_service(AppConfig())
+        service.cards.save_editor_bundle(
+            "aurora",
+            shared_fields={
+                "assistant_name": "Aurora",
+                "user_name": "Captain",
+                "language": "zh",
+            },
+            person_fields={
+                "profile": ["calm"],
+                "skills": ["keeps continuity"],
+                "background": ["private chat"],
+                "rules": ["stay concise"],
+                "prologue": ["hello"],
+            },
+            group_fields={
+                "profile": ["quick"],
+                "skills": [],
+                "background": ["group chat"],
+                "rules": ["stay concise"],
+                "prologue": ["hello"],
+            },
+        )
+        service.cards.set_active_character("aurora")
+        session = service.memory.load("783190298", "person", character_id="aurora")
+        session.metadata["card"] = {
+            "assistant_name": "neko",
+            "user_name": "LegacyUser",
+        }
+        service.memory.store.save(session)
+        event = InboundEvent(
+            launcher_id="783190298",
+            launcher_type="person",
+            sender_id="783190298",
+            sender_name="tester",
+            segments=[MessageSegment(kind="text", text="hello there")],
+        )
+
+        address = service._resolve_address(event, session)
+
+        self.assertEqual(address, "Captain")
 
     def test_save_character_panel_can_edit_without_switching_active_character(self) -> None:
         service, _ = build_default_service(AppConfig())
@@ -728,8 +808,15 @@ class WaifuServiceTests(unittest.TestCase):
         migrated_person = self.service.memory.load("783190298", "person")
         migrated_group = self.service.memory.load("612475113", "group")
         person_member = self.service.state_store.get_member(group_id="", user_id="783190298")
-        group_member = self.service.state_store.get_member(group_id="612475113", user_id="783190298")
-        knowledge_entries = self.service.state_store.list_knowledge(limit=8)
+        group_member = self.service.state_store.get_member(
+            group_id="612475113",
+            user_id="783190298",
+            character_id=self.service.cards.active_character(),
+        )
+        knowledge_entries = self.service.state_store.list_knowledge(
+            limit=8,
+            character_id=self.service.cards.active_character(),
+        )
 
         self.assertEqual(migrated_person.preferred_name, "")
         self.assertNotIn("long_term_memory", migrated_person.metadata)

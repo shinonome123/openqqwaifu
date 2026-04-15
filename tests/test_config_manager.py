@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from waifu_standalone.cells.config import ConfigManager
+from waifu_standalone.config import AppConfig, QQSidecarConfig
 
 
 class ConfigManagerTests(unittest.TestCase):
@@ -419,6 +420,67 @@ class ConfigManagerTests(unittest.TestCase):
 
         self.assertTrue(config.data_root.endswith("runtime-data"))
         self.assertTrue(Path(config.data_root).is_absolute())
+
+    def test_save_reprovisions_napcat_network_with_current_runtime_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            data_root = root / "data"
+            data_root.mkdir(parents=True, exist_ok=True)
+            napcat_dir = root / "napcat" / "config"
+            napcat_dir.mkdir(parents=True, exist_ok=True)
+            onebot_path = napcat_dir / "onebot11_3956638110.json"
+            onebot_path.write_text(
+                json.dumps(
+                    {
+                        "network": {
+                            "httpServers": [
+                                {
+                                    "name": "openqqwaifu-actions",
+                                    "enable": True,
+                                    "host": "0.0.0.0",
+                                    "port": 3000,
+                                    "token": "",
+                                }
+                            ],
+                            "httpClients": [
+                                {
+                                    "name": "openqqwaifu-webhook",
+                                    "enable": True,
+                                    "url": "http://127.0.0.1:8080/onebot/events",
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = data_root / "config.json"
+            config = AppConfig(
+                config_path=str(config_path),
+                data_root=str(data_root),
+                qq_sidecar=QQSidecarConfig(
+                    inbound_host="0.0.0.0",
+                    inbound_port=8080,
+                    outbound_base_url="http://napcat:3000",
+                    webui_base_url="http://napcat:6099",
+                ),
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "OPENQQWAIFU_QQ_SIDECAR_CALLBACK_BASE_URL": "http://openqqwaifu:8080",
+                },
+                clear=False,
+            ):
+                ConfigManager().save(config)
+
+            raw = json.loads(onebot_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            raw["network"]["httpClients"][0]["url"],
+            "http://openqqwaifu:8080/onebot/events",
+        )
 
 
 if __name__ == "__main__":

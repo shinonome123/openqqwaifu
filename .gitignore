@@ -16,4 +16,5 @@ napcat/qq/*
 
 .playwright-cli/
 .codex-server*.log
+.codex-temp/
 

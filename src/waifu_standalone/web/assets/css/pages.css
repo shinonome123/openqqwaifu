@@ -1480,9 +1480,27 @@
   overflow: hidden;
 }
 
+.auth-bg-tile {
+  position: fixed;
+  inset: -40px;
+  z-index: 0;
+  background-image: url("/assets/img/brand-logo.png");
+  background-size: 80px 80px;
+  background-repeat: repeat;
+  opacity: 0.08;
+  filter: blur(4px);
+  pointer-events: none;
+  animation: auth-tile-drift 60s linear infinite;
+}
+
+@keyframes auth-tile-drift {
+  from { transform: translate(0, 0); }
+  to   { transform: translate(80px, 80px); }
+}
+
 .auth-stage {
   position: relative;
-  width: min(440px, 100%);
+  width: min(480px, 100%);
   z-index: 1;
 }
 
@@ -1549,20 +1567,23 @@
 
 .auth-card-head {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  justify-content: center;
+  padding: 8px 0 4px;
 }
 
 .auth-card-mark {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
+  width: 88px;
+  height: 88px;
+  border-radius: 22px;
   display: grid;
   place-items: center;
   background: linear-gradient(135deg, var(--accent-subtle), var(--accent-2-subtle));
   border: 1px solid var(--border);
   flex-shrink: 0;
   overflow: hidden;
+  box-shadow:
+    0 12px 32px color-mix(in srgb, var(--accent) 24%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .auth-card-logo {
@@ -1574,6 +1595,7 @@
 .auth-card-meta {
   display: flex;
   flex-direction: column;
+  align-items: center;
   min-width: 0;
 }
 
@@ -1597,6 +1619,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  text-align: center;
 }
 
 .auth-card-title {

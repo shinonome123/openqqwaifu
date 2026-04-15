@@ -9,6 +9,12 @@ const ONBOARDING_OPTIONS = [
   { value: "ready", labelKey: "user.directory.status.ready" },
 ];
 
+const MEMBERSHIP_OPTIONS = [
+  { value: "active", labelKey: "user.directory.membership.active" },
+  { value: "left", labelKey: "user.directory.membership.left" },
+  { value: "removed", labelKey: "user.directory.membership.removed" },
+];
+
 export function mount(root) {
   let stopped = false;
   let unsubLang = null;
@@ -141,6 +147,7 @@ export function mount(root) {
               el("div", { class: "session-id", text: `${member.group_id || "person"}:${member.user_id}` }),
             ]),
             el("td", {}, [chip({ label: member.onboarding_status || "new", variant: member.preferred_name ? "ok" : "outline" })]),
+            el("td", {}, [chip({ label: member.membership_status || "active", variant: (member.membership_status || "active") === "active" ? "ok" : "outline" })]),
             el("td", { class: "session-meta", text: `${Number(member.affinity_score || 0).toFixed(2)} / ${bondStage(member.affinity_score)}` }),
             el("td", { class: "session-meta", text: formatDateTime(member.last_seen_at) }),
           ],
@@ -154,6 +161,7 @@ export function mount(root) {
               el("tr", {}, [
                 el("th", { text: t("user.directory.member") }),
                 el("th", { text: t("user.directory.status") }),
+                el("th", { text: t("user.directory.membershipStatus") }),
                 el("th", { text: t("user.directory.affinity") }),
                 el("th", { text: t("user.directory.lastSeen") }),
               ]),
@@ -257,6 +265,16 @@ export function mount(root) {
           }),
         }),
         fieldRow({
+          label: t("user.directory.membershipStatus"),
+          control: select({
+            value: memberDraft.membership_status || "active",
+            options: MEMBERSHIP_OPTIONS.map((item) => ({ value: item.value, label: t(item.labelKey) })),
+            onChange: (value) => {
+              memberDraft.membership_status = value;
+            },
+          }),
+        }),
+        fieldRow({
           label: t("user.directory.profileSummary"),
           control: textarea({
             rows: 4,
@@ -292,7 +310,9 @@ export function mount(root) {
         }),
         el("div", { class: "user-meta" }, [
           chip({ label: `${t("user.directory.bondStage")}: ${bondStage(memberDraft.affinity_score)}`, variant: "ok" }),
+          chip({ label: `${t("user.directory.membershipStatus")}: ${memberDraft.membership_status || "active"}`, variant: "outline" }),
           chip({ label: `${t("user.directory.lastSeen")}: ${formatDateTime(memberDraft.last_seen_at)}`, variant: "outline" }),
+          chip({ label: `${t("user.directory.lastSync")}: ${formatDateTime(memberDraft.last_sync_at)}`, variant: "outline" }),
           chip({ label: `${t("user.directory.lastAddressed")}: ${formatDateTime(memberDraft.last_addressed_at)}`, variant: "outline" }),
         ]),
       ],

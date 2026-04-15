@@ -52,6 +52,48 @@ class FileMemoryStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.save(SessionMemory(launcher_id="../", launcher_type="group"))
 
+    def test_character_specific_sessions_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileMemoryStore(tmpdir)
+            first = SessionMemory(
+                launcher_id="612475113",
+                launcher_type="group",
+                character_id="default",
+                history=["user: default line"],
+            )
+            second = SessionMemory(
+                launcher_id="612475113",
+                launcher_type="group",
+                character_id="aurora",
+                history=["user: aurora line"],
+            )
+
+            store.save(first)
+            store.save(second)
+
+            loaded_default = store.load("612475113", "group", character_id="default")
+            loaded_aurora = store.load("612475113", "group", character_id="aurora")
+
+            self.assertEqual(loaded_default.history, ["user: default line"])
+            self.assertEqual(loaded_aurora.history, ["user: aurora line"])
+            self.assertEqual(loaded_default.character_id, "default")
+            self.assertEqual(loaded_aurora.character_id, "aurora")
+
+    def test_character_load_does_not_inherit_legacy_root_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileMemoryStore(tmpdir)
+            legacy = SessionMemory(
+                launcher_id="612475113",
+                launcher_type="group",
+                history=["user: legacy line"],
+            )
+            store.save(legacy)
+
+            loaded = store.load("612475113", "group", character_id="default")
+
+            self.assertEqual(loaded.history, [])
+            self.assertEqual(loaded.character_id, "default")
+
 
 if __name__ == "__main__":
     unittest.main()

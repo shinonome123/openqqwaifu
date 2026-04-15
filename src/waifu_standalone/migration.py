@@ -92,11 +92,11 @@ class WaifuDataImporter:
         resolved_type = launcher_type or self.default_launcher_type
         if resolved_type not in {"group", "person"}:
             raise ValueError("launcher_type must be 'group' or 'person'")
-        session = self.store.load(launcher_id, resolved_type)
+        config = self._load_config(launcher_id)
+        configured_character = str(config.get("character", "") or "").strip()
+        session = self.store.load(launcher_id, resolved_type, character_id=configured_character)
         session.metadata["imported_from"] = "waifu"
         session.metadata["waifu_root"] = str(self.waifu_root)
-
-        config = self._load_config(launcher_id)
         if config:
             session.metadata["waifu_config"] = config
 
@@ -116,14 +116,23 @@ class WaifuDataImporter:
 
         card_identity = self._load_card_identity(config, resolved_type)
         if card_identity:
+            session.character_id = str(card_identity.get("character", "") or session.character_id or "").strip()
             session.metadata["card"] = card_identity
             if isinstance(card_identity.get("assistant_name"), str):
                 session.metadata["assistant_name"] = str(card_identity["assistant_name"])
             if isinstance(card_identity.get("user_name"), str):
                 session.metadata["user_name"] = str(card_identity["user_name"])
+        elif config.get("character"):
+            session.character_id = str(config.get("character") or "").strip()
 
         saved = self.store.save(session)
-        session_path = str(self.store.session_path(saved.launcher_id, saved.launcher_type))
+        session_path = str(
+            self.store.session_path(
+                saved.launcher_id,
+                saved.launcher_type,
+                character_id=saved.character_id,
+            )
+        )
         return ImportResult(
             launcher_id=saved.launcher_id,
             launcher_type=saved.launcher_type,

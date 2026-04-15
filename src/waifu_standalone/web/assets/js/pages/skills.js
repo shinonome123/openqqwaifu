@@ -219,7 +219,11 @@ export function mount(root) {
                 type: "button",
                 class: "btn is-sm is-primary",
                 text: t("common.add"),
-                onClick: () => importFromResult(item.source_id || sources[0]?.id || "", item.github_url || item.raw_url || ""),
+                onClick: () =>
+                  importFromResult(
+                    item.source_id || sources[0]?.id || "",
+                    item.github_url || item.skill_url || item.raw_url || "",
+                  ),
               }),
             ]),
             el("div", { class: "row" }, [

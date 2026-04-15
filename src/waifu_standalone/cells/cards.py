@@ -96,12 +96,11 @@ class CardManager:
 
     def load(self, launcher_type: str, session: SessionMemory) -> CharacterCard:
         data = self._load_card_data(launcher_type, session)
-        metadata_card = session.metadata.get("card", {}) if isinstance(session.metadata.get("card"), dict) else {}
         fields = _payload_to_fields(data, default_assistant=self.config.assistant_name or _DEFAULT_ASSISTANT_NAME)
         return CharacterCard(
-            assistant_name=str(metadata_card.get("assistant_name") or fields["assistant_name"]),
-            user_name=str(metadata_card.get("user_name") or fields["user_name"]),
-            language=str(metadata_card.get("language") or fields["language"]),
+            assistant_name=str(fields["assistant_name"]),
+            user_name=str(fields["user_name"]),
+            language=str(fields["language"]),
             profile=list(fields["profile"]),
             skills=list(fields["skills"]),
             background=list(fields["background"]),
@@ -387,22 +386,24 @@ class CardManager:
         }
 
     def _load_card_data(self, launcher_type: str, session: SessionMemory) -> dict[str, Any]:
-        character = self.active_character()
+        character = self._session_character(session)
         metadata_card = session.metadata.get("card", {})
-        if isinstance(metadata_card, dict):
-            source = metadata_card.get("source")
-            if isinstance(source, str) and source.strip():
-                source_path = Path(source)
-                if source_path.exists():
-                    data = parse_card_file(source_path)
-                    data["_source"] = str(source_path)
-                    return data
 
         for candidate in self._candidate_paths(character, launcher_type, session):
             if candidate.exists():
                 data = parse_card_file(candidate)
                 data["_source"] = str(candidate)
                 return data
+
+        if isinstance(metadata_card, dict):
+            fallback = {
+                key: value
+                for key, value in metadata_card.items()
+                if key in {"assistant_name", "user_name", "language", *_SECTION_KEYS}
+            }
+            if fallback:
+                fallback["_source"] = "session-metadata"
+                return fallback
 
         fallback = self._templates_root / f"default_{launcher_type}.yaml"
         data = parse_card_file(fallback)
@@ -529,6 +530,17 @@ class CardManager:
         if not isinstance(waifu_root, str) or not waifu_root.strip():
             return None
         return Path(waifu_root)
+
+    def _session_character(self, session: SessionMemory) -> str:
+        current = str(getattr(session, "character_id", "") or "").strip()
+        if current:
+            return self._normalize_character_name(current)
+        metadata_card = session.metadata.get("card", {})
+        if isinstance(metadata_card, dict):
+            fallback = str(metadata_card.get("character", "") or "").strip()
+            if fallback:
+                return self._normalize_character_name(fallback)
+        return self.active_character()
 
     @staticmethod
     def _normalize_character_name(value: str) -> str:

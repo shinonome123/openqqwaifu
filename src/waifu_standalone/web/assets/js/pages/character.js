@@ -720,7 +720,6 @@ export function mount(root) {
           el("div", { class: "page-desc", text: t("character.runtime.tip") }),
         ]),
         fieldRow({ label: t("character.field.serviceName"), hint: t("character.field.serviceName.hint"), control: textInput({ value: other.service_name || "", onChange: (value) => { other.service_name = value; } }) }),
-        fieldRow({ label: t("character.field.botId"), hint: t("character.field.botId.hint"), control: textInput({ value: other.bot_account_id || "", onChange: (value) => { other.bot_account_id = value.trim(); } }) }),
         fieldRow({
           label: t("character.field.groupReplyRequiresMention"),
           hint: t("character.field.groupReplyRequiresMention.hint"),

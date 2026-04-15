@@ -43,6 +43,7 @@ class RuntimeStateStoreTests(unittest.TestCase):
 
         member = store.record_member_seen(group_id="612475113", user_id="783190298", qq_nickname="tester")
         self.assertEqual(member["onboarding_status"], "new")
+        self.assertEqual(member["membership_status"], "active")
 
         saved_member = store.save_member(
             {
@@ -52,9 +53,11 @@ class RuntimeStateStoreTests(unittest.TestCase):
                 "preferred_name": "luna",
                 "onboarding_status": "ready",
                 "profile_summary": "likes cats",
+                "last_sync_at": 123,
             }
         )
         self.assertEqual(saved_member["preferred_name"], "luna")
+        self.assertEqual(saved_member["last_sync_at"], 123)
         self.assertEqual(store.member_count(), 1)
 
         entry = store.add_knowledge(
@@ -76,6 +79,28 @@ class RuntimeStateStoreTests(unittest.TestCase):
         self.assertIsNotNone(adjusted)
         assert adjusted is not None
         self.assertAlmostEqual(float(adjusted["affinity_score"]), 0.18, places=4)
+
+    def test_mark_group_members_missing_updates_membership_status(self) -> None:
+        store = InMemoryRuntimeStateStore()
+        store.save_member({"group_id": "612475113", "user_id": "1", "qq_nickname": "one", "membership_status": "active"})
+        store.save_member({"group_id": "612475113", "user_id": "2", "qq_nickname": "two", "membership_status": "active"})
+
+        changed = store.mark_group_members_missing(
+            group_id="612475113",
+            active_user_ids=["1"],
+            membership_status="left",
+            last_sync_at=456,
+        )
+
+        self.assertEqual(changed, 1)
+        active = store.get_member(group_id="612475113", user_id="1")
+        missing = store.get_member(group_id="612475113", user_id="2")
+        self.assertIsNotNone(active)
+        self.assertIsNotNone(missing)
+        assert active is not None and missing is not None
+        self.assertEqual(active["membership_status"], "active")
+        self.assertEqual(missing["membership_status"], "left")
+        self.assertEqual(missing["last_sync_at"], 456)
 
     def test_sqlite_store_persists_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -115,6 +140,119 @@ class RuntimeStateStoreTests(unittest.TestCase):
                 limit=3,
             )
             self.assertEqual(recalled, ["group 612475113 often talks about games"])
+
+    def test_persona_state_is_isolated_by_character(self) -> None:
+        store = InMemoryRuntimeStateStore()
+        store.record_member_seen(group_id="612475113", user_id="783190298", qq_nickname="tester")
+        store.save_member(
+            {
+                "group_id": "612475113",
+                "user_id": "783190298",
+                "character_id": "default",
+                "profile_summary": "likes cats",
+                "affinity_score": 0.4,
+            }
+        )
+        store.save_member(
+            {
+                "group_id": "612475113",
+                "user_id": "783190298",
+                "character_id": "aurora",
+                "profile_summary": "likes rain",
+                "affinity_score": -0.2,
+            }
+        )
+        store.add_knowledge(
+            scope_type="member",
+            scope_id="612475113:783190298",
+            memory_type="fact",
+            summary="default knows cats",
+            character_id="default",
+        )
+        store.add_knowledge(
+            scope_type="member",
+            scope_id="612475113:783190298",
+            memory_type="fact",
+            summary="aurora knows rain",
+            character_id="aurora",
+        )
+
+        default_member = store.get_member(group_id="612475113", user_id="783190298", character_id="default")
+        aurora_member = store.get_member(group_id="612475113", user_id="783190298", character_id="aurora")
+
+        self.assertIsNotNone(default_member)
+        self.assertIsNotNone(aurora_member)
+        assert default_member is not None and aurora_member is not None
+        self.assertEqual(default_member["profile_summary"], "likes cats")
+        self.assertEqual(aurora_member["profile_summary"], "likes rain")
+        self.assertAlmostEqual(float(default_member["affinity_score"]), 0.4, places=4)
+        self.assertAlmostEqual(float(aurora_member["affinity_score"]), -0.2, places=4)
+        self.assertEqual(
+            store.recall_knowledge(
+                scopes=[("member", "612475113:783190298")],
+                query="cats",
+                character_id="default",
+            ),
+            ["default knows cats"],
+        )
+        self.assertEqual(
+            store.recall_knowledge(
+                scopes=[("member", "612475113:783190298")],
+                query="rain",
+                character_id="aurora",
+            ),
+            ["aurora knows rain"],
+        )
+
+    def test_sqlite_persona_state_is_isolated_by_character(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime.sqlite3"
+            store = SqliteRuntimeStateStore(path)
+            store.record_member_seen(group_id="612475113", user_id="783190298", qq_nickname="tester")
+            store.save_member(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                    "character_id": "default",
+                    "profile_summary": "likes cats",
+                    "affinity_score": 0.4,
+                }
+            )
+            store.save_member(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                    "character_id": "aurora",
+                    "profile_summary": "likes rain",
+                    "affinity_score": -0.2,
+                }
+            )
+            store.add_knowledge(
+                scope_type="member",
+                scope_id="612475113:783190298",
+                memory_type="fact",
+                summary="default knows cats",
+                character_id="default",
+            )
+            store.add_knowledge(
+                scope_type="member",
+                scope_id="612475113:783190298",
+                memory_type="fact",
+                summary="aurora knows rain",
+                character_id="aurora",
+            )
+
+            reopened = SqliteRuntimeStateStore(path)
+            default_member = reopened.get_member(group_id="612475113", user_id="783190298", character_id="default")
+            aurora_member = reopened.get_member(group_id="612475113", user_id="783190298", character_id="aurora")
+
+            self.assertIsNotNone(default_member)
+            self.assertIsNotNone(aurora_member)
+            assert default_member is not None and aurora_member is not None
+            self.assertEqual(default_member["profile_summary"], "likes cats")
+            self.assertEqual(aurora_member["profile_summary"], "likes rain")
+            self.assertEqual(reopened.knowledge_count(character_id="default"), 1)
+            self.assertEqual(reopened.knowledge_count(character_id="aurora"), 1)
 
     def test_in_memory_store_can_use_embedding_similarity(self) -> None:
         embedder = FakeEmbedder(

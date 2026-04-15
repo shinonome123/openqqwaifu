@@ -78,7 +78,7 @@ class MarketplaceClient:
         source = self._pick_source(source_id)
         if source is None:
             raise ValueError("marketplace source not found")
-        raw_url = self._github_tree_to_raw(github_url)
+        raw_url = self._github_source_to_raw(github_url, source)
         request = Request(raw_url, headers=self._headers(source))
         with urlopen(request, timeout=source.timeout_seconds) as response:
             markdown = response.read().decode("utf-8")
@@ -134,16 +134,47 @@ class MarketplaceClient:
             headers["Authorization"] = f"Bearer {source.api_key}"
         return headers
 
-    @staticmethod
-    def _github_tree_to_raw(github_url: str) -> str:
-        parsed = urlparse(github_url)
-        if parsed.netloc != "github.com":
+    def _github_source_to_raw(self, github_url: str, source: MarketplaceSourceConfig) -> str:
+        parsed = urlparse(str(github_url or "").strip())
+        host = parsed.netloc.lower()
+        if host == "raw.githubusercontent.com":
+            return self._normalize_raw_github_url(parsed)
+        if host != "github.com":
             raise ValueError("only github.com skill sources are supported")
         parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) < 4 or parts[2] != "tree":
-            raise ValueError("github tree URL is required")
-        owner, repo, _, branch, *rest = parts
-        path = "/".join(rest)
-        if not path:
-            raise ValueError("skill directory path is missing")
-        return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}/SKILL.md"
+        if len(parts) < 2:
+            raise ValueError("github repository URL is required")
+        owner, repo, *rest = parts
+        if not rest:
+            branch = self._github_default_branch(owner, repo, source)
+            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/SKILL.md"
+        if len(rest) >= 2 and rest[0] == "tree":
+            branch = rest[1]
+            path = "/".join(rest[2:])
+            if path:
+                return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}/SKILL.md"
+            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/SKILL.md"
+        if len(rest) >= 2 and rest[0] == "blob":
+            branch = rest[1]
+            path = "/".join(rest[2:])
+            if not path:
+                raise ValueError("github blob URL must point to SKILL.md")
+            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+        raise ValueError("unsupported github skill URL; use repository root, tree directory, or SKILL.md blob URL")
+
+    @staticmethod
+    def _normalize_raw_github_url(parsed: Any) -> str:
+        path = str(parsed.path or "").strip("/")
+        if not path.endswith("SKILL.md"):
+            raise ValueError("raw github URL must point to SKILL.md")
+        return f"https://raw.githubusercontent.com/{path}"
+
+    def _github_default_branch(self, owner: str, repo: str, source: MarketplaceSourceConfig) -> str:
+        request = Request(
+            f"https://api.github.com/repos/{owner}/{repo}",
+            headers=self._headers(source),
+        )
+        with urlopen(request, timeout=source.timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        branch = str(payload.get("default_branch") or "").strip()
+        return branch or "main"

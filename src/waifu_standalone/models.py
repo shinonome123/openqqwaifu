@@ -109,6 +109,7 @@ class OutboundMessage:
 class SessionMemory:
     launcher_id: str
     launcher_type: LauncherType
+    character_id: str = ""
     history: list[str] = field(default_factory=list)
     preferred_name: str = ""
     metadata: dict[str, object] = field(default_factory=dict)

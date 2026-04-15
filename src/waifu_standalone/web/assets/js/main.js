@@ -179,7 +179,6 @@ async function pollHealth() {
 
 function initSidebarToggle() {
   const mobileToggle = document.getElementById("sidebar-toggle");
-  const collapseToggle = document.getElementById("sidebar-collapse");
   const app = document.getElementById("app");
   const sidebar = document.getElementById("sidebar");
   const scrim = document.getElementById("sidebar-scrim");
@@ -189,11 +188,6 @@ function initSidebarToggle() {
     mobileToggle.addEventListener("click", () => {
       sidebar.classList.toggle("is-open");
       scrim.classList.toggle("is-visible");
-    });
-  }
-  if (collapseToggle) {
-    collapseToggle.addEventListener("click", () => {
-      app.classList.toggle("sidebar-collapsed");
     });
   }
   scrim.addEventListener("click", () => {
@@ -422,12 +416,12 @@ function renderAuthScreen(state) {
           alt: "",
         }),
       ]),
+    ]),
+    el("div", { class: "auth-card-intro" }, [
       el("div", { class: "auth-card-meta" }, [
         el("div", { class: "auth-card-kicker", text: t("auth.kicker") }),
         el("div", { class: "auth-card-brand", text: t("brand.name") }),
       ]),
-    ]),
-    el("div", { class: "auth-card-intro" }, [
       el("h1", {
         class: "auth-card-title",
         text: requiresSetup ? t("auth.setupTitle") : t("auth.loginTitle"),
@@ -446,6 +440,7 @@ function renderAuthScreen(state) {
 
   app.appendChild(
     el("div", { class: "auth-stage" }, [
+      el("div", { class: "auth-bg-tile", "aria-hidden": "true" }),
       el("div", { class: "auth-orb auth-orb-a", "aria-hidden": "true" }),
       el("div", { class: "auth-orb auth-orb-b", "aria-hidden": "true" }),
       el("div", { class: "auth-orb auth-orb-c", "aria-hidden": "true" }),

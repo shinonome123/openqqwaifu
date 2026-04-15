@@ -54,6 +54,9 @@ class ConfigManager:
             thinking_mode=bool(raw.get("thinking_mode", True)),
             conversation_analysis=bool(raw.get("conversation_analysis", True)),
             summarization_mode=bool(raw.get("summarization_mode", False)),
+            member_auto_sync=bool(raw.get("member_auto_sync", True)),
+            knowledge_auto_extract=bool(raw.get("knowledge_auto_extract", True)),
+            knowledge_auto_extract_limit=int(raw.get("knowledge_auto_extract_limit", 2)),
             event_mode=bool(raw.get("event_mode", True)),
             event_buffer_limit=int(raw.get("event_buffer_limit", 120)),
             narrator_mode=bool(raw.get("narrator_mode", True)),
@@ -105,6 +108,7 @@ class ConfigManager:
             json.dumps(serialize_app_config(config), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        sync_napcat_sidecar_files(config, config_path=target)
 
 
 def _load_str_list(raw_value: object, default: list[str]) -> list[str]:
@@ -194,6 +198,16 @@ def _apply_napcat_autodiscovery(config: AppConfig, config_path: Path | None = No
 
     _provision_napcat_onebot_network(config, napcat_config_dirs)
     return config
+
+
+def sync_napcat_sidecar_files(config: AppConfig, *, config_path: str | Path | None = None) -> None:
+    resolved_path: Path | None = None
+    if config_path is not None:
+        resolved_path = Path(config_path)
+    elif str(config.config_path or "").strip():
+        resolved_path = Path(config.config_path)
+    napcat_config_dirs = _napcat_config_dirs(resolved_path, data_root=config.data_root)
+    _provision_napcat_onebot_network(config, napcat_config_dirs)
 
 
 def _normalize_webui_fields(config: AppConfig) -> AppConfig:
@@ -325,10 +339,7 @@ def _provision_napcat_onebot_network(config: AppConfig, config_dirs: list[Path])
 
     if changed:
         try:
-            onebot_path.write_text(
-                json.dumps(raw, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_json_file_atomic(onebot_path, raw)
         except Exception:
             pass
 
@@ -591,3 +602,12 @@ def _env_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _write_json_file_atomic(path: Path, payload: dict[str, object]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)

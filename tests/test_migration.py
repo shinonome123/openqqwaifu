@@ -93,9 +93,11 @@ class MigrationTests(unittest.TestCase):
             importer = WaifuDataImporter(store, waifu_root)
 
             result = importer.import_launcher("612475113", "group")
-            loaded = store.load("612475113", "group")
+            loaded = store.load("612475113", "group", character_id="default")
 
             self.assertTrue(result.imported)
+            self.assertEqual(loaded.character_id, "default")
+            self.assertIn("default", result.session_path)
             self.assertEqual(loaded.preferred_name, "")
             self.assertEqual(loaded.metadata["history_source"], "short_term_memory")
             self.assertEqual(loaded.metadata["waifu_config"]["group_response_delay"], 3)
@@ -130,7 +132,7 @@ class MigrationTests(unittest.TestCase):
             result = importer.import_launcher("612475113", "group")
 
             self.assertTrue(result.imported)
-            loaded = store.load("612475113", "group")
+            loaded = store.load("612475113", "group", character_id="default")
             self.assertEqual(loaded.history, [])
             self.assertEqual(loaded.metadata.get("long_term_memory", []), [])
 
@@ -156,7 +158,7 @@ class MigrationTests(unittest.TestCase):
             result = importer.import_launcher("612475113", "group")
 
             self.assertTrue(result.imported)
-            loaded = store.load("612475113", "group")
+            loaded = store.load("612475113", "group", character_id="default")
             self.assertEqual(loaded.history, [])
             self.assertEqual(loaded.metadata.get("long_term_memory", []), [])
 

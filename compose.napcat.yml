@@ -4,7 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: openqqwaifu
-    command: ["python", "run_cli.py", "serve", "--config", "/app/data/docker-compose-config.json"]
+    command:
+      [
+        "sh",
+        "-lc",
+        "test -f /app/data/docker-compose-config.json || cp /app/examples/config.napcat.compose.json /app/data/docker-compose-config.json && python run_cli.py serve --config /app/data/docker-compose-config.json",
+      ]
     environment:
       OPENQQWAIFU_DATA_ROOT: /app/data
       OPENQQWAIFU_CONTAINER_HOSTNAME: openqqwaifu

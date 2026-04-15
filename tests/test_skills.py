@@ -225,6 +225,25 @@ command-arg-mode: raw
         assert reply is not None
         self.assertIn("我先帮你收一下重点", reply.text)
 
+    def test_skill_list_dispatch_accepts_skill_menu_phrases(self) -> None:
+        service, _ = build_default_service()
+
+        for text in ("技能菜单", "你会干什么", "help"):
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text=text)],
+                )
+            )
+
+            self.assertIsNotNone(reply, msg=text)
+            assert reply is not None
+            self.assertTrue(reply.text)
+            self.assertNotIn("解锁哪一个", reply.text, msg=text)
+
     def test_generator_injects_only_prompt_visible_skills(self) -> None:
         generator = Generator(AppConfig())
         session = SessionMemory(launcher_id="1", launcher_type="person")

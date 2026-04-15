@@ -194,6 +194,50 @@ class CardTests(unittest.TestCase):
             self.assertTrue(portrait["available"])
             self.assertIn("/api/portraits?character=aurora", portrait["url"])
 
+    def test_active_character_wins_over_imported_metadata_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = CardManager(AppConfig(data_root=tmpdir, character="default"))
+            cards_root = Path(tmpdir) / "cards"
+            cards_root.mkdir(parents=True, exist_ok=True)
+            imported_path = cards_root / "imported_person.yaml"
+            imported_path.write_text(
+                "\n".join(
+                    [
+                        "user_name: LegacyUser",
+                        "assistant_name: legacy",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manager.save_editor_bundle(
+                "aurora",
+                shared_fields={
+                    "assistant_name": "Aurora",
+                    "user_name": "Captain",
+                    "language": "zh",
+                },
+                person_fields={"profile": ["calm"]},
+                group_fields={"profile": ["quick"]},
+            )
+            manager.set_active_character("aurora")
+            session = SessionMemory(
+                launcher_id="783190298",
+                launcher_type="person",
+                metadata={
+                    "card": {
+                        "assistant_name": "legacy",
+                        "user_name": "LegacyUser",
+                        "source": str(imported_path),
+                    }
+                },
+            )
+
+            card = manager.load("person", session)
+
+            self.assertEqual(card.assistant_name, "Aurora")
+            self.assertEqual(card.user_name, "Captain")
+            self.assertTrue(card.source.endswith("aurora_person.yaml"))
+
 
 if __name__ == "__main__":
     unittest.main()

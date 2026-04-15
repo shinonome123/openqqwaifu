@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -99,6 +100,20 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertEqual(status, 202)
         self.assertEqual(body["status"], "ignored")
+
+    def test_notice_payload_is_forwarded_to_service(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_handle_notice(service, payload):  # type: ignore[no-untyped-def]
+            calls.append(dict(payload))
+            return {"status": "ok", "reason": "bot_joined_group"}
+
+        with patch.object(type(self.service), "handle_notice_payload", fake_handle_notice):
+            status, body = self.api.handle_json({"post_type": "notice", "notice_type": "group_increase"})
+
+        self.assertEqual(status, 202)
+        self.assertEqual(body["reason"], "bot_joined_group")
+        self.assertEqual(len(calls), 1)
 
     def test_delivery_failures_are_mapped_to_502(self) -> None:
         api = HttpApi(_BrokenService())  # type: ignore[arg-type]

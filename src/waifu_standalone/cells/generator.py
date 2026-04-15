@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from ..config import AppConfig
 from ..contracts import GeneratedImage
@@ -171,6 +172,45 @@ class Generator:
             except DifyChatError:
                 pass
         return self._fallback_summary(history_lines)
+
+    def extract_knowledge(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        latest_message: str,
+        conversation_view: str,
+        address: str = "",
+        max_entries: int = 2,
+        allow_fallback: bool = True,
+    ) -> dict[str, Any]:
+        cleaned_message = " ".join(str(latest_message or "").split())
+        if not cleaned_message:
+            return {"entries": [], "profile_summary": ""}
+        if self.llm_ready:
+            prompt = self._build_knowledge_query(
+                event,
+                session,
+                assistant_name=assistant_name,
+                latest_message=cleaned_message,
+                conversation_view=conversation_view,
+                address=address,
+                max_entries=max_entries,
+            )
+            try:
+                response = self._dify_client.invoke(
+                    prompt,
+                    user=f"knowledge-{event.sender_id or 'waifu-user'}",
+                )
+                parsed = self._parse_knowledge_payload(response, max_entries=max_entries)
+                if parsed["entries"] or parsed["profile_summary"]:
+                    return parsed
+            except DifyChatError:
+                pass
+        if allow_fallback:
+            return self._fallback_extract_knowledge(cleaned_message, max_entries=max_entries)
+        return {"entries": [], "profile_summary": ""}
 
     def generate_image(self, prompt: str) -> GeneratedImage:
         cleaned = str(prompt or "").strip()
@@ -407,6 +447,42 @@ class Generator:
             f"[History]\n{payload}"
         )
 
+    def _build_knowledge_query(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        latest_message: str,
+        conversation_view: str,
+        address: str,
+        max_entries: int,
+    ) -> str:
+        card = self._cards.load(event.launcher_type, session)
+        lines = [
+            f"You extract durable long-term memory for {assistant_name}.",
+            "Return JSON only.",
+            (
+                'Use this schema: {"entries":[{"memory_type":"fact|preference|relationship|event",'
+                '"scope_hint":"member|group|person|global","summary":"...","tags":["..."],"confidence":0.0}],'
+                '"profile_summary":"..."}'
+            ),
+            f"Keep at most {max(1, int(max_entries))} entries.",
+            "Only keep durable facts, preferences, relationship changes, or important events worth recalling later.",
+            "Ignore greetings, transient commands, image requests, search requests, onboarding name collection, and meta instructions.",
+            "Do not store preferred-name requests or the fact that the assistant asked for onboarding.",
+            "The summary must be concise and self-contained.",
+            f"Speaker display name: {address or event.sender_name or event.sender_id}",
+            f"Launcher type: {event.launcher_type}",
+            f"Latest message: {latest_message}",
+        ]
+        profile_lines = [line for line in card.profile[:3] if str(line or "").strip()]
+        if profile_lines:
+            lines.append("Persona profile: " + " | ".join(profile_lines))
+        if conversation_view:
+            lines.append("[Recent conversation]\n" + conversation_view)
+        return "\n\n".join(lines)
+
     def _fallback_reply(
         self,
         event: InboundEvent,
@@ -512,11 +588,53 @@ class Generator:
         tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()] if isinstance(raw_tags, list) else []
         return summary, tags[:6]
 
+    def _parse_knowledge_payload(self, response: str, *, max_entries: int) -> dict[str, Any]:
+        payload = self._extract_json_payload(response)
+        if not payload:
+            return {"entries": [], "profile_summary": ""}
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return {"entries": [], "profile_summary": ""}
+        if isinstance(decoded, list):
+            decoded = {"entries": decoded}
+        if not isinstance(decoded, dict):
+            return {"entries": [], "profile_summary": ""}
+        raw_entries = decoded.get("entries", [])
+        entries: list[dict[str, Any]] = []
+        if isinstance(raw_entries, list):
+            for item in raw_entries[: max(1, int(max_entries))]:
+                normalized = self._normalize_knowledge_item(item)
+                if normalized:
+                    entries.append(normalized)
+        profile_summary = str(decoded.get("profile_summary", "") or "").strip()
+        return {
+            "entries": entries,
+            "profile_summary": self._clip(profile_summary, limit=120) if profile_summary else "",
+        }
+
     @staticmethod
     def _extract_json_block(text: str) -> str:
         raw = str(text or "")
         start = raw.find("{")
         end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return ""
+        return raw[start : end + 1]
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> str:
+        raw = str(text or "")
+        object_start = raw.find("{")
+        array_start = raw.find("[")
+        if object_start == -1 and array_start == -1:
+            return ""
+        if object_start == -1 or (array_start != -1 and array_start < object_start):
+            start = array_start
+            end = raw.rfind("]")
+        else:
+            start = object_start
+            end = raw.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return ""
         return raw[start : end + 1]
@@ -533,6 +651,140 @@ class Generator:
             seen.add(term)
             tags.append(term)
         return tags
+
+    def _fallback_extract_knowledge(self, latest_message: str, *, max_entries: int) -> dict[str, Any]:
+        compact = " ".join(str(latest_message or "").split()).strip()
+        if not compact or self._asks_for_name(compact):
+            return {"entries": [], "profile_summary": ""}
+
+        entries: list[dict[str, Any]] = []
+        profile_parts: list[str] = []
+
+        def add_entry(
+            memory_type: str,
+            summary: str,
+            *,
+            tags: list[str] | None = None,
+            scope_hint: str = "member",
+            confidence: float = 0.62,
+        ) -> None:
+            if len(entries) >= max(1, int(max_entries)):
+                return
+            clean_summary = " ".join(str(summary or "").split()).strip()
+            if not clean_summary:
+                return
+            existing = {str(item.get("summary", "")).strip().casefold() for item in entries}
+            if clean_summary.casefold() in existing:
+                return
+            entries.append(
+                {
+                    "memory_type": memory_type,
+                    "scope_hint": scope_hint,
+                    "summary": clean_summary,
+                    "tags": (tags or [])[:5],
+                    "confidence": confidence,
+                }
+            )
+
+        preference_patterns = (
+            (r"(?:^|[，,。.!? ])我(?:很)?喜欢(.{1,32})$", "Likes {item}", 0.72),
+            (r"(?:^|[，,。.!? ])我(?:很)?讨厌(.{1,32})$", "Dislikes {item}", 0.70),
+            (r"(?:^|[ ,.!?])i\s+(?:really\s+)?like\s+(.{1,48})$", "Likes {item}", 0.72),
+            (r"(?:^|[ ,.!?])i\s+(?:really\s+)?love\s+(.{1,48})$", "Likes {item}", 0.74),
+            (r"(?:^|[ ,.!?])i\s+(?:really\s+)?hate\s+(.{1,48})$", "Dislikes {item}", 0.70),
+        )
+        identity_patterns = (
+            (r"(?:^|[，,。.!? ])我是(.{1,18})$", "Is {item}", 0.66),
+            (r"(?:^|[ ,.!?])i(?:'m| am)\s+(.{1,24})$", "Is {item}", 0.66),
+        )
+        group_patterns = (
+            (r"(?:这个群|我們群|我们群|本群)(.{1,32})", "The group {item}", 0.58),
+            (r"(?:this group)(.{1,40})", "The group {item}", 0.58),
+        )
+
+        for pattern, template, confidence in preference_patterns:
+            match = re.search(pattern, compact, flags=re.IGNORECASE)
+            if not match:
+                continue
+            item = self._clean_knowledge_fragment(match.group(1))
+            if not item:
+                continue
+            summary = template.format(item=item)
+            add_entry("preference", summary, tags=self._extract_tags(item)[:4], confidence=confidence)
+            profile_parts.append(summary)
+            break
+
+        for pattern, template, confidence in identity_patterns:
+            match = re.search(pattern, compact, flags=re.IGNORECASE)
+            if not match:
+                continue
+            item = self._clean_knowledge_fragment(match.group(1))
+            if not item or self._looks_like_name_only(item):
+                continue
+            summary = template.format(item=item)
+            add_entry("fact", summary, tags=self._extract_tags(item)[:4], confidence=confidence)
+            profile_parts.append(summary)
+            break
+
+        for pattern, template, confidence in group_patterns:
+            match = re.search(pattern, compact, flags=re.IGNORECASE)
+            if not match:
+                continue
+            item = self._clean_knowledge_fragment(match.group(1))
+            if not item:
+                continue
+            summary = template.format(item=item)
+            add_entry("fact", summary, tags=self._extract_tags(item)[:4], scope_hint="group", confidence=confidence)
+            break
+
+        return {
+            "entries": entries[: max(1, int(max_entries))],
+            "profile_summary": "; ".join(profile_parts[:2]),
+        }
+
+    def _normalize_knowledge_item(self, item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        memory_type = str(item.get("memory_type", "") or "").strip().lower() or "fact"
+        if memory_type not in {"fact", "preference", "relationship", "event", "summary"}:
+            memory_type = "fact"
+        scope_hint = str(item.get("scope_hint", "") or "").strip().lower() or "member"
+        if scope_hint not in {"member", "group", "person", "global"}:
+            scope_hint = "member"
+        summary = " ".join(str(item.get("summary", "") or "").split()).strip()
+        if not summary or self._asks_for_name(summary):
+            return None
+        raw_tags = item.get("tags", [])
+        tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()] if isinstance(raw_tags, list) else []
+        try:
+            confidence = float(item.get("confidence", 0.6) or 0.6)
+        except (TypeError, ValueError):
+            confidence = 0.6
+        confidence = max(0.0, min(1.0, confidence))
+        return {
+            "memory_type": memory_type,
+            "scope_hint": scope_hint,
+            "summary": self._clip(summary, limit=160),
+            "tags": tags[:5],
+            "confidence": confidence,
+        }
+
+    @staticmethod
+    def _clean_knowledge_fragment(text: str) -> str:
+        cleaned = " ".join(str(text or "").split()).strip()
+        cleaned = cleaned.strip("，,。.!?;:()[]{}\"'")
+        if not cleaned:
+            return ""
+        if len(cleaned) > 48:
+            cleaned = cleaned[:48].rstrip()
+        return cleaned
+
+    @staticmethod
+    def _looks_like_name_only(text: str) -> bool:
+        cleaned = " ".join(str(text or "").split()).strip()
+        if not cleaned or len(cleaned) > 12:
+            return False
+        return bool(re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9_]{1,12}", cleaned))
 
     @staticmethod
     def _format_skill_block(active_skills: list[SkillSpec]) -> str:

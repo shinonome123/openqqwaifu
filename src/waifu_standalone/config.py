@@ -94,6 +94,9 @@ class AppConfig:
     thinking_mode: bool = True
     conversation_analysis: bool = True
     summarization_mode: bool = False
+    member_auto_sync: bool = True
+    knowledge_auto_extract: bool = True
+    knowledge_auto_extract_limit: int = 2
     event_mode: bool = True
     event_buffer_limit: int = 120
     narrator_mode: bool = True

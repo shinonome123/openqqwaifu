@@ -7,13 +7,13 @@ from .models import EmotionState, InboundEvent, OutboundMessage, SessionMemory
 
 
 class MemoryStore(Protocol):
-    def load(self, launcher_id: str, launcher_type: str) -> SessionMemory:
+    def load(self, launcher_id: str, launcher_type: str, character_id: str = "") -> SessionMemory:
         ...
 
     def save(self, session: SessionMemory) -> SessionMemory:
         ...
 
-    def append(self, launcher_id: str, launcher_type: str, line: str) -> SessionMemory:
+    def append(self, launcher_id: str, launcher_type: str, line: str, character_id: str = "") -> SessionMemory:
         ...
 
 
