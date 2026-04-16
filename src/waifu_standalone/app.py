@@ -118,7 +118,7 @@ class WaifuService:
     state_store: Any
     outbound: OutboundPort
     napcat_login: NapCatLoginBridge | None = None
-    _group_follow_up_until: dict[str, float] = field(default_factory=dict)
+    _group_follow_up_until: dict[tuple[str, str], float] = field(default_factory=dict)
     _recent_outbound: list[OutboundMessage] = field(default_factory=list)
     _recent_events: list[dict[str, Any]] = field(default_factory=list)
     _recent_behavior_events: list[dict[str, Any]] = field(default_factory=list)
@@ -128,6 +128,9 @@ class WaifuService:
     _session_locks: dict[tuple[str, str], threading.Lock] = field(default_factory=dict, repr=False)
     _background_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _background_tasks: set[Future[object]] = field(default_factory=set, repr=False)
+    _memory_store_builder: Callable[[str], Any] | None = field(default=None, repr=False)
+    _state_store_builder: Callable[[str], Any] | None = field(default=None, repr=False)
+    _bound_character_id: str = field(default="", repr=False)
     console: ConsolePanels = field(init=False, repr=False)
     knowledge: KnowledgeCurator = field(init=False, repr=False)
     notice: NoticeDispatcher = field(init=False, repr=False)
@@ -140,11 +143,24 @@ class WaifuService:
     def _active_character_id(self) -> str:
         return str(self.cards.active_character() or self.config.character or "default").strip() or "default"
 
+    def activate_character(self, character: str, *, reset_sessions: bool = True) -> str:
+        active_character = self.cards.set_active_character(character)
+        self.config.character = active_character
+        self._rebind_character_scoped_storage(active_character, reset_sessions=reset_sessions)
+        return active_character
+
+    def _ensure_character_scope_bound(self) -> None:
+        active_character = self._active_character_id()
+        if self._bound_character_id == active_character:
+            return
+        self._rebind_character_scoped_storage(active_character, reset_sessions=False)
+
     def handle_event(self, event: InboundEvent) -> OutboundMessage | None:
         with self._session_lock_for(event):
             return self._handle_event_locked(event)
 
     def _handle_event_locked(self, event: InboundEvent) -> OutboundMessage | None:
+        self._ensure_character_scope_bound()
         current_character = self._active_character_id()
         text = event.command_text(self.config.bot_account_id)
         live_runtime = self._requires_live_llm()
@@ -169,7 +185,11 @@ class WaifuService:
         )
         address = self._resolve_address(event, session)
         latest_message = self._latest_message_text(event, text)
-        inbound_behavior = self.event_engine.capture_inbound(event, text=latest_message)
+        inbound_behavior = self.event_engine.capture_inbound(
+            event,
+            text=latest_message,
+            character_id=current_character,
+        )
         self._record_behavior_event(inbound_behavior)
 
         repeat_reply = self._build_repeat_reply(event, session, address=address)
@@ -773,7 +793,12 @@ class WaifuService:
             character_id=resolved_character_id,
         )
         self._record_behavior_event(
-            self.event_engine.capture_outbound(event=event, message=message, reason=behavior_reason or "reply")
+            self.event_engine.capture_outbound(
+                event=event,
+                message=message,
+                reason=behavior_reason or "reply",
+                character_id=resolved_character_id,
+            )
         )
         self.value_game.apply(
             state_store=self.state_store,
@@ -1159,8 +1184,9 @@ class WaifuService:
         return self._has_pending_search_follow_up(event)
 
     def _is_follow_up_window_active(self, launcher_id: str) -> bool:
+        key = (self._active_character_id(), launcher_id)
         with self._state_lock:
-            deadline = self._group_follow_up_until.get(launcher_id, 0.0)
+            deadline = self._group_follow_up_until.get(key, 0.0)
         if time.monotonic() <= deadline:
             return True
         session = self.memory.load(
@@ -1178,8 +1204,9 @@ class WaifuService:
             return
         deadline_monotonic = time.monotonic() + window
         deadline_wall = time.time() + window
+        key = (self._active_character_id(), event.launcher_id)
         with self._state_lock:
-            self._group_follow_up_until[event.launcher_id] = deadline_monotonic
+            self._group_follow_up_until[key] = deadline_monotonic
         self._persist_follow_up_window(
             event.launcher_id,
             event.launcher_type,
@@ -1624,6 +1651,7 @@ class WaifuService:
         return self.knowledge._session_knowledge_entries(event, query)
 
     def _behavior_context(self, event: InboundEvent, *, limit: int = 8) -> list[dict[str, Any]]:
+        current_character = self._active_character_id()
         launcher_type = str(event.launcher_type or "").strip()
         launcher_id = str(event.launcher_id or "").strip()
         sender_id = str(event.sender_id or "").strip()
@@ -1632,7 +1660,8 @@ class WaifuService:
         scoped = [
             item
             for item in items
-            if str(item.get("launcher_type", "") or "").strip() == launcher_type
+            if str(item.get("character_id", "") or "").strip() == current_character
+            and str(item.get("launcher_type", "") or "").strip() == launcher_type
             and str(item.get("launcher_id", "") or "").strip() == launcher_id
             and str(item.get("sender_id", "") or "").strip() == sender_id
         ]
@@ -1946,15 +1975,19 @@ class WaifuService:
         limit: int = 80,
         launcher_type: str = "",
         launcher_id: str = "",
+        character_id: str = "",
     ) -> list[dict[str, object]]:
+        safe_character = str(character_id or self._active_character_id()).strip()
         safe_type = str(launcher_type or "").strip()
         safe_id = str(launcher_id or "").strip()
         with self._state_lock:
             items = [dict(item) for item in self._recent_behavior_events[-max(1, int(limit)) :][::-1]]
-        if not safe_type and not safe_id:
+        if not safe_type and not safe_id and not safe_character:
             return items
         filtered: list[dict[str, object]] = []
         for item in items:
+            if safe_character and str(item.get("character_id", "") or "").strip() != safe_character:
+                continue
             if safe_type and str(item.get("launcher_type", "") or "").strip() != safe_type:
                 continue
             if safe_id and str(item.get("launcher_id", "") or "").strip() != safe_id:
@@ -2147,10 +2180,11 @@ class WaifuService:
             inbound = sum(1 for entry in self._recent_events if entry.get("kind") == "inbound")
             outbound = sum(1 for entry in self._recent_events if entry.get("kind") == "outbound")
             behavior = len(self._recent_behavior_events)
+            current_character = self._active_character_id()
             active = sum(
                 1
-                for _, until in self._group_follow_up_until.items()
-                if until > time.monotonic()
+                for (character_id, _), until in self._group_follow_up_until.items()
+                if character_id == current_character and until > time.monotonic()
             )
             return {
                 "uptime_seconds": uptime,
@@ -2176,6 +2210,33 @@ class WaifuService:
             return
         self.config.bot_account_id = uin
         self._persist_config()
+
+    def _rebind_character_scoped_storage(self, character_id: str, *, reset_sessions: bool = False) -> None:
+        active_character = str(character_id or "").strip() or self._active_character_id()
+        if self._memory_store_builder is not None:
+            self.memory.store = self._memory_store_builder(active_character)
+        if self._state_store_builder is not None:
+            previous_state_store = self.state_store
+            self.state_store = self._state_store_builder(active_character)
+            if previous_state_store is not self.state_store:
+                _close_component(previous_state_store)
+        if hasattr(self.state_store, "set_default_character"):
+            self.state_store.set_default_character(active_character)
+        if hasattr(self.state_store, "refresh_knowledge_embeddings"):
+            self.state_store.refresh_knowledge_embeddings()
+        self.memory.set_character_resolver(self.cards.active_character)
+        self._bound_character_id = active_character
+        self._reset_character_runtime_context(reset_sessions=reset_sessions)
+
+    def _reset_character_runtime_context(self, *, reset_sessions: bool = False) -> None:
+        if reset_sessions:
+            clear_sessions = getattr(self.memory.store, "clear", None)
+            if callable(clear_sessions):
+                clear_sessions()
+        with self._state_lock:
+            self._group_follow_up_until.clear()
+            self._recent_behavior_events.clear()
+            self._session_locks.clear()
 
     def _refresh_runtime_components(self, *, rebuild_generator: bool = False, rebuild_outbound: bool = False) -> None:
         if rebuild_generator:
@@ -2350,7 +2411,12 @@ class WaifuService:
             segments=[MessageSegment(kind="text", text=session.history[-1] if session.history else "")],
         )
         knowledge_entries = self._detail_knowledge_entries(session)
-        behavior_events = self.get_behavior_events(limit=8, launcher_type=launcher_type, launcher_id=launcher_id)
+        behavior_events = self.get_behavior_events(
+            limit=8,
+            launcher_type=launcher_type,
+            launcher_id=launcher_id,
+            character_id=str(session.character_id or self._active_character_id()).strip(),
+        )
         return self.memory_graph.build(
             event=detail_event,
             session=session,
@@ -2439,11 +2505,16 @@ class WaifuService:
 
 def build_default_service(config: AppConfig | None = None) -> tuple[WaifuService, CapturingOutboundPort]:
     app_config = config or AppConfig()
+    initial_character = _initial_character_id(app_config)
+    memory_builder = lambda character_id: InMemoryStore(scoped_character_id=character_id)
+    state_builder = lambda character_id: InMemoryRuntimeStateStore(embedder=_build_embedding_client(app_config))
     return _build_service(
         app_config,
-        InMemoryStore(),
-        InMemoryRuntimeStateStore(embedder=_build_embedding_client(app_config)),
+        memory_builder(initial_character),
+        state_builder(initial_character),
         CapturingOutboundPort(),
+        memory_store_builder=memory_builder,
+        state_store_builder=state_builder,
     )
 
 
@@ -2452,13 +2523,24 @@ def build_file_service(
     store_root: str | Path | None = None,
 ) -> tuple[WaifuService, CapturingOutboundPort]:
     app_config = config or AppConfig()
-    root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
-    state_root = Path(app_config.data_root) / "state" / "runtime.sqlite3"
+    session_root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
+    state_root = Path(app_config.data_root) / "state" / "characters"
+    initial_character = _initial_character_id(app_config)
+    memory_builder = lambda character_id: FileMemoryStore(
+        session_root / character_id,
+        scoped_character_id=character_id,
+    )
+    state_builder = lambda character_id: SqliteRuntimeStateStore(
+        state_root / character_id / "runtime.sqlite3",
+        embedder=_build_embedding_client(app_config),
+    )
     return _build_service(
         app_config,
-        FileMemoryStore(root),
-        SqliteRuntimeStateStore(state_root, embedder=_build_embedding_client(app_config)),
+        memory_builder(initial_character),
+        state_builder(initial_character),
         CapturingOutboundPort(),
+        memory_store_builder=memory_builder,
+        state_store_builder=state_builder,
     )
 
 
@@ -2467,14 +2549,25 @@ def build_runtime_service(
     store_root: str | Path | None = None,
 ) -> tuple[WaifuService, OutboundPort]:
     app_config = config or AppConfig()
-    root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
+    session_root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
     outbound = _build_runtime_outbound(app_config)
-    state_root = Path(app_config.data_root) / "state" / "runtime.sqlite3"
+    state_root = Path(app_config.data_root) / "state" / "characters"
+    initial_character = _initial_character_id(app_config)
+    memory_builder = lambda character_id: FileMemoryStore(
+        session_root / character_id,
+        scoped_character_id=character_id,
+    )
+    state_builder = lambda character_id: SqliteRuntimeStateStore(
+        state_root / character_id / "runtime.sqlite3",
+        embedder=_build_embedding_client(app_config),
+    )
     return _build_service(
         app_config,
-        FileMemoryStore(root),
-        SqliteRuntimeStateStore(state_root, embedder=_build_embedding_client(app_config)),
+        memory_builder(initial_character),
+        state_builder(initial_character),
         outbound,
+        memory_store_builder=memory_builder,
+        state_store_builder=state_builder,
     )
 
 
@@ -2502,11 +2595,18 @@ def _build_napcat_login_bridge(app_config: AppConfig) -> NapCatLoginBridge:
     )
 
 
+def _initial_character_id(app_config: AppConfig) -> str:
+    return str(CardManager(app_config).active_character() or app_config.character or "default").strip() or "default"
+
+
 def _build_service(
     app_config: AppConfig,
     store: Any,
     state_store: Any,
     outbound: OutboundPort,
+    *,
+    memory_store_builder: Callable[[str], Any] | None = None,
+    state_store_builder: Callable[[str], Any] | None = None,
 ) -> tuple[WaifuService, OutboundPort]:
     generator = Generator(
         app_config,
@@ -2535,15 +2635,14 @@ def _build_service(
         state_store=state_store,
         outbound=outbound,
         napcat_login=_build_napcat_login_bridge(app_config),
+        _memory_store_builder=memory_store_builder,
+        _state_store_builder=state_store_builder,
     )
     service.memory.set_character_resolver(service.cards.active_character)
+    service._bound_character_id = service.cards.active_character()
     if hasattr(service.state_store, "set_default_character"):
         service.state_store.set_default_character(service.cards.active_character())
-    service._migrate_legacy_session_state()
-    adopt_character = getattr(service.state_store, "adopt_legacy_character", None)
-    if callable(adopt_character):
-        adopt_character(service.cards.active_character())
-    service._repair_character_isolation_state()
+    service._repair_character_isolation_state(service.cards.active_character())
     if hasattr(service.state_store, "refresh_knowledge_embeddings"):
         service.state_store.refresh_knowledge_embeddings()
     tools.register(

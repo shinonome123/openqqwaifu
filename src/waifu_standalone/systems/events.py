@@ -10,6 +10,7 @@ from ..models import InboundEvent, OutboundMessage
 
 @dataclass(slots=True)
 class BehaviorEvent:
+    character_id: str
     kind: str
     launcher_type: str
     launcher_id: str
@@ -20,6 +21,7 @@ class BehaviorEvent:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "character_id": self.character_id,
             "kind": self.kind,
             "launcher_type": self.launcher_type,
             "launcher_id": self.launcher_id,
@@ -34,7 +36,7 @@ class BehaviorEventEngine:
     def __init__(self, config: AppConfig):
         self.config = config
 
-    def capture_inbound(self, event: InboundEvent, *, text: str) -> BehaviorEvent | None:
+    def capture_inbound(self, event: InboundEvent, *, text: str, character_id: str = "") -> BehaviorEvent | None:
         if not self.config.event_mode:
             return None
         normalized = str(text or "").strip() or event.to_memory_text()
@@ -46,6 +48,7 @@ class BehaviorEventEngine:
         elif self._looks_like_question(normalized):
             event_kind = "question"
         return BehaviorEvent(
+            character_id=str(character_id or "").strip(),
             kind=event_kind,
             launcher_type=event.launcher_type,
             launcher_id=event.launcher_id,
@@ -64,6 +67,7 @@ class BehaviorEventEngine:
         event: InboundEvent,
         message: OutboundMessage,
         reason: str = "reply",
+        character_id: str = "",
     ) -> BehaviorEvent | None:
         if not self.config.event_mode:
             return None
@@ -71,6 +75,7 @@ class BehaviorEventEngine:
         if reason:
             kind = reason if kind == "reply" else kind
         return BehaviorEvent(
+            character_id=str(character_id or "").strip(),
             kind=kind,
             launcher_type=message.launcher_type,
             launcher_id=message.launcher_id,

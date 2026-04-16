@@ -65,8 +65,8 @@ class ConsolePanels:
             recent_behavior_events = [dict(item) for item in svc._recent_behavior_events[-12:][::-1]]
             active_launchers = sorted(
                 launcher_id
-                for launcher_id, until in svc._group_follow_up_until.items()
-                if until > time.monotonic()
+                for (character_id, launcher_id), until in svc._group_follow_up_until.items()
+                if character_id == current_character and until > time.monotonic()
             )
         return {
             "service_name": svc.config.service_name,
@@ -185,12 +185,7 @@ class ConsolePanels:
             generated = self._generate_character_portrait(character, bundle, portrait)
             bundle["portrait"] = generated
         if set_active:
-            active_character = svc.cards.set_active_character(character)
-            svc.config.character = active_character
-            set_default_character = getattr(svc.state_store, "set_default_character", None)
-            if callable(set_default_character):
-                set_default_character(active_character)
-            svc._repair_character_isolation_state(active_character)
+            svc.activate_character(character, reset_sessions=True)
         svc._persist_config()
         return {
             "current_character": svc.cards.active_character(),

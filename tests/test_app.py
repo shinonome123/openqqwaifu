@@ -17,9 +17,10 @@ from waifu_standalone.app import build_default_service, build_file_service, buil
 from waifu_standalone.config import AppConfig, QQSidecarConfig
 from waifu_standalone.gateways.onebot_actions import OneBotHttpOutboundPort
 from waifu_standalone.models import InboundEvent, MessageSegment
-from waifu_standalone.memory import InMemoryStore
+from waifu_standalone.memory import FileMemoryStore, InMemoryStore
 from waifu_standalone.organs.memories import Memory
 from waifu_standalone.services import CapturingOutboundPort
+from waifu_standalone.state_store import SqliteRuntimeStateStore
 from waifu_standalone.systems.searching import SearchContext, SearchResult
 
 
@@ -1263,6 +1264,147 @@ class WaifuServiceTests(unittest.TestCase):
 
             self.assertEqual(saved["current_character"], "aurora")
             self.assertEqual(reloaded.get_character_panel()["current_character"], "aurora")
+
+    def test_save_character_panel_switch_resets_character_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(data_root=tmpdir, character="default")
+            service, _ = build_file_service(config)
+            aurora_sessions = FileMemoryStore(Path(tmpdir) / "sessions" / "aurora", scoped_character_id="aurora")
+            polluted = aurora_sessions.load("612475113", "group")
+            polluted.history = [
+                "tester: stale question",
+                "assistant: stale answer",
+            ]
+            aurora_sessions.save(polluted)
+
+            service.save_character_panel(
+                {
+                    "character": "aurora",
+                    "set_active": True,
+                    "shared_fields": {
+                        "assistant_name": "Aurora",
+                        "user_name": "Captain",
+                        "language": "zh",
+                    },
+                    "person_fields": {"profile": ["calm"]},
+                    "group_fields": {"profile": ["quick"]},
+                }
+            )
+
+            switched = service.memory.load("612475113", "group", character_id="aurora")
+
+            self.assertEqual(switched.character_id, "aurora")
+            self.assertEqual(switched.history, [])
+
+    def test_save_character_panel_switches_to_character_scoped_runtime_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(data_root=tmpdir, character="default")
+            service, _ = build_file_service(config)
+            service.state_store.save_member(
+                {
+                    "group_id": "",
+                    "user_id": "783190298",
+                    "qq_nickname": "tester",
+                    "preferred_name": "default-name",
+                    "onboarding_status": "ready",
+                }
+            )
+
+            service.save_character_panel(
+                {
+                    "character": "aurora",
+                    "set_active": True,
+                    "shared_fields": {
+                        "assistant_name": "Aurora",
+                        "user_name": "Captain",
+                        "language": "zh",
+                    },
+                    "person_fields": {"profile": ["calm"]},
+                    "group_fields": {"profile": ["quick"]},
+                }
+            )
+
+            self.assertEqual(
+                service.state_store.path,
+                Path(tmpdir) / "state" / "characters" / "aurora" / "runtime.sqlite3",
+            )
+            self.assertIsNone(service.state_store.get_member(group_id="", user_id="783190298"))
+
+            default_store = SqliteRuntimeStateStore(
+                Path(tmpdir) / "state" / "characters" / "default" / "runtime.sqlite3"
+            )
+            persisted = default_store.get_member(group_id="", user_id="783190298")
+            default_store.close()
+
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual(persisted["preferred_name"], "default-name")
+
+    def test_get_behavior_events_filters_by_character(self) -> None:
+        service, _ = build_default_service(AppConfig(group_reply_requires_mention=False))
+        event = InboundEvent(
+            launcher_id="612475113",
+            launcher_type="group",
+            sender_id="783190298",
+            sender_name="tester",
+            segments=[MessageSegment(kind="text", text="hello there")],
+        )
+
+        service._record_behavior_event(
+            service.event_engine.capture_inbound(event, text="default hello", character_id="default")
+        )
+        service._record_behavior_event(
+            service.event_engine.capture_inbound(event, text="aurora hello", character_id="aurora")
+        )
+
+        default_events = service.get_behavior_events(
+            limit=10,
+            launcher_type="group",
+            launcher_id="612475113",
+            character_id="default",
+        )
+        aurora_events = service.get_behavior_events(
+            limit=10,
+            launcher_type="group",
+            launcher_id="612475113",
+            character_id="aurora",
+        )
+
+        self.assertEqual(len(default_events), 1)
+        self.assertEqual(default_events[0]["character_id"], "default")
+        self.assertEqual(default_events[0]["summary"], "default hello")
+        self.assertEqual(len(aurora_events), 1)
+        self.assertEqual(aurora_events[0]["character_id"], "aurora")
+        self.assertEqual(aurora_events[0]["summary"], "aurora hello")
+
+    def test_character_switch_isolates_follow_up_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                character="default",
+                bot_account_id="3518944354",
+                group_follow_up_window_seconds=30.0,
+            )
+            service, _ = build_file_service(config)
+            event = InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+
+            service._refresh_follow_up_window(event)
+            self.assertTrue(service._is_follow_up_window_active("612475113"))
+
+            service.activate_character("aurora", reset_sessions=False)
+            self.assertFalse(service._is_follow_up_window_active("612475113"))
+
+            service.activate_character("default", reset_sessions=False)
+            self.assertTrue(service._is_follow_up_window_active("612475113"))
 
     def test_preview_character_panel_uses_unsaved_editor_fields(self) -> None:
         preview = self.service.preview_character_panel(

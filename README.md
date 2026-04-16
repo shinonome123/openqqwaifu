@@ -4,205 +4,222 @@
 
 # openqqwaifu
 
-`openqqwaifu` 是一个独立运行的 QQ Waifu 控制台与运行时，基于 `NapCat + OneBot + Docker` 部署。
+`openqqwaifu` 是一个独立运行的 QQ AI 角色服务。
 
-它把人物卡、记忆、技能、模型接入、知识库、成员目录和 QQ 登录桥接，从传统插件宿主里拆出来，形成一套可以单独部署、单独演进、单独排障的服务。
+它把角色卡、会话记忆、知识库、成员目录、技能系统、模型接入、Web Console 和 QQ 登录桥接整合到一个服务里；NapCat / OneBot 只负责 QQ 协议和消息收发，业务逻辑全部由本项目自己维护。
 
-## 当前状态
+当前推荐部署方式是 `Docker + NapCat sidecar`。
 
-- Docker 单运行时部署
-- NapCat WebUI / QQ 登录桥接
-- 人物卡编辑、切换、立绘工位、测试面板
-- 群聊 / 私聊独立会话
-- 三层记忆系统：
-  - `session_history`
-  - `user_directory`
-  - `knowledge_base`
-- 向量召回与知识库持久化
-- 技能系统：
-  - builtin skills
-  - workspace skills
-  - skill pack 导入导出
-  - marketplace 远程源
-- 联网搜索、摘要、生图工具链
-- 成员目录、关系值、行为事件、记忆图谱
-- 控制台登录、用户页、密码修改
+## 现在到了哪一步
 
-## 2026-04-16 最新进展
+项目已经不是“原型插件”，而是一个可以独立部署、持续迭代的运行时：
 
-### 人格隔离
+- 有独立的 Python 后端、Web Console、Docker 部署和测试体系
+- 支持角色卡编辑、切换、预览、立绘管理
+- 支持群聊 / 私聊会话、成员目录、知识抽取、技能调度、搜索和生图能力
+- 支持 NapCat WebUI 登录桥和控制台内 QQ 登录流程
+- 已建立按角色隔离的会话和运行时存储
 
-- 会话、知识条目、成员角色态按 `character_id` 隔离
-- 切换人物卡后，运行时 prompt、记忆读取、知识写入都会跟随当前角色
-- LLM 请求侧的 `user/session` 标识已带上：
-  - `purpose`
-  - `character_id`
-  - `launcher_type`
-  - `launcher_id`
-  - `sender_id`
-- 缺失人物卡时，默认模板会 fallback，但会强制覆盖为当前角色身份，不再把默认模板里的固定人格漏出去
-- 默认模板和默认配置已改成中性身份，不再默认写死 `琉璃`
-
-### 跟聊与搜索
-
-- 群跟聊窗口默认支持 `@` 后继续追问
-- 跟聊窗口会持久化到会话元数据，不再只依赖进程内存
-- 搜索失败后的二次确认与补充条件会进入 `pending_search`
-- 后续像“好的，你帮我查查吧”“小米公司的哦”这种补充句，不需要再次 `@`
-- 联网搜索从单一 DuckDuckGo Instant Answer 升级为：
-  - Instant Answer
-  - DuckDuckGo HTML fallback
-
-### QQ 登录与运行边界
-
-- Docker 启动后会同时拉起 `openqqwaifu` 与 `NapCat`
-- 控制台内可直接走 `QQ 登录` 页，不需要手工单独打开 NapCat 管理页
-- NapCat 回调地址会自动配置为容器内可达地址
-- 当前正式运行入口统一为 Docker 控制台，不再保留宿主机 preview 双运行时
-
-### 人工控制与清理入口
-
-- 记忆页支持删除知识条目
-- 成员页支持重置当前角色的人格态
-- 角色切换后可手动清理错误写入的人格污染
-
-## 架构概览
-
-```text
-NapCat (QQ 登录 / OneBot)
-        |
-        v
-openqqwaifu http_api.py
-        |
-        v
-app.py runtime orchestration
-        |
-        +-- cards / generator / skill_registry
-        +-- memory / state_store / migration
-        +-- searching / events / narrator / value_game / proactive
-        +-- web dashboard
-```
-
-## 目录结构
-
-```text
-src/waifu_standalone/
-  app.py
-  http_api.py
-  config.py
-  state_store.py
-  memory.py
-  migration.py
-  cells/
-  gateways/
-  organs/
-  systems/
-  web/
-
-data/
-  cards/
-  sessions/
-  portraits/
-  docker-compose-config.json
-
-docs/
-examples/
-tests/
-```
-
-## 部署方式
-
-只建议使用 Docker 作为正式运行方式。
-
-### 1. 启动
+截至当前分支，测试基线为 `191/191` 通过：
 
 ```powershell
-cd C:\openqqwaifu
-copy .env.example .env
-docker compose -f .\compose.napcat.yml up --build -d
-```
-
-### 2. 打开控制台
-
-- 控制台：[http://127.0.0.1:8080/](http://127.0.0.1:8080/)
-- NapCat WebUI：[http://127.0.0.1:6099/](http://127.0.0.1:6099/)
-
-### 3. 完成首次部署
-
-- 首次打开控制台时，先创建管理员账号
-- 登录控制台后，进入 `QQ 登录` 页完成扫码登录
-- 在 `AI 接入` 页配置聊天模型 / 生图模型 / embedding
-- 在 `人物卡` 页选择或编辑当前角色
-
-## 控制台能力
-
-- 概览
-- 人物卡
-- AI 接入
-- 记忆
-- 成员目录
-- Skills
-- 能力
-- NapCat
-- QQ 登录
-- 个人用户
-- 其他设置
-
-## 记忆系统
-
-### Session History
-
-- 每个 `character_id + launcher_type + launcher_id` 一份短期会话
-- 用于当前轮次 prompt 拼装、跟聊窗口、待确认搜索等运行时状态
-
-### User Directory
-
-- 保存共享昵称、称呼、群名片、入群状态等稳定资料
-- 不把角色人格态和共享目录混在一起
-
-### Knowledge Base
-
-- 保存摘要、知识条目、向量 embedding、角色隔离后的长期记忆
-- 支持按角色、会话、成员维度召回
-
-## 技能系统
-
-- 内置工具型技能：
-  - `search`
-  - `summary`
-  - `image`
-  - `skill-list`
-- 支持 markdown skill
-- 支持 workspace 覆盖 builtin
-- 支持 skill pack 导入导出
-- 支持 marketplace 远程源检索与安装
-
-## 已知边界
-
-### 1. 旧 legacy session 文件可能仍在磁盘上
-
-历史版本遗留的 root-level `data/sessions/group_xxx.json` / `person_xxx.json` 可能还存在。
-
-当前运行时不会再把它们当作新角色的活动会话，但磁盘文件本身仍可能需要人工清理。
-
-### 2. 人物卡本身的约束强度仍然取决于卡内容
-
-人格隔离解决的是“角色不应串线”。
-
-但如果某张卡本身没有明确限制口吻、尺度、风格，模型仍可能在该卡自己的边界内说出不符合你预期的话。这个问题应通过人物卡规则本身约束，而不是靠隔离机制兜底。
-
-### 3. QQ / WebUI 稳定性仍受上游 NapCat 版本影响
-
-控制台已经加了登录桥、二维码自动刷新、路径兼容和本地二维码生成，但 NapCat WebUI 的接口变化仍可能要求后续继续兼容。
-
-## 测试
-
-```powershell
-cd C:\openqqwaifu
 python -B -m unittest discover -s tests -v
 ```
 
-当前基线：`172/172` 通过。
+## 最近完成的里程碑
+
+### 1. 角色隔离补齐
+
+这轮最重要的改动，是把“切角色卡后仍受上一张卡影响”的问题收敛到了真正的角色边界内。
+
+现在已经做到：
+
+- 会话文件按角色分目录保存：`data/sessions/<character>/...`
+- 运行时 SQLite 按角色分库保存：`data/state/characters/<character>/runtime.sqlite3`
+- 切换角色时会重绑当前角色的 memory store 和 state store
+- 切换角色时会清掉上一张卡留下来的运行时上下文
+  - follow-up 窗口
+  - recent behavior events
+  - session locks
+- 行为事件和 follow-up 状态现在也带 `character_id`
+- 角色切换不再只是更新 `active_character.json`，而是会真正切换整套角色作用域
+
+这意味着：
+
+- `default` 的会话不会再跑到 `aurora`
+- `default` 的运行时成员状态不会再被 `aurora` 读到
+- 上一张卡的 follow-up / behavior graph 上下文不会再串到下一张卡
+
+这不意味着：
+
+- 当前激活角色自己的聊天内容不会继续影响它自己
+
+如果某张卡本身允许自动知识回写，那么它仍然会把“这张卡自己刚聊出来的内容”写进它自己的长期状态。这是当前刻意保留的行为，而不是隔离缺失。
+
+### 2. 前端控制台完成一轮稳定化
+
+本分支已经完成一轮控制台修补，主要包括：
+
+- 角色切换竞态修复
+- 非管理员导航和接口收口
+- 通用 modal 事件泄漏修复
+- 前端不再直接暴露部署机本地绝对路径
+- 角色相关页面的默认文案不再硬编码旧人格名
+
+控制台现在的目标不是“做演示”，而是作为正式运维入口存在。
+
+### 3. 运行时和接口层继续工程化
+
+当前代码库已经具备：
+
+- async HTTP runtime
+- `aiohttp` / `httpx` 传输层
+- OneBot 回调接入
+- 健康检查接口 `/healthz`
+- Console API、角色页、技能页、NapCat / QQ 登录页
+
+## 系统结构
+
+```text
+NapCat / OneBot
+        |
+        v
+http_api / http_api_async
+        |
+        v
+WaifuService (app.py)
+        |
+        +-- cards / generator / auth / skill registry / marketplace
+        +-- memory / state_store / migration
+        +-- searching / events / narrator / proactive / value_game
+        +-- web console
+```
+
+### 关键模块
+
+| 路径 | 作用 |
+|---|---|
+| `src/waifu_standalone/app.py` | 核心运行时编排，当前仍是项目的控制中心 |
+| `src/waifu_standalone/http_api.py` | 兼容 HTTP 服务层和控制台 API |
+| `src/waifu_standalone/http_api_async.py` | async 服务层 |
+| `src/waifu_standalone/memory.py` | 会话存储，当前支持角色作用域隔离 |
+| `src/waifu_standalone/state_store.py` | 成员、知识、画像、运行时状态存储 |
+| `src/waifu_standalone/cells/cards.py` | 角色卡加载、编辑、切换、预览 |
+| `src/waifu_standalone/console_panels.py` | Web Console 业务面板 |
+| `src/waifu_standalone/gateways/napcat_login.py` | NapCat WebUI / QQ 登录桥 |
+| `src/waifu_standalone/web/` | 静态前端资源 |
+
+## 数据模型
+
+### 1. Session History
+
+短期会话历史，当前按以下维度隔离：
+
+- `character_id`
+- `launcher_type`
+- `launcher_id`
+
+文件位置示例：
+
+```text
+data/sessions/default/group_568701249.jsonl
+data/sessions/aurora/group_568701249.jsonl
+```
+
+### 2. User Directory
+
+成员目录保存稳定用户资料，例如：
+
+- QQ 昵称
+- 群名片
+- preferred name
+- onboarding 状态
+- profile summary
+- affinity / bond 状态
+
+这部分也按角色隔离存放在各自的 runtime DB 中。
+
+### 3. Knowledge Base
+
+知识条目同样属于角色作用域内的数据，和成员目录一起进入该角色自己的 SQLite runtime DB。
+
+## 当前推荐部署方式
+
+### Docker Compose
+
+```powershell
+copy .env.example .env
+docker compose -f compose.napcat.yml up --build -d
+```
+
+启动后访问：
+
+- Console: [http://127.0.0.1:8080/](http://127.0.0.1:8080/)
+- NapCat WebUI: [http://127.0.0.1:6099/](http://127.0.0.1:6099/)
+
+### 本地直接运行
+
+```powershell
+python run_cli.py dump-config data/config.json
+python run_cli.py serve --config data/config.json
+```
+
+## 开发者入口
+
+### 常用命令
+
+```powershell
+# 全量测试
+python -B -m unittest discover -s tests -v
+
+# 单测文件
+python -B -m unittest tests.test_app -v
+
+# 启动服务
+python run_cli.py serve --config data/config.json
+
+# 检查 NapCat sidecar
+python run_cli.py check-sidecar --config data/config.json
+
+# 导出 / 导入技能包
+python run_cli.py export-skill-pack --config data/config.json --output pack.json
+python run_cli.py import-skill-pack --config data/config.json --input pack.json
+```
+
+### 代码阅读顺序
+
+如果你是第一次接手，建议按这个顺序看：
+
+1. `src/waifu_standalone/app.py`
+2. `src/waifu_standalone/cells/cards.py`
+3. `src/waifu_standalone/memory.py`
+4. `src/waifu_standalone/state_store.py`
+5. `src/waifu_standalone/console_panels.py`
+6. `src/waifu_standalone/http_api.py` / `http_api_async.py`
+
+## 当前已知边界
+
+这些问题不是“未知问题”，而是当前明确还在排队的工程项：
+
+- `WaifuService` 仍然很大，后续仍需要继续拆分
+- 可观测性仍然偏弱，结构化日志和 metrics 还没有补齐
+- graceful shutdown 还有继续完善空间
+- 配置 schema 校验还不够强
+- 同一张角色卡自己的知识回写，仍然可能把当前聊天风格沉淀到它自己的长期状态
+
+最后这一条要特别强调：
+
+项目当前已经修的是“跨角色串人格”，不是“阻止角色学习它自己刚聊出来的内容”。
+
+## 这份 README 的定位
+
+这份 README 不再把项目描述成“还在试验的脚本集合”，而是把它当成一个正在持续工程化的独立服务来写。
+
+如果你接下来要继续推进项目，当前比较明确的优先级是：
+
+1. 继续拆 `WaifuService`
+2. 补 structured logging / metrics
+3. 继续打磨角色隔离边界和运行时生命周期
 
 ## 文档
 
