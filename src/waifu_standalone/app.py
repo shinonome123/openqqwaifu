@@ -13,9 +13,11 @@ from .cells.config import ConfigManager, serialize_app_config
 from .cells.embedding_service import EmbeddingClient
 from .cells.generator import Generator
 from .cells.marketplace import MarketplaceClient
+from .cells.prompt_builder import RelationshipContext
 from .cells.skill_pack import build_skill_pack_template, export_skill_pack, import_skill_pack
 from .cells.skill_registry import SkillRegistry, SkillSpec, build_skill_markdown_template
 from .cells.tool_registry import ToolInvocation, ToolRegistry
+from .cells.utils import MASK_SENTINEL as _MASK_SENTINEL, mask_key as _mask_key, safe_float as _safe_float, safe_int as _safe_int
 from .config import AppConfig
 from .contracts import OutboundPort
 from .gateways.napcat_login import (
@@ -27,29 +29,23 @@ from .gateways.napcat_login import (
 from .gateways.onebot_actions import OneBotActionClient, OneBotHttpOutboundPort
 from .memory import FileMemoryStore, InMemoryStore
 from .models import EmotionState, InboundEvent, MessageSegment, OutboundMessage, SessionMemory
-from .organs.memory_graph import MemoryGraphBuilder
 from .organs.memories import Memory
+from .organs.dashboard_service import DashboardService
+from .organs.knowledge_manager import KnowledgeManager
+from .organs.member_manager import MemberManager
 from .organs.proactive import ProactivePlanner
-from .organs.thoughts import Thoughts
+from .organs.relationship import RelationshipTracker
+from .organs.session_detail_graph import SessionDetailGraphService
 from .services import CapturingOutboundPort
 from .state_store import InMemoryRuntimeStateStore, SqliteRuntimeStateStore
 from .systems.events import BehaviorEventEngine
 from .systems.emotions import EmotionSensor
-from .systems.narrator import Narrator
 from .systems.searching import SearchContext, SearchDecider
 from .systems.value_game import ValueGameEngine
 
-_MASK_SENTINEL = "..."
 _FOLLOW_UP_METADATA_KEY = "follow_up_until"
 _PENDING_SEARCH_METADATA_KEY = "pending_search"
 _PENDING_SEARCH_TTL_SECONDS = 1800.0
-
-
-def _mask_key(key: str) -> str:
-    """Return a masked version of a sensitive value (e.g. API key)."""
-    if not key or len(key) < 8:
-        return "***" if key else ""
-    return key[:4] + "..." + key[-4:]
 
 
 def _is_masked(value: str) -> bool:
@@ -57,44 +53,16 @@ def _is_masked(value: str) -> bool:
     return value == "***" or _MASK_SENTINEL in value
 
 
-def _safe_int(payload: dict[str, object], key: str, default: int) -> int:
-    """Return ``int(payload[key])`` if *key* is present, otherwise *default*.
-
-    Unlike the ``int(x or default)`` pattern this correctly accepts ``0``.
-    """
-    raw = payload.get(key)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_float(payload: dict[str, object], key: str, default: float) -> float:
-    """Return ``float(payload[key])`` if *key* is present, otherwise *default*."""
-    raw = payload.get(key)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
-
-
 @dataclass(slots=True)
 class WaifuService:
     config: AppConfig
     memory: Memory
     emotions: EmotionSensor
-    thoughts: Thoughts
     generator: Generator
     cards: CardManager
     search: SearchDecider
     event_engine: BehaviorEventEngine
-    narrator: Narrator
     value_game: ValueGameEngine
-    memory_graph: MemoryGraphBuilder
     proactive: ProactivePlanner
     marketplace: MarketplaceClient
     skills: SkillRegistry
@@ -110,6 +78,64 @@ class WaifuService:
     _event_counter: int = 0
     _state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _session_locks: dict[tuple[str, str], threading.Lock] = field(default_factory=dict, repr=False)
+    members: MemberManager = field(init=False, repr=False)
+    knowledge: KnowledgeManager = field(init=False, repr=False)
+    relationships: RelationshipTracker = field(init=False, repr=False)
+    dashboard: DashboardService = field(init=False, repr=False)
+    session_graphs: SessionDetailGraphService = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._rebuild_managers()
+
+    def _rebuild_managers(self) -> None:
+        self.members = MemberManager(
+            config=self.config,
+            memory=self.memory,
+            generator=self.generator,
+            cards=self.cards,
+            state_store=self.state_store,
+            value_game=self.value_game,
+            current_character_id=self._active_character_id,
+            emit_message=self._emit_message,
+            requires_live_llm=self._requires_live_llm,
+            should_retry_onboarding_prompt=self._should_retry_member_onboarding_prompt,
+        )
+        self.knowledge = KnowledgeManager(
+            config=self.config,
+            generator=self.generator,
+            state_store=self.state_store,
+            current_character_id=self._active_character_id,
+            member_record=self.members.member_record,
+            extract_directory_preferred_name=self.members.extract_directory_preferred_name,
+            extract_image_prompt=self._extract_image_prompt,
+            update_member_profile_summary=self.members.update_member_profile_summary,
+        )
+        self.relationships = RelationshipTracker(
+            state_store=self.state_store,
+            value_game=self.value_game,
+            sanitize_profile_summary=self.members.sanitize_profile_summary_text,
+        )
+        self.dashboard = DashboardService(
+            config=self.config,
+            generator=self.generator,
+            search=self.search,
+            proactive=self.proactive,
+            marketplace=self.marketplace,
+            skills=self.skills,
+            tools=self.tools,
+            state_store=self.state_store,
+            active_character_id=self._active_character_id,
+            list_sessions=self.list_sessions,
+            outbound_mode_label=self._outbound_mode_label,
+            refresh_runtime_components=self._refresh_runtime_components,
+            persist_config=self._persist_config,
+        )
+        self.session_graphs = SessionDetailGraphService(
+            config=self.config,
+            state_store=self.state_store,
+            active_character_id=self._active_character_id,
+            get_behavior_events=self.get_behavior_events,
+        )
 
     def _active_character_id(self) -> str:
         return str(self.cards.active_character() or self.config.character or "default").strip() or "default"
@@ -203,7 +229,7 @@ class WaifuService:
                 active_skills=active_skills,
             )
 
-        emotion = self.emotions.analyze(event, session)
+        emotion = self.emotions.quick_estimate(event.plain_text, history_size=len(session.history))
         search_context = self.search.build_context(event)
         self._store_search_context(session, search_context)
         conversation_view = self.memory.format_dialogue(
@@ -213,64 +239,27 @@ class WaifuService:
             limit=self.config.history_window_messages,
             character_id=current_character,
         )
-        recalled_memory_hints = self.state_store.recall_knowledge(
-            scopes=self._knowledge_scopes(event),
+        memory_hints = self.knowledge.recall(
+            event,
             query=latest_message,
-            limit=self.config.memory_recall_limit,
-            character_id=current_character,
-        )
-        knowledge_entries = self._session_knowledge_entries(event, latest_message)
-        memory_hints = self._merge_memory_hints(
-            recalled_memory_hints,
-            [str(item.get("summary", "") or "").strip() for item in knowledge_entries],
             limit=self.config.memory_recall_limit,
         )
         member_record = self._member_record(event)
-        behavior_context = self._behavior_context(event)
-        graph_snapshot = self.memory_graph.build(
-            event=event,
-            session=session,
-            member=member_record,
-            knowledge_entries=knowledge_entries,
-            behavior_events=behavior_context,
-        )
-        speaker_notes = self._directory_member_notes(event)
-        narrator_hint = self.narrator.build_hint(
-            event=event,
-            latest_message=latest_message,
-            address=address,
-            emotion=emotion,
-            memory_graph=graph_snapshot,
-        )
-        if narrator_hint:
-            speaker_notes.append(narrator_hint)
-        for highlight in graph_snapshot.get("highlights", [])[:3] if isinstance(graph_snapshot, dict) else []:
-            text_hint = str(highlight or "").strip()
-            if text_hint:
-                speaker_notes.append(text_hint)
-        analysis_hint = self.thoughts.analyze(
+        relationship_context = self._build_relationship_context(
             event,
-            session,
-            assistant_name=assistant_name,
             address=address,
-            conversation_view=conversation_view,
-            memory_hints=memory_hints,
-            speaker_notes=speaker_notes,
-            active_skills=active_skills,
-            allow_fallback=not live_runtime,
+            member=member_record,
         )
         reply_text = self.generator.generate_reply(
             event,
             session,
-            emotion,
             assistant_name=assistant_name,
             address_override=address,
             search_hint=search_context.summary,
             search_context=search_context.to_prompt_block(),
             conversation_view=conversation_view,
             memory_hints=memory_hints,
-            speaker_notes=speaker_notes,
-            analysis_hint=analysis_hint,
+            relationship_context=relationship_context,
             active_skills=active_skills,
             allow_fallback=not live_runtime,
         )
@@ -612,8 +601,7 @@ class WaifuService:
         self._record_behavior_event(
             self.event_engine.capture_outbound(event=event, message=message, reason=behavior_reason or "reply")
         )
-        self.value_game.apply(
-            state_store=self.state_store,
+        self.relationships.apply_reply(
             event=event,
             emotion=emotion or EmotionState(),
             reply_text=message.text,
@@ -670,43 +658,14 @@ class WaifuService:
         address: str,
         conversation_view: str,
     ) -> None:
-        if not self.config.knowledge_auto_extract:
-            return
-        cleaned_message = " ".join(str(latest_message or "").split()).strip()
-        if not cleaned_message:
-            return
-        if self.generator._asks_for_name(cleaned_message):
-            return
-        member = self._member_record(event) or {}
-        if str(member.get("onboarding_status", "") or "").strip() == "pending_name":
-            if self._extract_directory_preferred_name(cleaned_message):
-                return
-        if self._extract_image_prompt(cleaned_message):
-            return
-        extracted = self.generator.extract_knowledge(
+        self.knowledge.writeback_knowledge_if_needed(
             event,
-            session,
+            session=session,
+            latest_message=latest_message,
             assistant_name=assistant_name,
-            latest_message=cleaned_message,
-            conversation_view=conversation_view,
             address=address,
-            max_entries=max(1, int(self.config.knowledge_auto_extract_limit)),
-            allow_fallback=True,
+            conversation_view=conversation_view,
         )
-        entries = extracted.get("entries", []) if isinstance(extracted, dict) else []
-        profile_summary = str(extracted.get("profile_summary", "") or "").strip() if isinstance(extracted, dict) else ""
-        if not entries and not profile_summary:
-            return
-        saved_entries: list[dict[str, object]] = []
-        for item in entries if isinstance(entries, list) else []:
-            saved = self._persist_extracted_knowledge(event, item, message_id=event.message_id)
-            if saved:
-                saved_entries.append(saved)
-        if saved_entries or profile_summary:
-            self._update_member_profile_summary(
-                event,
-                extra_summary=profile_summary,
-            )
 
     def _persist_extracted_knowledge(
         self,
@@ -715,174 +674,30 @@ class WaifuService:
         *,
         message_id: str = "",
     ) -> dict[str, object] | None:
-        summary = " ".join(str(entry.get("summary", "") or "").split()).strip()
-        if not summary:
-            return None
-        scope_type, scope_id = self._knowledge_scope_for_candidate(event, entry)
-        memory_type = str(entry.get("memory_type", "") or "fact").strip().lower() or "fact"
-        tags = [str(tag).strip() for tag in entry.get("tags", []) if str(tag).strip()] if isinstance(entry.get("tags"), list) else []
-        confidence = _safe_float(entry, "confidence", 0.6)
-        source_message_ids = [str(message_id).strip()] if str(message_id or "").strip() else []
-        existing = self._existing_knowledge_entry(scope_type, scope_id, summary)
-        payload: dict[str, object] = {
-            "character_id": self._active_character_id(),
-            "scope_type": scope_type,
-            "scope_id": scope_id,
-            "memory_type": memory_type,
-            "summary": summary,
-            "tags": tags,
-            "confidence": confidence,
-            "source_message_ids": source_message_ids,
-        }
-        if existing is not None:
-            payload["id"] = existing.get("id", 0)
-            merged_tags = {
-                *[str(tag).strip() for tag in existing.get("tags", []) if str(tag).strip()],
-                *tags,
-            }
-            merged_source_ids = {
-                *[str(item).strip() for item in existing.get("source_message_ids", []) if str(item).strip()],
-                *source_message_ids,
-            }
-            payload["tags"] = sorted(merged_tags)[:8]
-            payload["source_message_ids"] = sorted(merged_source_ids)
-            payload["confidence"] = max(confidence, _safe_float(existing, "confidence", confidence))
-        return self.state_store.save_knowledge(payload)
+        return self.knowledge.persist_extracted_knowledge(
+            event,
+            entry,
+            message_id=message_id,
+        )
 
     def _existing_knowledge_entry(self, scope_type: str, scope_id: str, summary: str) -> dict[str, object] | None:
-        current_character = self._active_character_id()
-        limit = max(
-            80,
-            int(self.state_store.knowledge_count(character_id=current_character))
-            if hasattr(self.state_store, "knowledge_count")
-            else 80,
-        )
-        target = " ".join(str(summary or "").split()).strip().casefold()
-        for item in self.state_store.list_knowledge(limit=limit, character_id=current_character):
-            if str(item.get("scope_type", "") or "").strip() != scope_type:
-                continue
-            if str(item.get("scope_id", "") or "").strip() != scope_id:
-                continue
-            current = " ".join(str(item.get("summary", "") or "").split()).strip().casefold()
-            if current == target:
-                return item
-        return None
+        return self.knowledge.existing_knowledge_entry(scope_type, scope_id, summary)
 
     def _knowledge_scope_for_candidate(self, event: InboundEvent, entry: dict[str, object]) -> tuple[str, str]:
-        scope_hint = str(entry.get("scope_hint", "") or "").strip().lower()
-        if scope_hint == "group" and event.launcher_type == "group":
-            return "group", event.launcher_id
-        if scope_hint == "global":
-            return "global", ""
-        if scope_hint == "person" and event.launcher_type == "person":
-            return "person", event.launcher_id
-        if event.launcher_type == "group":
-            return "member", f"{event.launcher_id}:{event.sender_id}"
-        return "member", event.sender_id
+        return self.knowledge.knowledge_scope_for_candidate(event, entry)
 
     def _known_assistant_aliases(self) -> dict[str, set[str]]:
-        aliases: dict[str, set[str]] = {}
-        try:
-            for item in self.cards.list_characters():
-                character_id = str(item.get("character", "") or "").strip()
-                if not character_id:
-                    continue
-                names = aliases.setdefault(character_id, set())
-                if bool(item.get("has_person")):
-                    try:
-                        names.add(
-                            str(
-                                self.cards.load(
-                                    "person",
-                                    SessionMemory(
-                                        launcher_id="probe",
-                                        launcher_type="person",
-                                        character_id=character_id,
-                                    ),
-                                ).assistant_name
-                            ).strip()
-                        )
-                    except Exception:
-                        pass
-                if bool(item.get("has_group")):
-                    try:
-                        names.add(
-                            str(
-                                self.cards.load(
-                                    "group",
-                                    SessionMemory(
-                                        launcher_id="probe",
-                                        launcher_type="group",
-                                        character_id=character_id,
-                                    ),
-                                ).assistant_name
-                            ).strip()
-                        )
-                    except Exception:
-                        pass
-                direct_name = str(item.get("assistant_name", "") or "").strip()
-                if direct_name:
-                    names.add(direct_name)
-        except Exception:
-            pass
-        current_character = self._active_character_id()
-        current_names = aliases.setdefault(current_character, set())
-        for launcher_type in ("person", "group"):
-            try:
-                current_names.add(
-                    str(
-                        self.cards.load(
-                            launcher_type,
-                            SessionMemory(
-                                launcher_id="probe",
-                                launcher_type=launcher_type,
-                                character_id=current_character,
-                            ),
-                        ).assistant_name
-                    ).strip()
-                )
-            except Exception:
-                continue
-        fallback = str(self.config.assistant_name or "").strip()
-        if fallback:
-            current_names.add(fallback)
-        return {
-            character_id: {name for name in names if name}
-            for character_id, names in aliases.items()
-            if any(name for name in names)
-        }
+        return self.members.known_assistant_aliases()
 
     def _known_assistant_names(self) -> dict[str, str]:
-        aliases = self._known_assistant_aliases()
-        return {
-            character_id: sorted(names, key=lambda item: (len(item), item.casefold()))[0]
-            for character_id, names in aliases.items()
-            if names
-        }
+        return self.members.known_assistant_names()
 
     @staticmethod
     def _mentions_any_assistant_name(text: str, names: set[str]) -> bool:
-        lowered = str(text or "").casefold()
-        return any(name and name.casefold() in lowered for name in names)
+        return MemberManager.mentions_any_assistant_name(text, names)
 
     def _sanitize_profile_summary_text(self, summary: str) -> str:
-        fragments: list[str] = []
-        seen: set[str] = set()
-        assistant_names: set[str] = set()
-        for names in self._known_assistant_aliases().values():
-            assistant_names.update(names)
-        for fragment in str(summary or "").split(";"):
-            cleaned = " ".join(fragment.split()).strip().strip(",")
-            if not cleaned:
-                continue
-            if assistant_names and self._mentions_any_assistant_name(cleaned, assistant_names):
-                continue
-            key = cleaned.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            fragments.append(cleaned)
-        return "; ".join(fragments[:3])
+        return self.members.sanitize_profile_summary_text(summary)
 
     def _sanitize_session_persona_state(
         self,
@@ -890,32 +705,7 @@ class WaifuService:
         *,
         assistant_name: str,
     ) -> SessionMemory:
-        known_aliases = self._known_assistant_aliases()
-        other_names: set[str] = set()
-        current_character = str(session.character_id or "").strip()
-        for character_id, names in known_aliases.items():
-            if character_id == current_character:
-                continue
-            other_names.update(name for name in names if name and name != assistant_name)
-        if not other_names:
-            return session
-        filtered_history: list[str] = []
-        changed = False
-        for raw_line in list(session.history):
-            speaker, content = self._split_history_line(raw_line)
-            speaker_is_assistant = speaker == "assistant" or self._mentions_any_assistant_name(speaker, other_names)
-            if speaker_is_assistant and (
-                self._mentions_any_assistant_name(speaker, other_names)
-                or self._mentions_any_assistant_name(content, other_names)
-            ):
-                changed = True
-                continue
-            filtered_history.append(raw_line)
-        if not changed:
-            return session
-        session.history = filtered_history
-        self.memory.store.save(session)
-        return session
+        return self.members.sanitize_session_persona_state(session, assistant_name=assistant_name)
 
     def _sanitize_member_persona_state(
         self,
@@ -924,88 +714,18 @@ class WaifuService:
         user_id: str,
         character_id: str,
     ) -> dict[str, object] | None:
-        member = self.state_store.get_member(
+        return self.members.sanitize_member_persona_state(
             group_id=group_id,
             user_id=user_id,
             character_id=character_id,
         )
-        if member is None:
-            return None
-        cleaned_summary = self._sanitize_profile_summary_text(str(member.get("profile_summary", "") or ""))
-        if cleaned_summary == str(member.get("profile_summary", "") or ""):
-            return member
-        return self.state_store.save_member(
-            {
-                "group_id": group_id,
-                "user_id": user_id,
-                "character_id": character_id,
-                "qq_nickname": str(member.get("qq_nickname", "") or ""),
-                "group_card": str(member.get("group_card", "") or ""),
-                "preferred_name": str(member.get("preferred_name", "") or ""),
-                "onboarding_status": str(member.get("onboarding_status", "") or "new"),
-                "membership_status": str(member.get("membership_status", "") or "active"),
-                "profile_summary": cleaned_summary,
-                "affinity_score": member.get("affinity_score", 0.0),
-                "notes_count": int(member.get("notes_count", 0) or 0),
-                "last_seen_at": int(member.get("last_seen_at", 0) or 0),
-                "last_sync_at": int(member.get("last_sync_at", 0) or 0),
-                "last_addressed_at": int(member.get("last_addressed_at", 0) or 0),
-            }
-        )
 
     def _update_member_profile_summary(self, event: InboundEvent, *, extra_summary: str = "") -> None:
-        group_id = event.launcher_id if event.launcher_type == "group" else ""
-        current_character = self._active_character_id()
-        member = self._sanitize_member_persona_state(
-            group_id=group_id,
-            user_id=event.sender_id,
-            character_id=current_character,
-        )
-        if member is None:
-            return
-        scope_id = f"{event.launcher_id}:{event.sender_id}" if event.launcher_type == "group" else event.sender_id
-        notes_count = 0
-        count_scope = getattr(self.state_store, "count_knowledge_for_scope", None)
-        if callable(count_scope):
-            notes_count = int(count_scope("member", scope_id, character_id=current_character) or 0)
-        merged_summary = self._merge_profile_summary(
-            self._sanitize_profile_summary_text(str(member.get("profile_summary", "") or "")),
-            self._sanitize_profile_summary_text(extra_summary),
-        )
-        self.state_store.save_member(
-            {
-                "group_id": group_id,
-                "user_id": event.sender_id,
-                "character_id": current_character,
-                "qq_nickname": str(member.get("qq_nickname", "") or event.sender_name),
-                "group_card": str(member.get("group_card", "") or ""),
-                "preferred_name": str(member.get("preferred_name", "") or ""),
-                "onboarding_status": str(member.get("onboarding_status", "") or "new"),
-                "membership_status": str(member.get("membership_status", "") or "active"),
-                "profile_summary": merged_summary,
-                "affinity_score": member.get("affinity_score", 0.0),
-                "notes_count": notes_count,
-                "last_seen_at": member.get("last_seen_at", 0),
-                "last_sync_at": member.get("last_sync_at", 0),
-                "last_addressed_at": member.get("last_addressed_at", 0),
-            }
-        )
+        self.members.update_member_profile_summary(event, extra_summary=extra_summary)
 
     @staticmethod
     def _merge_profile_summary(existing: str, addition: str) -> str:
-        parts: list[str] = []
-        seen: set[str] = set()
-        for candidate in (existing, addition):
-            for fragment in str(candidate or "").split(";"):
-                cleaned = " ".join(fragment.split()).strip().strip(",")
-                if not cleaned:
-                    continue
-                key = cleaned.casefold()
-                if key in seen:
-                    continue
-                seen.add(key)
-                parts.append(cleaned)
-        return "; ".join(parts[:3])
+        return MemberManager.merge_profile_summary(existing, addition)
 
     def _sidecar_action_client(self) -> OneBotActionClient:
         if not self.config.qq_sidecar.outbound_base_url:
@@ -1286,18 +1006,6 @@ class WaifuService:
         cjk_chars = [char for char in compact if "\u4e00" <= char <= "\u9fff"]
         return 2 <= len(cjk_chars) <= 8
 
-    def _extract_image_prompt_legacy(self, text: str) -> str | None:
-        stripped = str(text or "").strip()
-        if not stripped:
-            return None
-        for prefix in self._image_command_prefixes():
-            match = re.match(rf"^\s*{re.escape(prefix)}\s*[:：]?\s*(.*?)\s*$", stripped, flags=re.DOTALL)
-            if match:
-                prompt = re.sub(r"\s+", " ", match.group(1)).strip()
-                if prompt:
-                    return prompt
-        return None
-
     def _image_command_prefixes(self) -> list[str]:
         prefixes = [self.config.image_command_prefix, *self.config.image_command_aliases]
         seen: set[str] = set()
@@ -1384,11 +1092,7 @@ class WaifuService:
         return normalized.casefold()
 
     def _remember_directory_member(self, event: InboundEvent) -> None:
-        self.state_store.record_member_seen(
-            group_id=event.launcher_id if event.launcher_type == "group" else "",
-            user_id=event.sender_id,
-            qq_nickname=event.sender_name,
-        )
+        self.members.remember_directory_member(event)
 
     def _maybe_handle_member_onboarding(
         self,
@@ -1398,126 +1102,15 @@ class WaifuService:
         latest_message: str,
         assistant_name: str,
     ) -> OutboundMessage | None:
-        allow_fallback = not self._requires_live_llm()
-        if event.launcher_type == "person":
-            member = self.state_store.get_member(group_id="", user_id=event.sender_id) or {}
-            preferred_name = str(member.get("preferred_name", "") or "").strip()
-            if preferred_name:
-                return None
-            candidate = self.memory.extract_preferred_name(latest_message)
-            if not candidate:
-                return None
-            reply_text = self.generator.generate_onboarding_reply(
-                event,
-                session,
-                assistant_name=assistant_name,
-                stage="confirm_name",
-                candidate_name=candidate,
-                address_override=candidate,
-                allow_fallback=allow_fallback,
-            )
-            if not reply_text:
-                return None
-            self.state_store.save_member(
-                {
-                    "group_id": "",
-                    "user_id": event.sender_id,
-                    "qq_nickname": event.sender_name,
-                    "preferred_name": candidate,
-                    "onboarding_status": "ready",
-                }
-            )
-            message = OutboundMessage(
-                launcher_id=event.launcher_id,
-                launcher_type=event.launcher_type,
-                text=reply_text,
-            )
-            return self._emit_message(event, message, assistant_name=assistant_name)
-        if event.launcher_type != "group":
-            return None
-        member = self.state_store.get_member(group_id=event.launcher_id, user_id=event.sender_id)
-        if member is None:
-            return None
-
-        preferred_name = str(member.get("preferred_name", "") or "").strip()
-        if preferred_name:
-            return None
-
-        onboarding_status = str(member.get("onboarding_status", "") or "").strip() or "new"
-        if onboarding_status == "pending_name":
-            candidate = self._extract_directory_preferred_name(latest_message)
-            if candidate:
-                reply_text = self.generator.generate_onboarding_reply(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    stage="confirm_name",
-                    candidate_name=candidate,
-                    address_override=candidate,
-                    allow_fallback=allow_fallback,
-                )
-                if not reply_text:
-                    return None
-                self.state_store.save_member(
-                    {
-                        "group_id": event.launcher_id,
-                        "user_id": event.sender_id,
-                        "qq_nickname": event.sender_name,
-                        "preferred_name": candidate,
-                        "onboarding_status": "ready",
-                    }
-                )
-                message = OutboundMessage(
-                    launcher_id=event.launcher_id,
-                    launcher_type=event.launcher_type,
-                    text=reply_text,
-                )
-                return self._emit_message(event, message, assistant_name=assistant_name)
-            if self._should_retry_member_onboarding_prompt(event):
-                reply_text = self.generator.generate_onboarding_reply(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    stage="retry_name",
-                    allow_fallback=allow_fallback,
-                )
-                if reply_text:
-                    message = OutboundMessage(
-                        launcher_id=event.launcher_id,
-                        launcher_type=event.launcher_type,
-                        text=reply_text,
-                    )
-                    return self._emit_message(event, message, assistant_name=assistant_name)
-
-        bot_account_id = str(self.config.bot_account_id or "").strip()
-        if bot_account_id and event.has_bot_mention(bot_account_id):
-            self.state_store.save_member(
-                {
-                    "group_id": event.launcher_id,
-                    "user_id": event.sender_id,
-                    "qq_nickname": event.sender_name,
-                    "group_card": str(member.get("group_card", "") or ""),
-                    "onboarding_status": "pending_name",
-                }
-            )
-            reply_text = self.generator.generate_onboarding_reply(
-                event,
-                session,
-                assistant_name=assistant_name,
-                stage="ask_name",
-                allow_fallback=allow_fallback,
-            )
-            if not reply_text:
-                return None
-            message = OutboundMessage(
-                launcher_id=event.launcher_id,
-                launcher_type=event.launcher_type,
-                text=reply_text,
-            )
-            return self._emit_message(event, message, assistant_name=assistant_name)
-        return None
+        return self.members.maybe_handle_member_onboarding(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+        )
 
     def _extract_directory_preferred_name(self, text: str) -> str:
+        return self.members.extract_directory_preferred_name(text)
         candidate = self.memory.extract_preferred_name(text)
         if candidate:
             return candidate
@@ -1575,68 +1168,22 @@ class WaifuService:
 
     @staticmethod
     def _merge_memory_hints(primary: list[str], secondary: list[str], *, limit: int) -> list[str]:
-        merged: list[str] = []
-        seen: set[str] = set()
-        for candidate in [*(primary or []), *(secondary or [])]:
-            text = str(candidate or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            merged.append(text)
-            if len(merged) >= max(1, int(limit)):
-                break
-        return merged
+        return KnowledgeManager.merge_memory_hints(primary, secondary, limit=limit)
 
     def _knowledge_scopes(self, event: InboundEvent) -> list[tuple[str, str]]:
-        scopes = [(event.launcher_type, event.launcher_id), ("global", "")]
-        if event.launcher_type == "group":
-            scopes.append(("member", f"{event.launcher_id}:{event.sender_id}"))
-        else:
-            scopes.append(("member", event.sender_id))
-        return scopes
+        return self.knowledge.knowledge_scopes(event)
 
     def _member_record(self, event: InboundEvent) -> dict[str, Any] | None:
-        return self.state_store.get_member(
-            group_id=event.launcher_id if event.launcher_type == "group" else "",
-            user_id=event.sender_id,
-            character_id=self._active_character_id(),
-        )
+        return self.members.member_record(event)
 
-    def _session_knowledge_entries(self, event: InboundEvent, query: str) -> list[dict[str, Any]]:
-        scopes = set(self._knowledge_scopes(event))
-        query_terms = self._extract_terms(query)
-        entries = self.state_store.list_knowledge(
-            limit=max(80, self.config.memory_graph_limit * 6),
-            character_id=self._active_character_id(),
-        )
-        scored: list[tuple[float, dict[str, Any]]] = []
-        for entry in entries:
-            scope = (
-                str(entry.get("scope_type", "") or "").strip().lower() or "global",
-                str(entry.get("scope_id", "") or "").strip(),
-            )
-            if scope not in scopes:
-                continue
-            summary = str(entry.get("summary", "") or "").strip().lower()
-            tags = [str(item or "").strip().lower() for item in entry.get("tags", []) if str(item or "").strip()]
-            score = float(entry.get("confidence") or 0.0)
-            if not query_terms:
-                score += 0.1
-            else:
-                for term in query_terms:
-                    if term in summary:
-                        score += 1.2
-                    elif any(term in tag or tag in term for tag in tags):
-                        score += 1.6
-            scored.append((score, dict(entry)))
-        scored.sort(
-            key=lambda item: (
-                -float(item[0]),
-                -int(item[1].get("updated_at") or 0),
-                -int(item[1].get("id") or 0),
-            )
-        )
-        return [entry for _, entry in scored[: max(1, int(self.config.memory_graph_limit))]]
+    def _build_relationship_context(
+        self,
+        event: InboundEvent,
+        *,
+        address: str,
+        member: dict[str, Any] | None,
+    ) -> RelationshipContext:
+        return self.relationships.build_context(event, member, address=address)
 
     def _behavior_context(self, event: InboundEvent, *, limit: int = 8) -> list[dict[str, Any]]:
         launcher_type = str(event.launcher_type or "").strip()
@@ -1654,6 +1201,7 @@ class WaifuService:
         return scoped[-max(1, int(limit)) :][::-1]
 
     def _directory_member_notes(self, event: InboundEvent) -> list[str]:
+        return self.members.directory_member_notes(event)
         notes: list[str] = []
         current_group = event.launcher_id if event.launcher_type == "group" else ""
         current_character = self._active_character_id()
@@ -1870,14 +1418,6 @@ class WaifuService:
         )
 
     def dashboard_snapshot(self) -> dict[str, object]:
-        current_character = self._active_character_id()
-        sessions = self.list_sessions(limit=24)
-        knowledge_count = self.state_store.knowledge_count(character_id=current_character)
-        member_count = self.state_store.member_count()
-        proactive_candidates = self.proactive.list_candidates(
-            members=self.state_store.list_members(limit=200, character_id=current_character),
-            limit=self.config.proactive_candidate_limit,
-        )
         with self._state_lock:
             recent_outbound = [self._message_to_dict(message) for message in self._recent_outbound[-12:][::-1]]
             recent_behavior_events = [dict(item) for item in self._recent_behavior_events[-12:][::-1]]
@@ -1886,78 +1426,13 @@ class WaifuService:
                 for launcher_id, until in self._group_follow_up_until.items()
                 if until > time.monotonic()
             )
-        return {
-            "service_name": self.config.service_name,
-            "assistant_name": self.config.assistant_name,
-            "character": current_character,
-            "bot_account_id": self.config.bot_account_id,
-            "group_reply_requires_mention": self.config.group_reply_requires_mention,
-            "max_active_skills": self.config.max_active_skills,
-            "search_enabled": self.config.search_enabled,
-            "thinking_mode": self.config.thinking_mode,
-            "summarization_mode": self.config.summarization_mode,
-            "event_mode": self.config.event_mode,
-            "narrator_mode": self.config.narrator_mode,
-            "value_game_mode": self.config.value_game_mode,
-            "memory_graph_mode": self.config.memory_graph_mode,
-            "proactive_mode": self.config.proactive_mode,
-            "reply_window_seconds": self.config.group_follow_up_window_seconds,
-            "group_response_delay_seconds": self.config.group_response_delay_seconds,
-            "repeat_trigger_count": self.config.repeat_trigger_count,
-            "multimodal_enabled": self.config.multimodal_enabled,
-            "history_window_messages": self.config.history_window_messages,
-            "memory_recall_limit": self.config.memory_recall_limit,
-            "short_term_memory_limit": self.config.short_term_memory_limit,
-            "memory_summary_batch_size": self.config.memory_summary_batch_size,
-            "ignore_prefixes": list(self.config.ignore_prefixes),
-            "message_behavior": {
-                "requires_mention": self.config.group_reply_requires_mention,
-                "follow_up_window_seconds": self.config.group_follow_up_window_seconds,
-                "response_delay_seconds": self.config.group_response_delay_seconds,
-                "repeat_trigger_count": self.config.repeat_trigger_count,
-                "multimodal_enabled": self.config.multimodal_enabled,
-            },
-            "skills": self.skills.describe(),
-            "tools": self.tools.describe(),
-            "search": {
-                "enabled": self.config.search_enabled,
-                "result_limit": self.config.search_result_limit,
-                "timeout_seconds": self.config.search_timeout_seconds,
-                "cache_size": self.search.cache_size(),
-            },
-            "outbound_mode": self._outbound_mode_label(),
-            "llm": {
-                "enabled": self.config.llm.enabled,
-                "backend": self.config.llm.backend,
-                "base_url": self.config.llm.base_url,
-                "ready": self.generator.llm_ready,
-            },
-            "image_generation": {
-                "enabled": self.config.image_generation.enabled,
-                "base_url": self.config.image_generation.base_url,
-                "model": self.config.image_generation.model,
-                "ready": self.generator.image_ready,
-            },
-            "qq_sidecar": {
-                "adapter_name": self.config.qq_sidecar.adapter_name,
-                "dry_run": False,
-                "outbound_base_url": self.config.qq_sidecar.outbound_base_url,
-                "inbound_host": self.config.qq_sidecar.inbound_host,
-                "inbound_port": self.config.qq_sidecar.inbound_port,
-            },
-            "skill_workspace": str(self.skills.workspace_root),
-            "session_count": len(sessions),
-            "knowledge_count": knowledge_count,
-            "member_count": member_count,
-            "sessions": sessions,
-            "recent_outbound_count": len(recent_outbound),
-            "recent_outbound": recent_outbound,
-            "recent_behavior_events": recent_behavior_events,
-            "proactive_candidates": proactive_candidates[:6],
-            "active_follow_up_count": len(active_launchers),
-            "active_follow_up_launchers": active_launchers,
-            "updated_at": time.time(),
-        }
+        snapshot = self.dashboard.snapshot(
+            recent_outbound=recent_outbound,
+            recent_behavior_events=recent_behavior_events,
+            active_launchers=active_launchers,
+        )
+        snapshot["updated_at"] = time.time()
+        return snapshot
 
     def list_sessions(self, limit: int = 24) -> list[dict[str, object]]:
         store = self.memory.store
@@ -2000,7 +1475,7 @@ class WaifuService:
         clean_metadata = self._sanitize_session_metadata(session.metadata)
         if not session.history and not clean_metadata:
             return None
-        graph = self._session_detail_graph(session)
+        graph = self.session_graphs.build(session)
         return {
             "character_id": str(session.character_id or current_character).strip(),
             "launcher_id": session.launcher_id,
@@ -2023,6 +1498,7 @@ class WaifuService:
             "ai": self.get_ai_panel(),
             "memory": self.get_memory_panel(),
             "abilities": self.get_abilities_panel(),
+            "archived": self.dashboard.archived_controls_panel(),
             "skills": self.get_skills_panel(),
             "qq_login": self.get_qq_login_panel(refresh=False),
             "sidecar": self.get_sidecar_panel(refresh=False),
@@ -2106,34 +1582,20 @@ class WaifuService:
             sender_name=user_name,
             segments=[MessageSegment(kind="text", text=message)],
         )
-        emotion = self.emotions.analyze(event, session)
         conversation_view = self._preview_conversation_view(
             session.history,
             assistant_name=card.assistant_name,
             limit=self.config.history_window_messages,
         )
-        analysis_hint = self.generator.generate_analysis(
-            event,
-            session,
-            assistant_name=card.assistant_name,
-            conversation_view=conversation_view,
-            memory_hints=[],
-            speaker_notes=[],
-            active_skills=[],
-            address_override=user_name,
-            card_override=card,
-        )
         reply_text = self.generator.generate_reply(
             event,
             session,
-            emotion,
             assistant_name=card.assistant_name,
             address_override=user_name,
             card_override=card,
             conversation_view=conversation_view,
             memory_hints=[],
-            speaker_notes=[],
-            analysis_hint=analysis_hint,
+            relationship_context=RelationshipContext(address=user_name),
             active_skills=[],
         )
         transcript = [
@@ -2146,7 +1608,6 @@ class WaifuService:
             "assistant_name": card.assistant_name,
             "user_name": user_name,
             "reply_text": reply_text,
-            "analysis_hint": analysis_hint,
             "transcript": transcript,
             "llm_ready": self.generator.llm_ready,
         }
@@ -2398,75 +1859,10 @@ class WaifuService:
         }
 
     def get_abilities_panel(self) -> dict[str, object]:
-        return {
-            "search_enabled": self.config.search_enabled,
-            "search_result_limit": self.config.search_result_limit,
-            "search_timeout_seconds": self.config.search_timeout_seconds,
-            "thinking_mode": self.config.thinking_mode,
-            "conversation_analysis": self.config.conversation_analysis,
-            "summarization_mode": self.config.summarization_mode,
-            "member_auto_sync": self.config.member_auto_sync,
-            "knowledge_auto_extract": self.config.knowledge_auto_extract,
-            "knowledge_auto_extract_limit": self.config.knowledge_auto_extract_limit,
-            "event_mode": self.config.event_mode,
-            "event_buffer_limit": self.config.event_buffer_limit,
-            "narrator_mode": self.config.narrator_mode,
-            "narrator_style": self.config.narrator_style,
-            "narrator_detail_level": self.config.narrator_detail_level,
-            "value_game_mode": self.config.value_game_mode,
-            "value_game_reply_bonus": self.config.value_game_reply_bonus,
-            "memory_graph_mode": self.config.memory_graph_mode,
-            "memory_graph_limit": self.config.memory_graph_limit,
-            "proactive_mode": self.config.proactive_mode,
-            "proactive_inactive_hours": self.config.proactive_inactive_hours,
-            "proactive_candidate_limit": self.config.proactive_candidate_limit,
-            "proactive_min_affinity": self.config.proactive_min_affinity,
-            "max_active_skills": self.config.max_active_skills,
-            "history_window_messages": self.config.history_window_messages,
-            "memory_recall_limit": self.config.memory_recall_limit,
-            "max_thinking_words": self.config.max_thinking_words,
-            "short_term_memory_limit": self.config.short_term_memory_limit,
-            "memory_summary_batch_size": self.config.memory_summary_batch_size,
-            "tools": self.list_tools(),
-            "marketplace": self.marketplace.describe(),
-        }
+        return self.dashboard.get_abilities_panel()
 
     def save_abilities_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        self.config.search_enabled = bool(payload.get("search_enabled", self.config.search_enabled))
-        self.config.search_result_limit = _safe_int(payload, "search_result_limit", self.config.search_result_limit)
-        self.config.search_timeout_seconds = _safe_float(payload, "search_timeout_seconds", self.config.search_timeout_seconds)
-        self.config.thinking_mode = bool(payload.get("thinking_mode", self.config.thinking_mode))
-        self.config.conversation_analysis = bool(payload.get("conversation_analysis", self.config.conversation_analysis))
-        self.config.summarization_mode = bool(payload.get("summarization_mode", self.config.summarization_mode))
-        self.config.member_auto_sync = bool(payload.get("member_auto_sync", self.config.member_auto_sync))
-        self.config.knowledge_auto_extract = bool(payload.get("knowledge_auto_extract", self.config.knowledge_auto_extract))
-        self.config.knowledge_auto_extract_limit = _safe_int(
-            payload,
-            "knowledge_auto_extract_limit",
-            self.config.knowledge_auto_extract_limit,
-        )
-        self.config.event_mode = bool(payload.get("event_mode", self.config.event_mode))
-        self.config.event_buffer_limit = _safe_int(payload, "event_buffer_limit", self.config.event_buffer_limit)
-        self.config.narrator_mode = bool(payload.get("narrator_mode", self.config.narrator_mode))
-        self.config.narrator_style = str(payload.get("narrator_style", self.config.narrator_style) or self.config.narrator_style)
-        self.config.narrator_detail_level = _safe_int(payload, "narrator_detail_level", self.config.narrator_detail_level)
-        self.config.value_game_mode = bool(payload.get("value_game_mode", self.config.value_game_mode))
-        self.config.value_game_reply_bonus = _safe_float(payload, "value_game_reply_bonus", self.config.value_game_reply_bonus)
-        self.config.memory_graph_mode = bool(payload.get("memory_graph_mode", self.config.memory_graph_mode))
-        self.config.memory_graph_limit = _safe_int(payload, "memory_graph_limit", self.config.memory_graph_limit)
-        self.config.proactive_mode = bool(payload.get("proactive_mode", self.config.proactive_mode))
-        self.config.proactive_inactive_hours = _safe_float(payload, "proactive_inactive_hours", self.config.proactive_inactive_hours)
-        self.config.proactive_candidate_limit = _safe_int(payload, "proactive_candidate_limit", self.config.proactive_candidate_limit)
-        self.config.proactive_min_affinity = _safe_float(payload, "proactive_min_affinity", self.config.proactive_min_affinity)
-        self.config.max_active_skills = _safe_int(payload, "max_active_skills", self.config.max_active_skills)
-        self.config.history_window_messages = _safe_int(payload, "history_window_messages", self.config.history_window_messages)
-        self.config.memory_recall_limit = _safe_int(payload, "memory_recall_limit", self.config.memory_recall_limit)
-        self.config.max_thinking_words = _safe_int(payload, "max_thinking_words", self.config.max_thinking_words)
-        self.config.short_term_memory_limit = _safe_int(payload, "short_term_memory_limit", self.config.short_term_memory_limit)
-        self.config.memory_summary_batch_size = _safe_int(payload, "memory_summary_batch_size", self.config.memory_summary_batch_size)
-        self._refresh_runtime_components()
-        self._persist_config()
-        return self.get_abilities_panel()
+        return self.dashboard.save_abilities_panel(payload)
 
     def get_behavior_events(
         self,
@@ -2933,13 +2329,10 @@ class WaifuService:
         if rebuild_generator:
             self.generator = Generator(self.config)
             self.cards = self.generator._cards
-            self.thoughts = Thoughts(self.config, self.generator)
             self.memory.set_character_resolver(self.cards.active_character)
         self.search = SearchDecider(self.config)
         self.event_engine = BehaviorEventEngine(self.config)
-        self.narrator = Narrator(self.config)
         self.value_game = ValueGameEngine(self.config)
-        self.memory_graph = MemoryGraphBuilder(self.config)
         self.proactive = ProactivePlanner(self.config)
         self.marketplace = MarketplaceClient(self.config.marketplace)
         self.skills.config = self.config
@@ -2952,6 +2345,7 @@ class WaifuService:
             self.state_store.refresh_knowledge_embeddings()
         if rebuild_outbound:
             self.outbound = _build_runtime_outbound(self.config)
+        self._rebuild_managers()
 
     @staticmethod
     def _coerce_list(value: object) -> list[str]:
@@ -2960,21 +2354,6 @@ class WaifuService:
         if isinstance(value, str):
             return [item.strip() for item in value.splitlines() if item.strip()]
         return []
-
-    @staticmethod
-    def _extract_terms(value: object) -> list[str]:
-        raw = str(value or "").strip().lower()
-        if not raw:
-            return []
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in raw)
-        terms: list[str] = []
-        seen: set[str] = set()
-        for part in cleaned.split():
-            if len(part) < 2 or part in seen:
-                continue
-            seen.add(part)
-            terms.append(part)
-        return terms
 
     def _store_active_skills(self, session: SessionMemory, active_skills: list[SkillSpec]) -> None:
         if active_skills:
@@ -3076,60 +2455,6 @@ class WaifuService:
         if member is None:
             return ""
         return str(member.get("preferred_name", "") or "").strip()
-
-    def _session_detail_graph(self, session: SessionMemory) -> dict[str, Any]:
-        launcher_id = str(session.launcher_id or "").strip()
-        launcher_type = str(session.launcher_type or "").strip()
-        character_id = str(session.character_id or self._active_character_id()).strip()
-        if launcher_type == "person":
-            member = self.state_store.get_member(group_id="", user_id=launcher_id, character_id=character_id)
-            sender_id = launcher_id
-            sender_name = str((member or {}).get("preferred_name") or (member or {}).get("qq_nickname") or launcher_id)
-        else:
-            recent_behavior = self.get_behavior_events(limit=1, launcher_type=launcher_type, launcher_id=launcher_id)
-            sender_id = str(recent_behavior[0].get("sender_id", "") or "") if recent_behavior else ""
-            member = self.state_store.get_member(
-                group_id=launcher_id,
-                user_id=sender_id,
-                character_id=character_id,
-            ) if sender_id else None
-            sender_name = str((member or {}).get("preferred_name") or (member or {}).get("qq_nickname") or launcher_id)
-        detail_event = InboundEvent(
-            launcher_id=launcher_id,
-            launcher_type=launcher_type if launcher_type in {"group", "person"} else "person",
-            sender_id=sender_id,
-            sender_name=sender_name,
-            segments=[MessageSegment(kind="text", text=session.history[-1] if session.history else "")],
-        )
-        knowledge_entries = self._detail_knowledge_entries(session)
-        behavior_events = self.get_behavior_events(limit=8, launcher_type=launcher_type, launcher_id=launcher_id)
-        return self.memory_graph.build(
-            event=detail_event,
-            session=session,
-            member=member,
-            knowledge_entries=knowledge_entries,
-            behavior_events=behavior_events,
-        )
-
-    def _detail_knowledge_entries(self, session: SessionMemory) -> list[dict[str, Any]]:
-        entries = self.state_store.list_knowledge(
-            limit=max(80, self.config.memory_graph_limit * 8),
-            character_id=str(session.character_id or self._active_character_id()).strip(),
-        )
-        scopes = {(session.launcher_type, session.launcher_id), ("global", "")}
-        if session.launcher_type == "person":
-            scopes.add(("member", session.launcher_id))
-        filtered = [
-            dict(entry)
-            for entry in entries
-            if (
-                str(entry.get("scope_type", "") or "").strip(),
-                str(entry.get("scope_id", "") or "").strip(),
-            )
-            in scopes
-        ]
-        filtered.sort(key=lambda item: (-float(item.get("confidence") or 0.0), -int(item.get("updated_at") or 0)))
-        return filtered[: max(1, int(self.config.memory_graph_limit))]
 
     def _knowledge_count_for_session(self, session: SessionMemory) -> int:
         current_character = str(session.character_id or self._active_character_id()).strip()
@@ -3330,14 +2655,11 @@ def _build_service(
         config=app_config,
         memory=Memory(store),
         emotions=EmotionSensor(),
-        thoughts=Thoughts(app_config, generator),
         generator=generator,
         cards=cards,
         search=SearchDecider(app_config),
         event_engine=BehaviorEventEngine(app_config),
-        narrator=Narrator(app_config),
         value_game=ValueGameEngine(app_config),
-        memory_graph=MemoryGraphBuilder(app_config),
         proactive=ProactivePlanner(app_config),
         marketplace=MarketplaceClient(app_config.marketplace),
         skills=skills,

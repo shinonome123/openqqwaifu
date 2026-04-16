@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 import tempfile
@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
 
 from waifu_standalone.app import build_default_service
 from waifu_standalone.cells.generator import Generator
+from waifu_standalone.cells.prompt_builder import RelationshipContext
 from waifu_standalone.cells.skill_registry import (
     SkillRegistry,
     SkillSpec,
@@ -19,7 +20,7 @@ from waifu_standalone.cells.skill_registry import (
     parse_skill_file,
 )
 from waifu_standalone.config import AppConfig
-from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment, SessionMemory
+from waifu_standalone.models import InboundEvent, MessageSegment, SessionMemory
 from waifu_standalone.systems.searching import SearchResult
 
 
@@ -30,9 +31,9 @@ class SkillRegistryTests(unittest.TestCase):
             skill_path.write_text(
                 """---
 id: brief-mode
-name: 简洁输出
-description: 压缩回答长度
-triggers: ["简短点", "一句话"]
+name: Brief Mode
+description: Compress reply length
+triggers: ["brief answer", "one sentence"]
 mode: prefix
 priority: 6
 user-invocable: true
@@ -41,7 +42,7 @@ command-dispatch: tool
 command-tool: summary
 command-arg-mode: raw
 ---
-只给结论，不要绕。
+Give the conclusion only.
 """,
                 encoding="utf-8",
             )
@@ -49,13 +50,13 @@ command-arg-mode: raw
             skill = parse_skill_file(skill_path)
 
             self.assertEqual(skill.skill_id, "brief-mode")
-            self.assertEqual(skill.name, "简洁输出")
-            self.assertEqual(skill.triggers, ["简短点", "一句话"])
+            self.assertEqual(skill.name, "Brief Mode")
+            self.assertEqual(skill.triggers, ["brief answer", "one sentence"])
             self.assertEqual(skill.mode, "prefix")
             self.assertTrue(skill.dispatches_tool)
             self.assertTrue(skill.disable_model_invocation)
             self.assertEqual(skill.command_tool, "summary")
-            self.assertIn("只给结论", skill.content)
+            self.assertIn("Give the conclusion only", skill.content)
 
     def test_parse_skill_file_supports_multiline_trigger_lists(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -63,18 +64,18 @@ command-arg-mode: raw
             skill_path.write_text(
                 """---
 id: skill-list-command
-name: 技能列表
-description: 列出当前可用技能
+name: Skill List
+description: Show current skills
 triggers:
-  - 技能菜单
-  - 说说你会的技能
+  - skills menu
+  - what can you do
 mode: contains
 user-invocable: true
 disable-model-invocation: true
 command-dispatch: tool
 command-tool: skill-list
 ---
-直接展示技能列表。
+Show the skill list directly.
 """,
                 encoding="utf-8",
             )
@@ -82,20 +83,20 @@ command-tool: skill-list
             skill = parse_skill_file(skill_path)
 
             self.assertEqual(skill.skill_id, "skill-list-command")
-            self.assertEqual(skill.triggers, ["技能菜单", "说说你会的技能"])
+            self.assertEqual(skill.triggers, ["skills menu", "what can you do"])
             self.assertTrue(skill.dispatches_tool)
 
     def test_registry_loads_builtin_skills(self) -> None:
         registry = SkillRegistry(AppConfig())
 
-        names = [skill.name for skill in registry.list_skills()]
+        skill_ids = {skill.skill_id for skill in registry.list_skills()}
 
-        self.assertIn("时效性核验", names)
-        self.assertIn("简洁回答", names)
-        self.assertIn("生图交付语气", names)
-        self.assertIn("联网检索", names)
-        self.assertIn("会话总结", names)
-        self.assertIn("直接生图", names)
+        self.assertIn("freshness-check", skill_ids)
+        self.assertIn("concise-answer", skill_ids)
+        self.assertIn("image-handoff", skill_ids)
+        self.assertIn("search-command", skill_ids)
+        self.assertIn("summary-command", skill_ids)
+        self.assertIn("image-command", skill_ids)
 
     def test_registry_toggle_persists_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -218,13 +219,13 @@ command-tool: skill-list
                 launcher_type="person",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="搜一下 北京天气")],
+                segments=[MessageSegment(kind="text", text="搜一个 北京天气")],
             )
         )
 
         self.assertIsNotNone(reply)
         assert reply is not None
-        self.assertIn("我帮你查了一下", reply.text)
+        self.assertIn("我刚查了一下", reply.text)
         self.assertIn("北京天气", reply.text)
 
     def test_direct_summary_skill_dispatches_tool(self) -> None:
@@ -296,7 +297,7 @@ command-tool: skill-list
             skill_id="search-command",
             name="联网搜索",
             description="直接调用搜索工具",
-            triggers=["搜一下"],
+            triggers=["搜一个"],
             mode="prefix",
             priority=12,
             content="直接调用搜索工具。",
@@ -309,21 +310,18 @@ command-tool: skill-list
         prompt = generator._build_chat_query(
             event,
             session,
-            EmotionState(),
             card=generator._cards.load("person", session),
-            assistant_name="琉璃",
+            assistant_name="鐞夌拑",
             address="tester",
-            search_hint="",
             search_context="",
             conversation_view="",
             memory_hints=[],
-            speaker_notes=[],
-            analysis_hint="",
             latest_message="今天怎么样",
+            relationship_context=RelationshipContext(address="tester"),
             active_skills=[visible_skill, hidden_tool_skill],
         )
 
-        self.assertIn("[Active Skills]", prompt)
+        self.assertIn("[当前生效的技能]", prompt)
         self.assertIn("时效性核验", prompt)
         self.assertIn("先提醒对方这类内容最好核验。", prompt)
         self.assertNotIn("联网搜索", prompt)
@@ -340,3 +338,4 @@ command-tool: skill-list
 
 if __name__ == "__main__":
     unittest.main()
+

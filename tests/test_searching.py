@@ -38,7 +38,9 @@ class SearchDeciderTests(unittest.TestCase):
         self.assertEqual(context.query, "今天北京天气怎么样")
         self.assertEqual(len(context.results), 2)
         self.assertIn("晴朗天空", context.summary)
-        self.assertIn("[Web Search]", context.to_prompt_block())
+        prompt_block = context.to_prompt_block()
+        self.assertIn("[联网参考]", prompt_block)
+        self.assertIn("查询：今天北京天气怎么样", prompt_block)
 
     def test_cache_reuses_same_query(self) -> None:
         calls: list[str] = []

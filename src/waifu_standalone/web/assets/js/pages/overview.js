@@ -135,7 +135,6 @@ function renderIdentity(dash) {
       ]),
       el("div", { class: "row" }, [
         chip({ label: dash?.service_name || "-", variant: "outline" }),
-        dash?.thinking_mode ? chip({ label: t("overview.flag.thinking"), variant: "accent" }) : null,
         dash?.summarization_mode ? chip({ label: t("overview.flag.summarize"), variant: "info" }) : null,
         dash?.search_enabled ? chip({ label: t("overview.flag.search"), variant: "ok" }) : null,
       ]),

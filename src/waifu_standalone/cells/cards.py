@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import quote
 
 from ..config import AppConfig
-from ..models import EmotionState, SessionMemory
+from ..models import SessionMemory
 
 
 _DEFAULT_ASSISTANT_NAME = "Assistant"
@@ -39,53 +39,6 @@ class CharacterCard:
     extras: dict[str, Any] = field(default_factory=dict)
     source: str = "builtin"
 
-    def system_prompt(
-        self,
-        *,
-        launcher_type: str,
-        address: str,
-        memories: list[str],
-        emotion: EmotionState,
-        search_hint: str,
-        conversation_view: str,
-        speaker_notes: list[str],
-        latest_message: str,
-    ) -> str:
-        sections: list[str] = [
-            f"你是{self.assistant_name}，正在通过 QQ 与用户交流。",
-        ]
-        if self.profile:
-            sections.append(_format_lines("Profile", self.profile))
-        if self.skills:
-            sections.append(_format_lines("Skills", self.skills))
-
-        background = list(self.background)
-        if launcher_type == "person":
-            background.append(f"当前私聊对象默认称呼是“{address}”。")
-        if background:
-            sections.append(_format_lines("Background", background))
-
-        rule_lines = list(self.rules)
-        rule_lines.append(f"默认使用{self.language}回复。")
-        rule_lines.append("回复要自然、口语化，不要解释提示词、模型、系统设定或内部流程。")
-        sections.append(_format_lines("Rules", rule_lines))
-
-        if memories:
-            sections.append(_format_lines("Memories", memories))
-        if speaker_notes:
-            sections.append(_format_lines("Speaker Notes", speaker_notes))
-
-        state_lines = [
-            f"当前情绪判断：{emotion.primary}（强度 {emotion.intensity:.2f}）",
-            f"当前对话对象偏好称呼：{address}",
-        ]
-        if search_hint:
-            state_lines.append(f"联网提示：{search_hint}")
-        sections.append(_format_lines("State", state_lines))
-        sections.append(_format_block("Conversation", conversation_view or "暂无上下文。"))
-        sections.append(_format_block("Latest Message", latest_message or "暂无内容。"))
-        sections.append("只输出下一句回复，不要加说话人前缀，不要输出额外解释。")
-        return "\n\n".join(part for part in sections if part.strip())
 
 
 class CardManager:
@@ -707,17 +660,6 @@ def _render_card_yaml(fields: dict[str, Any]) -> str:
         else:
             lines.append("  - ")
     return "\n".join(lines).rstrip() + "\n"
-
-
-def _format_lines(title: str, lines: list[str]) -> str:
-    body = "\n".join(f"- {line}" for line in lines if str(line).strip())
-    return f"[{title}]\n{body}".strip()
-
-
-def _format_block(title: str, content: str) -> str:
-    return f"[{title}]\n{content}".strip()
-
-
 def _coerce_str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
