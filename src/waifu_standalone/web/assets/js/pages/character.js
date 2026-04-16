@@ -5,8 +5,6 @@ import {
   fieldRow,
   textInput,
   textarea,
-  numberInput,
-  tagInput,
   select,
   segmented,
   switchControl,
@@ -35,7 +33,6 @@ export function mount(root) {
   let unsubLang = null;
   let bundle = null;
   let editor = null;
-  let other = null;
   let ai = null;
   let cursor = 0;
   let motionDirection = "next";
@@ -72,13 +69,11 @@ export function mount(root) {
     loading = true;
     render();
     try {
-      const [nextBundle, nextOther, nextAi] = await Promise.all([
+      const [nextBundle, nextAi] = await Promise.all([
         api.getCharacterPanel(character),
-        api.getOtherPanel(),
         api.getAiPanel(),
       ]);
       if (stopped) return;
-      other = nextOther;
       ai = nextAi;
       applyBundle(nextBundle);
     } catch (err) {
@@ -104,14 +99,8 @@ export function mount(root) {
     saving = true;
     render();
     try {
-      const selectedBundle = await api.getCharacterPanel(name);
-      const nextAssistant = selectedBundle?.shared?.assistant_name || other?.assistant_name || "";
-      const [savedBundle, savedOther] = await Promise.all([
-        api.saveCharacterPanel({ character: name, set_active: true }),
-        api.saveOtherPanel({ ...(other || {}), assistant_name: nextAssistant }),
-      ]);
+      const savedBundle = await api.saveCharacterPanel({ character: name, set_active: true });
       if (stopped) return;
-      other = savedOther;
       applyBundle(savedBundle);
       toastOk(t("character.carousel.activated", { name }));
     } catch (err) {
@@ -125,7 +114,7 @@ export function mount(root) {
   }
 
   async function savePage({ generatePortrait = null, setActive = false } = {}) {
-    if (!editor || !other || saving) return;
+    if (!editor || saving) return;
     saving = true;
     render();
     try {
@@ -135,24 +124,15 @@ export function mount(root) {
         auto_generate: !!editor.portrait.auto_generate,
         generate: generatePortrait === null ? !!editor.portrait.auto_generate : !!generatePortrait,
       };
-      const syncAssistant = setActive || bundle?.current_character === editor.character;
-      const otherPayload = {
-        ...other,
-        assistant_name: syncAssistant ? editor.shared.assistant_name : other.assistant_name,
-      };
-      const [savedBundle, savedOther] = await Promise.all([
-        api.saveCharacterPanel({
-          character: editor.character,
-          set_active: setActive,
-          shared_fields: cloneShared(editor.shared),
-          person_fields: normalizeVariantFields(editor.person),
-          group_fields: normalizeVariantFields(editor.group),
-          portrait,
-        }),
-        api.saveOtherPanel(otherPayload),
-      ]);
+      const savedBundle = await api.saveCharacterPanel({
+        character: editor.character,
+        set_active: setActive,
+        shared_fields: cloneShared(editor.shared),
+        person_fields: normalizeVariantFields(editor.person),
+        group_fields: normalizeVariantFields(editor.group),
+        portrait,
+      });
       if (stopped) return;
-      other = savedOther;
       applyBundle(savedBundle);
       if (savedBundle?.portrait?.error) {
         toastError(savedBundle.portrait.error);
@@ -273,7 +253,6 @@ export function mount(root) {
         user_name: defaultUserName,
         message: "",
         history: [],
-        analysis_hint: "",
         llm_ready: false,
       };
     }
@@ -294,7 +273,6 @@ export function mount(root) {
       user_name: keepIdentity ? preview.user_name : String(editor?.shared?.user_name || "User"),
       message: "",
       history: [],
-      analysis_hint: "",
     };
   }
 
@@ -333,7 +311,6 @@ export function mount(root) {
               { role: "user", text: message },
               { role: "assistant", text: String(result?.reply_text || "").trim() },
             ],
-        analysis_hint: String(result?.analysis_hint || "").trim(),
         llm_ready: !!result?.llm_ready,
       };
     } catch (err) {
@@ -358,19 +335,13 @@ export function mount(root) {
   }
 
   function renderHeader() {
-    const runtimeName = String(other?.service_name || "");
-    const configPath = String(other?.config_path || "");
-    const dataRoot = String(other?.data_root || "");
     const activeCharacter = String(bundle?.current_character || "");
     return el("div", { class: "page-header" }, [
       el("div", { class: "page-header-text" }, [
         el("div", { class: "page-title", text: t("page.character.title") }),
         el("div", { class: "page-desc", text: t("page.character.desc") }),
         el("div", { class: "row" }, [
-          runtimeName ? chip({ label: runtimeName, variant: "info" }) : null,
           activeCharacter ? chip({ label: `live:${activeCharacter}`, variant: "ok" }) : null,
-          dataRoot ? chip({ label: dataRoot, variant: "outline" }) : null,
-          configPath ? chip({ label: configPath, variant: "outline" }) : null,
         ]),
       ]),
       el("div", { class: "page-actions" }, [
@@ -508,13 +479,12 @@ export function mount(root) {
   }
 
   function renderWorkbench() {
-    if (!editor || !other) {
+    if (!editor) {
       return empty({ title: t("character.editor.empty") });
     }
     return el("div", { class: "character-workbench", id: "character-workbench" }, [
       el("div", { class: "character-editor-main stack" }, [
         renderEditorCard(),
-        renderRuntimeCard(),
       ]),
       el("div", { class: "character-editor-side stack" }, [renderPreviewCard(), renderPortraitCard()]),
     ]);
@@ -660,7 +630,6 @@ export function mount(root) {
             onChange: (value) => {
               preview.launcher_type = value;
               preview.history = [];
-              preview.analysis_hint = "";
               render();
             },
           }),
@@ -676,12 +645,6 @@ export function mount(root) {
           }),
         }),
         el("div", { class: "character-preview-transcript" }, transcriptBody),
-        preview.analysis_hint
-          ? el("div", { class: "character-preview-analysis" }, [
-              el("div", { class: "character-preview-analysis-label", text: t("character.preview.analysis") }),
-              el("div", { class: "character-preview-analysis-text", text: preview.analysis_hint }),
-            ])
-          : null,
         fieldRow({
           label: t("character.preview.message"),
           hint: t("character.preview.message.hint"),
@@ -706,70 +669,6 @@ export function mount(root) {
             disabled: previewing,
           }),
         ]),
-      ],
-    });
-  }
-
-  function renderRuntimeCard() {
-    return card({
-      title: t("character.tab.pipeline"),
-      subtitle: t("character.carousel.desc"),
-      body: [
-        el("div", { class: "stack" }, [
-          chip({ label: t("character.runtime.note"), variant: "info" }),
-          el("div", { class: "page-desc", text: t("character.runtime.tip") }),
-        ]),
-        fieldRow({ label: t("character.field.serviceName"), hint: t("character.field.serviceName.hint"), control: textInput({ value: other.service_name || "", onChange: (value) => { other.service_name = value; } }) }),
-        fieldRow({
-          label: t("character.field.groupReplyRequiresMention"),
-          hint: t("character.field.groupReplyRequiresMention.hint"),
-          control: switchControl({
-            checked: other.group_reply_requires_mention !== false,
-            onChange: (value) => {
-              other.group_reply_requires_mention = value;
-            },
-          }),
-        }),
-        fieldRow({ label: t("character.pipeline.followup"), control: numberInput({ value: Number(other.group_follow_up_window_seconds || 5), min: 0, max: 60, step: 1, onChange: (value) => { other.group_follow_up_window_seconds = value; } }) }),
-        fieldRow({
-          label: t("character.field.groupReplyDelay"),
-          hint: t("character.field.groupReplyDelay.hint"),
-          control: numberInput({
-            value: Number(other.group_response_delay_seconds || 0),
-            min: 0,
-            max: 15,
-            step: 0.5,
-            onChange: (value) => {
-              other.group_response_delay_seconds = value;
-            },
-          }),
-        }),
-        fieldRow({
-          label: t("character.field.repeatTrigger"),
-          hint: t("character.field.repeatTrigger.hint"),
-          control: numberInput({
-            value: Number(other.repeat_trigger_count || 0),
-            min: 0,
-            max: 10,
-            step: 1,
-            onChange: (value) => {
-              other.repeat_trigger_count = value;
-            },
-          }),
-        }),
-        fieldRow({
-          label: t("character.field.multimodal"),
-          hint: t("character.field.multimodal.hint"),
-          control: switchControl({
-            checked: other.multimodal_enabled !== false,
-            onChange: (value) => {
-              other.multimodal_enabled = value;
-            },
-          }),
-        }),
-        fieldRow({ label: t("character.pipeline.imageCmd"), control: textInput({ value: other.image_command_prefix || "", onChange: (value) => { other.image_command_prefix = value.trim(); } }) }),
-        fieldRow({ label: t("character.pipeline.aliases"), control: tagInput({ values: other.image_command_aliases || [], onChange: (value) => { other.image_command_aliases = value; } }) }),
-        fieldRow({ label: t("character.field.ignorePrefixes"), hint: t("character.field.ignorePrefixes.hint"), control: tagInput({ values: other.ignore_prefixes || [], onChange: (value) => { other.ignore_prefixes = value; } }) }),
       ],
     });
   }

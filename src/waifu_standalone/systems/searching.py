@@ -42,11 +42,11 @@ class SearchContext:
     def to_prompt_block(self) -> str:
         if not self.active:
             return ""
-        lines = [f"[Web Search]\nQuery: {self.query}"]
+        lines = [f"[联网参考]\n查询：{self.query}"]
         for result in self.results:
-            lines.append(f"- {result.title}: {result.snippet}")
+            lines.append(f"- {result.title}：{result.snippet}")
             if result.url:
-                lines.append(f"  URL: {result.url}")
+                lines.append(f"  链接：{result.url}")
         return "\n".join(lines).strip()
 
     def as_dict(self) -> dict[str, object]:

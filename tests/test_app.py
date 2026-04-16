@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 import tempfile
@@ -18,6 +18,7 @@ from waifu_standalone.config import AppConfig, QQSidecarConfig
 from waifu_standalone.gateways.onebot_actions import OneBotHttpOutboundPort
 from waifu_standalone.models import InboundEvent, MessageSegment
 from waifu_standalone.memory import InMemoryStore
+from waifu_standalone.cells.prompt_builder import RelationshipContext
 from waifu_standalone.organs.memories import Memory
 from waifu_standalone.services import CapturingOutboundPort
 from waifu_standalone.systems.searching import SearchContext, SearchResult
@@ -43,7 +44,7 @@ class _FakeNapCatLoginBridge:
             },
             "login_info": {
                 "uin": "3518944354",
-                "nickname": "琉璃",
+                "nickname": "鐞夌拑",
                 "avatar_url": "",
                 "online": self.refreshed,
             },
@@ -94,11 +95,11 @@ class WaifuServiceTests(unittest.TestCase):
         (cards_dir / "default_group.yaml").write_text(
             "\n".join(
                 [
-                    "assistant_name: 琉璃",
-                    "user_name: 用户",
+                    "assistant_name: 鐞夌拑",
+                    "user_name: 鐢ㄦ埛",
                     "language: 简体中文",
                     "Profile:",
-                    "  - 琉璃",
+                    "  - 鐞夌拑",
                 ]
             ),
             encoding="utf-8",
@@ -106,11 +107,11 @@ class WaifuServiceTests(unittest.TestCase):
         (cards_dir / "aurora_group.yaml").write_text(
             "\n".join(
                 [
-                    "assistant_name: 极光",
-                    "user_name: 用户",
+                    "assistant_name: 鏋佸厜",
+                    "user_name: 鐢ㄦ埛",
                     "language: 简体中文",
                     "Profile:",
-                    "  - 极光",
+                    "  - 鏋佸厜",
                 ]
             ),
             encoding="utf-8",
@@ -169,7 +170,7 @@ class WaifuServiceTests(unittest.TestCase):
             )
 
             service.generator.generate_reply = (  # type: ignore[method-assign]
-                lambda event, session, emotion, **kwargs: service.cards.load(event.launcher_type, session).assistant_name
+                lambda event, session, **kwargs: service.cards.load(event.launcher_type, session).assistant_name
             )
             service.cards.set_active_character("default")
             first = service.handle_event(
@@ -196,8 +197,8 @@ class WaifuServiceTests(unittest.TestCase):
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
             assert first is not None and second is not None
-            self.assertEqual(first.text, "琉璃")
-            self.assertEqual(second.text, "极光")
+            self.assertEqual(first.text, "鐞夌拑")
+            self.assertEqual(second.text, "鏋佸厜")
 
     def test_repair_character_isolation_state_cleans_cross_persona_pollution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -292,9 +293,9 @@ class WaifuServiceTests(unittest.TestCase):
             )
             captured: dict[str, object] = {}
 
-            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+            def fake_generate_reply(event, session, **kwargs):  # type: ignore[no-untyped-def]
                 captured["conversation_view"] = kwargs.get("conversation_view", "")
-                captured["speaker_notes"] = list(kwargs.get("speaker_notes", []))
+                captured["relationship_context"] = kwargs.get("relationship_context")
                 return service.cards.load(event.launcher_type, session).assistant_name
 
             service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
@@ -313,7 +314,91 @@ class WaifuServiceTests(unittest.TestCase):
             assert result is not None
             self.assertEqual(result.text, "Aurora")
             self.assertNotIn("Liuli", str(captured.get("conversation_view", "")))
-            self.assertFalse(any("Liuli" in str(item) for item in captured.get("speaker_notes", [])))
+            relationship = captured.get("relationship_context")
+            self.assertIsInstance(relationship, RelationshipContext)
+            assert isinstance(relationship, RelationshipContext)
+            self.assertNotIn("Liuli", relationship.profile_summary)
+
+    def test_handle_event_skips_analysis_and_prompt_side_channels(self) -> None:
+        config = AppConfig(group_reply_requires_mention=False)
+        service, _ = build_default_service(config)
+        captured: dict[str, object] = {}
+
+        def fake_generate_reply(event, session, **kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return "鏀跺埌"
+
+        service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="鎴戜粖澶╁ソ绱晩")],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        relationship = captured.get("relationship_context")
+        self.assertIsInstance(relationship, RelationshipContext)
+        assert isinstance(relationship, RelationshipContext)
+        self.assertEqual(relationship.address, "tester")
+        self.assertNotIn("analysis_hint", captured)
+        self.assertNotIn("speaker_notes", captured)
+        self.assertFalse(hasattr(service, "thoughts"))
+        self.assertFalse(hasattr(service, "narrator"))
+        self.assertFalse(hasattr(service, "memory_graph"))
+
+    def test_refresh_runtime_components_does_not_restore_legacy_prompt_services(self) -> None:
+        service, _ = build_default_service(AppConfig())
+
+        service._refresh_runtime_components(rebuild_generator=True)
+
+        self.assertFalse(hasattr(service, "thoughts"))
+        self.assertFalse(hasattr(service, "narrator"))
+        self.assertFalse(hasattr(service, "memory_graph"))
+        self.assertTrue(hasattr(service, "session_graphs"))
+
+    def test_handle_event_uses_unified_knowledge_recall(self) -> None:
+        config = AppConfig(group_reply_requires_mention=False)
+        service, _ = build_default_service(config)
+        captured: dict[str, object] = {}
+
+        service.state_store.recall_knowledge = (  # type: ignore[method-assign]
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy-recall"))
+        )
+
+        def fake_recall(_manager, event, *, query, limit):  # type: ignore[no-untyped-def]
+            captured["query"] = query
+            captured["limit"] = limit
+            return ["鍠滄鐏攨", "鏄▼搴忓憳"]
+
+        def fake_generate_reply(event, session, **kwargs):  # type: ignore[no-untyped-def]
+            captured["memory_hints"] = kwargs.get("memory_hints")
+            return "鏀跺埌"
+
+        original_recall = service.knowledge.__class__.recall
+        service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+        service.knowledge.__class__.recall = fake_recall  # type: ignore[assignment]
+        try:
+            result = service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="鎴戜粖澶╁ソ绱晩")],
+                )
+            )
+        finally:
+            service.knowledge.__class__.recall = original_recall  # type: ignore[assignment]
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured.get("query"), "鎴戜粖澶╁ソ绱晩")
+        self.assertEqual(captured.get("limit"), service.config.memory_recall_limit)
+        self.assertEqual(captured.get("memory_hints"), ["鍠滄鐏攨", "鏄▼搴忓憳"])
 
     def test_llm_user_key_includes_character_and_launcher_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -335,7 +420,7 @@ class WaifuServiceTests(unittest.TestCase):
 
             def fake_invoke(prompt: str, *, user: str = "waifu-standalone") -> str:
                 calls.append(user)
-                return "极光"
+                return "鏋佸厜"
 
             service.generator._dify_client.invoke = fake_invoke  # type: ignore[method-assign]
 
@@ -369,7 +454,7 @@ class WaifuServiceTests(unittest.TestCase):
                     "group_id": "612475113",
                     "user_id": "783190298",
                     "qq_nickname": "tester",
-                    "preferred_name": "爸爸",
+                    "preferred_name": "鐖哥埜",
                     "onboarding_status": "ready",
                     "profile_summary": "Aurora stays calm",
                     "affinity_score": 0.72,
@@ -387,7 +472,7 @@ class WaifuServiceTests(unittest.TestCase):
 
             self.assertIsNotNone(reset)
             assert reset is not None
-            self.assertEqual(reset["preferred_name"], "爸爸")
+            self.assertEqual(reset["preferred_name"], "鐖哥埜")
             self.assertEqual(reset["qq_nickname"], "tester")
             self.assertEqual(reset["profile_summary"], "")
             self.assertEqual(float(reset["affinity_score"]), 0.0)
@@ -500,7 +585,7 @@ class WaifuServiceTests(unittest.TestCase):
                     "group_id": "612475113",
                     "user_id": "783190298",
                     "qq_nickname": "tester",
-                    "preferred_name": "爸爸",
+                    "preferred_name": "鐖哥埜",
                     "onboarding_status": "ready",
                 }
             )
@@ -512,7 +597,7 @@ class WaifuServiceTests(unittest.TestCase):
                     sender_name="tester",
                     segments=[
                         MessageSegment(kind="mention", mention_target="3518944354"),
-                        MessageSegment(kind="text", text=" 你好"),
+                        MessageSegment(kind="text", text=" 浣犲ソ"),
                     ],
                 )
             )
@@ -524,7 +609,7 @@ class WaifuServiceTests(unittest.TestCase):
                     launcher_type="group",
                     sender_id="783190298",
                     sender_name="tester",
-                    segments=[MessageSegment(kind="text", text="继续说呀")],
+                    segments=[MessageSegment(kind="text", text="缁х画璇村憖")],
                 )
             )
 
@@ -543,12 +628,12 @@ class WaifuServiceTests(unittest.TestCase):
                 "group_id": "612475113",
                 "user_id": "783190298",
                 "qq_nickname": "tester",
-                "preferred_name": "爸爸",
+                "preferred_name": "鐖哥埜",
                 "onboarding_status": "ready",
             }
         )
 
-        original_query = "能不能帮我看看现在的小米公司股价是多少？"
+        original_query = "鑳戒笉鑳藉府鎴戠湅鐪嬬幇鍦ㄧ殑灏忕背鍏徃鑲′环鏄灏戯紵"
         service.search.build_context = lambda event: SearchContext(  # type: ignore[method-assign]
             query=original_query,
             summary="这类问题通常需要联网确认，但这次没有拿到可靠结果。",
@@ -606,12 +691,12 @@ class WaifuServiceTests(unittest.TestCase):
                 "group_id": "612475113",
                 "user_id": "783190298",
                 "qq_nickname": "tester",
-                "preferred_name": "爸爸",
+                "preferred_name": "鐖哥埜",
                 "onboarding_status": "ready",
             }
         )
 
-        original_query = "能不能帮我查查今天的股价是多少"
+        original_query = "能不能帮我查查今天的股价是多少？"
         service.search.build_context = lambda event: SearchContext(  # type: ignore[method-assign]
             query=original_query,
             summary="这类问题通常需要联网确认，但这次没有拿到可靠结果。",
@@ -619,7 +704,7 @@ class WaifuServiceTests(unittest.TestCase):
             fetched_at=time.time(),
             reason="keyword-hit:no-results",
         )
-        service.generator.generate_reply = lambda *args, **kwargs: "爸爸，股价实时变动，最好自己联网核验最新。"  # type: ignore[method-assign]
+        service.generator.generate_reply = lambda *args, **kwargs: "爸爸，股价实时变动，最好自己联网核验最新结果。"  # type: ignore[method-assign]
 
         first = service.handle_event(
             InboundEvent(
@@ -654,13 +739,13 @@ class WaifuServiceTests(unittest.TestCase):
                 launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="小米公司的哦")],
+                segments=[MessageSegment(kind="text", text="灏忕背鍏徃鐨勫摝")],
             )
         )
 
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
-        self.assertTrue(any("小米公司的哦" in query for query in captured_queries))
+        self.assertTrue(any("灏忕背鍏徃鐨勫摝" in query for query in captured_queries))
 
     def test_same_launcher_events_do_not_lose_history_under_concurrency(self) -> None:
         config = AppConfig(group_reply_requires_mention=False)
@@ -821,7 +906,7 @@ class WaifuServiceTests(unittest.TestCase):
 
             self.assertEqual(snapshot["assistant_name"], service.cards.load("group", service.memory.load("612475113", "group", character_id="default")).assistant_name)
             self.assertEqual(snapshot["character"], "default")
-            self.assertEqual(snapshot["thinking_mode"], True)
+            self.assertNotIn("thinking_mode", snapshot)
             self.assertEqual(snapshot["summarization_mode"], False)
             self.assertEqual(snapshot["session_count"], 1)
             self.assertEqual(snapshot["recent_outbound_count"], 1)
@@ -830,6 +915,41 @@ class WaifuServiceTests(unittest.TestCase):
             self.assertEqual(snapshot["message_behavior"]["follow_up_window_seconds"], 5.0)
             self.assertEqual(snapshot["knowledge_count"], 0)
             self.assertEqual(snapshot["member_count"], 1)
+            archived = snapshot["archived_runtime"]
+            self.assertTrue(archived["fields"]["thinking_mode"])
+            self.assertTrue(archived["fields"]["memory_graph_mode"])
+
+    def test_console_archives_legacy_runtime_controls(self) -> None:
+        service, _ = build_default_service(AppConfig())
+
+        abilities = service.get_abilities_panel()
+        console = service.get_console_panels()
+
+        self.assertNotIn("thinking_mode", abilities)
+        self.assertNotIn("conversation_analysis", abilities)
+        self.assertNotIn("narrator_mode", abilities)
+        self.assertNotIn("memory_graph_mode", abilities)
+        self.assertNotIn("max_thinking_words", abilities)
+        self.assertIn("archived", console)
+        archived = console["archived"]
+        self.assertTrue(archived["fields"]["thinking_mode"])
+        self.assertTrue(archived["fields"]["memory_graph_mode"])
+
+        service.save_abilities_panel(
+            {
+                "thinking_mode": False,
+                "conversation_analysis": False,
+                "narrator_mode": False,
+                "memory_graph_mode": False,
+                "max_thinking_words": 5,
+            }
+        )
+
+        self.assertTrue(service.config.thinking_mode)
+        self.assertTrue(service.config.conversation_analysis)
+        self.assertTrue(service.config.narrator_mode)
+        self.assertTrue(service.config.memory_graph_mode)
+        self.assertEqual(service.config.max_thinking_words, 30)
 
     def test_behavior_graph_and_value_game_update_after_reply(self) -> None:
         config = AppConfig(
@@ -1133,8 +1253,8 @@ class WaifuServiceTests(unittest.TestCase):
                 "character": "aurora",
                 "set_active": False,
                 "shared_fields": {
-                    "assistant_name": "极光",
-                    "user_name": "主人",
+                    "assistant_name": "鏋佸厜",
+                    "user_name": "涓讳汉",
                     "language": "简体中文",
                 },
                 "person_fields": {
@@ -1156,7 +1276,7 @@ class WaifuServiceTests(unittest.TestCase):
 
         self.assertEqual(service.config.character, "default")
         self.assertEqual(saved["character"], "aurora")
-        self.assertEqual(saved["shared"]["assistant_name"], "极光")
+        self.assertEqual(saved["shared"]["assistant_name"], "鏋佸厜")
 
     def test_save_character_panel_persists_shared_active_character(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1187,7 +1307,7 @@ class WaifuServiceTests(unittest.TestCase):
             {
                 "launcher_type": "group",
                 "user_name": "Captain",
-                "message": "你现在应该叫我什么？",
+                "message": "浣犵幇鍦ㄥ簲璇ュ彨鎴戜粈涔堬紵",
                 "shared_fields": {
                     "assistant_name": "Aurora",
                     "user_name": "Captain",
@@ -1214,7 +1334,7 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(preview["assistant_name"], "Aurora")
         self.assertEqual(preview["user_name"], "Captain")
         self.assertTrue(preview["reply_text"])
-        self.assertTrue(preview["analysis_hint"])
+        self.assertNotIn("analysis_hint", preview)
         self.assertEqual(len(preview["transcript"]), 2)
         self.assertEqual(preview["transcript"][0]["role"], "user")
         self.assertEqual(preview["transcript"][1]["role"], "assistant")
@@ -1319,11 +1439,11 @@ class WaifuServiceTests(unittest.TestCase):
         panel = service.save_other_panel(
             {
                 "service_name": "openqqwaifu",
-                "assistant_name": "琉璃",
+                "assistant_name": "鐞夌拑",
                 "bot_account_id": "3518944354",
                 "group_reply_requires_mention": False,
-                "image_command_prefix": "生图",
-                "image_command_aliases": ["生图", "draw"],
+                "image_command_prefix": "鐢熷浘",
+                "image_command_aliases": ["鐢熷浘", "draw"],
                 "ignore_prefixes": ["!", "/"],
                 "group_follow_up_window_seconds": 9,
                 "group_response_delay_seconds": 1.5,
@@ -1445,3 +1565,6 @@ class WaifuServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

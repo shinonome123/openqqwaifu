@@ -12,6 +12,7 @@
 
 - Docker 单运行时部署
 - NapCat WebUI / QQ 登录桥接
+- 统一提示词回复链路
 - 人物卡编辑、切换、立绘工位、测试面板
 - 群聊 / 私聊独立会话
 - 三层记忆系统：
@@ -25,46 +26,53 @@
   - skill pack 导入导出
   - marketplace 远程源
 - 联网搜索、摘要、生图工具链
-- 成员目录、关系值、行为事件、记忆图谱
+- 成员目录、关系值、行为事件、session detail 记忆图谱
 - 控制台登录、用户页、密码修改
 
 ## 2026-04-16 最新进展
 
-### 人格隔离
+### 提示词与回复主链路收口
 
-- 会话、知识条目、成员角色态按 `character_id` 隔离
-- 切换人物卡后，运行时 prompt、记忆读取、知识写入都会跟随当前角色
-- LLM 请求侧的 `user/session` 标识已带上：
-  - `purpose`
-  - `character_id`
-  - `launcher_type`
-  - `launcher_id`
-  - `sender_id`
-- 缺失人物卡时，默认模板会 fallback，但会强制覆盖为当前角色身份，不再把默认模板里的固定人格漏出去
-- 默认模板和默认配置已改成中性身份，不再默认写死 `琉璃`
+- 主回复流程改成单一 PromptBuilder 路径，统一输出：
+  - `[人设]`
+  - `[回复原则]`
+  - `[你和 X 的关系]`
+  - `[最近对话]`
+  - `[X 刚刚说]`
+- 普通回复不再额外注入：
+  - `Thoughts.analyze()` 的独立分析结果
+  - `Narrator` 的英文 cue
+  - `EmotionSensor` 的情绪标签
+  - `MemoryGraphBuilder` 的图谱高亮
+- onboarding 也已切到统一 prompt builder，不再保留旧的并行提示词路径
+- 主回复热路径压缩为一次 LLM 调用，后处理逻辑留在回复之后执行
 
-### 跟聊与搜索
+### 组件拆分与职责收口
 
-- 群跟聊窗口默认支持 `@` 后继续追问
-- 跟聊窗口会持久化到会话元数据，不再只依赖进程内存
-- 搜索失败后的二次确认与补充条件会进入 `pending_search`
-- 后续像“好的，你帮我查查吧”“小米公司的哦”这种补充句，不需要再次 `@`
-- 联网搜索从单一 DuckDuckGo Instant Answer 升级为：
-  - Instant Answer
-  - DuckDuckGo HTML fallback
+- `WaifuService` 继续负责主编排，但重逻辑已拆出到独立组件：
+  - `PromptBuilder`
+  - `KnowledgeManager`
+  - `MemberManager`
+  - `RelationshipTracker`
+  - `DashboardService`
+  - `SessionDetailGraphService`
+- `Thoughts` 与 `Narrator` 已退出代码路径并删除
+- `MemoryGraphBuilder` 只保留给 memory 页 session detail 观测使用，不再参与主回复提示词
+- 统一记忆召回入口收口到 `KnowledgeManager.recall()`，负责合并、去重和限流
 
-### QQ 登录与运行边界
+### 控制台与能力页收口
+
+- abilities 页只保留仍在主回复链路里生效的能力开关
+- `thinking / narrator / memory_graph / max_thinking_words` 等旧热路径控制被归档到 advanced 观测区
+- 角色预览面板不再展示分析 trace，直接预览最终回复
+- message behavior 相关配置从角色页挪回 abilities 页，角色编辑和运行时配置边界更清晰
+
+### Docker 作为唯一正式运行方式
 
 - Docker 启动后会同时拉起 `openqqwaifu` 与 `NapCat`
 - 控制台内可直接走 `QQ 登录` 页，不需要手工单独打开 NapCat 管理页
 - NapCat 回调地址会自动配置为容器内可达地址
-- 当前正式运行入口统一为 Docker 控制台，不再保留宿主机 preview 双运行时
-
-### 人工控制与清理入口
-
-- 记忆页支持删除知识条目
-- 成员页支持重置当前角色的人格态
-- 角色切换后可手动清理错误写入的人格污染
+- 当前正式运行入口统一为 Docker Compose，不再建议在宿主机上直接启动 Python 服务
 
 ## 架构概览
 
@@ -77,9 +85,11 @@ openqqwaifu http_api.py
         v
 app.py runtime orchestration
         |
-        +-- cards / generator / skill_registry
+        +-- cards / generator / prompt_builder
+        +-- member_manager / knowledge_manager / relationship_tracker
         +-- memory / state_store / migration
-        +-- searching / events / narrator / value_game / proactive
+        +-- searching / events / value_game / proactive
+        +-- dashboard_service / session_detail_graph
         +-- web dashboard
 ```
 
@@ -120,6 +130,14 @@ tests/
 cd C:\openqqwaifu
 copy .env.example .env
 docker compose -f .\compose.napcat.yml up --build -d
+```
+
+后续更新也建议继续走 Docker：
+
+```powershell
+cd C:\openqqwaifu
+docker compose -f .\compose.napcat.yml up -d --build
+docker compose -f .\compose.napcat.yml ps
 ```
 
 ### 2. 打开控制台
@@ -202,7 +220,7 @@ cd C:\openqqwaifu
 python -B -m unittest discover -s tests -v
 ```
 
-当前基线：`172/172` 通过。
+当前仓库基线：`177/177` 通过。
 
 ## 文档
 

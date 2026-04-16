@@ -140,7 +140,7 @@
   flex-direction: column;
   gap: 14px;
   padding: 22px 22px 20px;
-  min-height: 540px;
+  min-height: 460px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -312,10 +312,8 @@
   gap: 8px;
   flex-wrap: wrap;
   margin-top: auto;
-  padding-top: 4px;
-  border-top: 1px solid var(--border);
-  margin-top: 4px;
   padding-top: 14px;
+  border-top: 1px solid var(--border);
 }
 
 .carousel-card-actions .btn {
@@ -609,7 +607,7 @@
 
 .character-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr);
   gap: 18px;
   align-items: start;
 }

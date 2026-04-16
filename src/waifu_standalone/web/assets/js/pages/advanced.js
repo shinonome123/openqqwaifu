@@ -1,7 +1,7 @@
 // Advanced page: raw JSON snapshot of all panels + danger-zone actions.
 
 import { api } from "../api.js";
-import { el, card, textarea, jsonView } from "../components.js";
+import { el, card, jsonView } from "../components.js";
 import { t, onLangChange } from "../i18n.js";
 import { toastOk, toastError, confirmDialog, copyToClipboard } from "../ui.js";
 
@@ -50,6 +50,16 @@ export function mount(root) {
     );
 
     if (!panels) return;
+
+    if (panels.archived) {
+      container.appendChild(
+        card({
+          title: t("advanced.archived.title"),
+          subtitle: t("advanced.archived.desc"),
+          body: [jsonView(panels.archived)],
+        }),
+      );
+    }
 
     container.appendChild(
       card({
