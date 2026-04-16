@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +24,9 @@ class NapCatLoginBridge:
     timeout: float = 10.0
     _credential: str = field(default="", init=False, repr=False)
     _resolved_api_base: str = field(default="", init=False, repr=False)
+    _last_status: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _last_status_at: float = field(default=0.0, init=False, repr=False)
+    _last_login_info: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def configured(self) -> bool:
         base, _ = normalize_webui_settings(self.base_url, self.webui_token)
@@ -49,16 +54,30 @@ class NapCatLoginBridge:
                 "login_error": "",
             },
             "login_info": {},
+            "login_info_error": "",
         }
         if not refresh or not self.configured():
             return panel
         try:
-            status = self.fetch_status()
+            status = self._status_with_recovery(force=refresh, allow_refresh=refresh)
             panel["status"] = status
             if status.get("is_login"):
-                panel["login_info"] = self.fetch_login_info()
+                try:
+                    panel["login_info"] = self.fetch_login_info(force=refresh)
+                except NapCatLoginError as exc:
+                    cached_login = self._cached_login_info()
+                    if cached_login:
+                        panel["login_info"] = cached_login
+                    panel["login_info_error"] = str(exc)
         except NapCatLoginError as exc:
-            panel["error"] = str(exc)
+            fallback_status, fallback_info = self._recover_logged_in_state(force=refresh)
+            if fallback_status is not None:
+                panel["status"] = fallback_status
+                if fallback_info:
+                    panel["login_info"] = fallback_info
+            else:
+                panel["error"] = str(exc)
+        panel["resolved_api_base"] = self._resolved_api_base
         return panel
 
     def webui_url(self) -> str:
@@ -68,35 +87,57 @@ class NapCatLoginBridge:
         return f"{base}/webui"
 
     def refresh_qrcode(self) -> dict[str, Any]:
-        self._request_with_auth("/QQLogin/RefreshQRcode", {})
-        return self.fetch_status(force=True)
+        fallback_status, _ = self._recover_logged_in_state(force=True)
+        if fallback_status is not None and fallback_status.get("is_login"):
+            self._cache_status(fallback_status)
+            return dict(fallback_status)
+        try:
+            self._refresh_qrcode_via_api(force=True)
+        except NapCatLoginError as exc:
+            if not _looks_already_logged_in(str(exc)):
+                raise
+        status = self.fetch_status(force=True)
+        if status.get("is_login"):
+            return status
+        return status
 
     def fetch_status(self, *, force: bool = False) -> dict[str, Any]:
+        if not force and self._last_status and (time.time() - self._last_status_at) < 2.0:
+            return dict(self._last_status)
         raw = self._request_with_auth("/QQLogin/CheckLoginStatus", {}, force=force)
-        return {
+        status = self._normalize_status({
             "is_login": bool(raw.get("isLogin")),
             "is_offline": bool(raw.get("isOffline")),
             "qrcode_url": str(raw.get("qrcodeurl") or ""),
             "login_error": str(raw.get("loginError") or ""),
-        }
+        })
+        self._cache_status(status)
+        return dict(status)
 
-    def fetch_login_info(self) -> dict[str, Any]:
-        raw = self._request_with_auth("/QQLogin/GetQQLoginInfo", {})
-        return {
+    def fetch_login_info(self, *, force: bool = False) -> dict[str, Any]:
+        raw = self._request_with_auth("/QQLogin/GetQQLoginInfo", {}, force=force)
+        info = {
             "uin": str(raw.get("uin") or raw.get("user_id") or raw.get("qq") or ""),
             "nickname": str(raw.get("nickname") or raw.get("nick") or ""),
             "avatar_url": str(raw.get("avatarUrl") or raw.get("avatar_url") or ""),
             "online": bool(raw.get("online", False)),
             "raw": raw,
         }
+        if info.get("uin"):
+            self._last_login_info = dict(info)
+        return info
 
-    def qrcode_payload(self) -> str:
-        status = self.fetch_status(force=True)
+    def qrcode_payload(self, *, force: bool = False) -> str:
+        status = self._status_with_recovery(force=force, allow_refresh=True)
+        if status.get("is_login"):
+            raise NapCatLoginError("QQ is already logged in")
         return str(status.get("qrcode_url") or "")
 
     def reset_auth(self) -> None:
         self._credential = ""
         self._resolved_api_base = ""
+        self._last_status = {}
+        self._last_status_at = 0.0
 
     def _request_with_auth(
         self,
@@ -109,24 +150,74 @@ class NapCatLoginBridge:
         if not self._credential or not self._resolved_api_base:
             raise NapCatLoginError("NapCat WebUI credential is unavailable")
         try:
-            return self._post_json(
-                self._resolved_api_base,
+            return self._request_against_candidates(
                 route,
                 payload,
                 authorization=f"Bearer {self._credential}",
             )
         except NapCatLoginError as exc:
-            if not _looks_unauthorized(str(exc)):
+            if not (_looks_unauthorized(str(exc)) or _looks_missing_route(str(exc))):
                 raise
         self._ensure_credential(force=True)
         if not self._credential or not self._resolved_api_base:
             raise NapCatLoginError("NapCat WebUI credential refresh failed")
-        return self._post_json(
-            self._resolved_api_base,
+        return self._request_against_candidates(
             route,
             payload,
             authorization=f"Bearer {self._credential}",
         )
+
+    def _status_with_recovery(self, *, force: bool, allow_refresh: bool) -> dict[str, Any]:
+        status = self.fetch_status(force=force)
+        if allow_refresh and _status_needs_qrcode_refresh(status):
+            self._refresh_qrcode_via_api(force=True)
+            status = self.fetch_status(force=True)
+        return status
+
+    def _refresh_qrcode_via_api(self, *, force: bool) -> None:
+        self._request_with_auth("/QQLogin/RefreshQRcode", {}, force=force)
+        self._last_status = {}
+        self._last_status_at = 0.0
+
+    def _cache_status(self, status: dict[str, Any]) -> None:
+        self._last_status = dict(self._normalize_status(status))
+        self._last_status_at = time.time()
+
+    def _normalize_status(self, status: dict[str, Any]) -> dict[str, Any]:
+        normalized = {
+            "is_login": bool(status.get("is_login")),
+            "is_offline": bool(status.get("is_offline")),
+            "qrcode_url": str(status.get("qrcode_url") or ""),
+            "login_error": str(status.get("login_error") or ""),
+        }
+        if normalized["is_login"]:
+            normalized["qrcode_url"] = ""
+            normalized["login_error"] = ""
+        return normalized
+
+    def _cached_login_info(self) -> dict[str, Any]:
+        return dict(self._last_login_info)
+
+    def _recover_logged_in_state(self, *, force: bool) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        try:
+            login_info = self.fetch_login_info(force=force)
+        except NapCatLoginError:
+            login_info = self._cached_login_info()
+        if str(login_info.get("uin") or "").strip():
+            status = self._normalize_status(
+                {
+                    "is_login": True,
+                    "is_offline": not bool(login_info.get("online", False)),
+                    "qrcode_url": "",
+                    "login_error": "",
+                }
+            )
+            self._cache_status(status)
+            return status, login_info
+        cached_status = self._normalize_status(self._last_status)
+        if cached_status.get("is_login"):
+            return cached_status, self._cached_login_info()
+        return None, {}
 
     def _ensure_credential(self, *, force: bool = False) -> None:
         if not self.configured():
@@ -169,6 +260,8 @@ class NapCatLoginBridge:
                 candidates.append(base)
         else:
             candidates.append(base)
+        if f"{base}/api" not in candidates:
+            candidates.append(f"{base}/api")
         seen: set[str] = set()
         unique: list[str] = []
         for item in candidates:
@@ -176,6 +269,43 @@ class NapCatLoginBridge:
                 seen.add(item)
                 unique.append(item)
         return unique
+
+    def _request_against_candidates(
+        self,
+        route: str,
+        payload: dict[str, Any],
+        *,
+        authorization: str,
+    ) -> dict[str, Any]:
+        last_error = ""
+        for api_base in self._candidate_route_bases():
+            try:
+                result = self._post_json(
+                    api_base,
+                    route,
+                    payload,
+                    authorization=authorization,
+                )
+                self._resolved_api_base = api_base
+                return result
+            except NapCatLoginError as exc:
+                last_error = str(exc)
+                if _looks_missing_route(last_error):
+                    continue
+                raise
+        raise NapCatLoginError(last_error or "NapCat WebUI request failed")
+
+    def _candidate_route_bases(self) -> list[str]:
+        candidates = []
+        seen: set[str] = set()
+        preferred = str(self._resolved_api_base or "").strip()
+        for item in [preferred, *self._candidate_api_bases()]:
+            normalized = str(item or "").rstrip("/")
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(normalized)
+        return candidates
 
     def _post_json(
         self,
@@ -265,7 +395,35 @@ def _hash_webui_token(token: str) -> str:
 
 def _looks_unauthorized(message: str) -> bool:
     lowered = str(message or "").lower()
-    return "unauthorized" in lowered or "authorization failed" in lowered or "token" in lowered
+    return any(
+        token in lowered
+        for token in (
+            "unauthorized",
+            "authorization failed",
+            "invalid token",
+            "token expired",
+            "credential expired",
+        )
+    )
+
+
+def _looks_missing_route(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return "(404)" in lowered or "cannot get " in lowered or "cannot post " in lowered or "not found" in lowered
+
+
+def _looks_already_logged_in(message: str) -> bool:
+    lowered = str(message or "").strip().lower()
+    return any(
+        token in lowered
+        for token in (
+            "qq is logined",
+            "already logged in",
+            "already login",
+            "已登录",
+            "宸茬櫥褰?",
+        )
+    )
 
 
 def qrcode_payload_to_image_source(payload: str) -> tuple[str, bytes]:
@@ -274,17 +432,7 @@ def qrcode_payload_to_image_source(payload: str) -> tuple[str, bytes]:
         raise NapCatLoginError("NapCat did not return a QR payload")
     if value.startswith("data:image/"):
         return _decode_data_image(value)
-    encoded = urllib.parse.quote(value, safe="")
-    request = urllib.request.Request(
-        f"https://api.qrserver.com/v1/create-qr-code/?size=240x240&data={encoded}",
-        headers={"Accept": "image/*"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10.0) as response:
-            content_type = response.headers.get_content_type() or "image/png"
-            return content_type, response.read()
-    except urllib.error.URLError as exc:
-        raise NapCatLoginError(f"Failed to render QQ QR code: {getattr(exc, 'reason', exc)}") from exc
+    return _render_local_qrcode_png(value)
 
 
 def _decode_data_image(value: str) -> tuple[str, bytes]:
@@ -295,3 +443,52 @@ def _decode_data_image(value: str) -> tuple[str, bytes]:
     if ";base64" in header:
         return content_type, base64.b64decode(raw)
     return content_type, urllib.parse.unquote_to_bytes(raw)
+
+
+def _render_local_qrcode_png(value: str) -> tuple[str, bytes]:
+    try:
+        import qrcode
+    except ImportError as exc:
+        raise NapCatLoginError("Local QR renderer is unavailable; install qrcode[pil]") from exc
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=8,
+        border=4,
+    )
+    qr.add_data(value)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return "image/png", buffer.getvalue()
+
+
+def _status_needs_qrcode_refresh(status: dict[str, Any]) -> bool:
+    if bool(status.get("is_login")):
+        return False
+    qrcode_url = str(status.get("qrcode_url") or "").strip()
+    if not qrcode_url:
+        return True
+    return _looks_like_expired_qrcode_error(str(status.get("login_error") or ""))
+
+
+def _looks_like_expired_qrcode_error(message: str) -> bool:
+    lowered = str(message or "").strip().lower()
+    if not lowered:
+        return False
+    return any(
+        token in lowered
+        for token in (
+            "expired",
+            "expire",
+            "timeout",
+            "invalid qrcode",
+            "二维码已失效",
+            "二维码过期",
+            "二维码失效",
+            "请刷新",
+            "已过期",
+        )
+    )

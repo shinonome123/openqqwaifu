@@ -211,7 +211,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 opener = self._build_auth_opener(host, port)
                 _, body = self._open_json(opener, f"http://{host}:{port}/api/dashboard")
 
-                self.assertEqual(body["assistant_name"], "琉璃")
+                self.assertEqual(body["assistant_name"], "Assistant")
                 self.assertEqual(body["session_count"], 1)
                 self.assertEqual(body["recent_outbound_count"], 1)
                 self.assertEqual(body["tools"]["count"], 4)
@@ -333,6 +333,29 @@ class ServerIntegrationTests(unittest.TestCase):
                 _, user_panel = self._open_json(opener, f"http://{host}:{port}/api/panels/user")
                 self.assertEqual(user_panel["member_count"], 1)
                 self.assertEqual(user_panel["members"][0]["preferred_name"], "luna")
+
+                _, reset_body = self._open_json(
+                    opener,
+                    f"http://{host}:{port}/api/users/directory/reset-persona",
+                    method="POST",
+                    payload={
+                        "group_id": "612475113",
+                        "user_id": "783190298",
+                    },
+                )
+                self.assertEqual(reset_body["member"]["preferred_name"], "luna")
+                self.assertEqual(reset_body["member"]["profile_summary"], "")
+
+                request = urllib.request.Request(
+                    f"http://{host}:{port}/api/knowledge/{knowledge_body['entry']['id']}",
+                    method="DELETE",
+                )
+                with opener.open(request, timeout=5) as response:
+                    delete_body = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(delete_body["status"], "ok")
+
+                _, memory_after_delete = self._open_json(opener, f"http://{host}:{port}/api/panels/memory")
+                self.assertEqual(memory_after_delete["knowledge_count"], 0)
             finally:
                 server.shutdown()
                 server.server_close()

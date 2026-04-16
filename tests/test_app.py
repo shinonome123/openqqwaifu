@@ -13,13 +13,14 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from waifu_standalone.app import build_default_service, build_runtime_service
+from waifu_standalone.app import build_default_service, build_file_service, build_runtime_service
 from waifu_standalone.config import AppConfig, QQSidecarConfig
 from waifu_standalone.gateways.onebot_actions import OneBotHttpOutboundPort
 from waifu_standalone.models import InboundEvent, MessageSegment
 from waifu_standalone.memory import InMemoryStore
 from waifu_standalone.organs.memories import Memory
 from waifu_standalone.services import CapturingOutboundPort
+from waifu_standalone.systems.searching import SearchContext, SearchResult
 
 
 class _FakeNapCatLoginBridge:
@@ -57,9 +58,9 @@ class _FakeNapCatLoginBridge:
 
 
 class _CoordinatedUserSaveStore(InMemoryStore):
-    def __init__(self, target_launcher_id: str, target_launcher_type: str) -> None:
+    def __init__(self, target_character_id: str, target_launcher_id: str, target_launcher_type: str) -> None:
         super().__init__()
-        self._target = (target_launcher_id, target_launcher_type)
+        self._target = (target_character_id, target_launcher_id, target_launcher_type)
         self._gate_lock = threading.Lock()
         self._gated_user_saves_remaining = 2
         self._release = threading.Event()
@@ -68,7 +69,7 @@ class _CoordinatedUserSaveStore(InMemoryStore):
         should_gate = False
         with self._gate_lock:
             if (
-                (session.launcher_id, session.launcher_type) == self._target
+                (session.character_id, session.launcher_id, session.launcher_type) == self._target
                 and session.history
                 and not str(session.history[-1]).startswith("assistant: ")
                 and self._gated_user_saves_remaining > 0
@@ -85,6 +86,35 @@ class _CoordinatedUserSaveStore(InMemoryStore):
 class WaifuServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service, self.outbound = build_default_service()
+
+    @staticmethod
+    def _write_group_cards(root: Path) -> None:
+        cards_dir = root / "cards"
+        cards_dir.mkdir(parents=True, exist_ok=True)
+        (cards_dir / "default_group.yaml").write_text(
+            "\n".join(
+                [
+                    "assistant_name: 琉璃",
+                    "user_name: 用户",
+                    "language: 简体中文",
+                    "Profile:",
+                    "  - 琉璃",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (cards_dir / "aurora_group.yaml").write_text(
+            "\n".join(
+                [
+                    "assistant_name: 极光",
+                    "user_name: 用户",
+                    "language: 简体中文",
+                    "Profile:",
+                    "  - 极光",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
     def test_person_event_updates_preferred_name(self) -> None:
         event = InboundEvent(
@@ -125,6 +155,281 @@ class WaifuServiceTests(unittest.TestCase):
         prompt = self.service._extract_image_prompt("生图：生成一个晴朗的天空")
 
         self.assertEqual(prompt, "生成一个晴朗的天空")
+
+    def test_switching_active_character_changes_reply_style_in_same_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_group_cards(root)
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=str(root),
+                    group_reply_requires_mention=False,
+                    character="default",
+                )
+            )
+
+            service.generator.generate_reply = (  # type: ignore[method-assign]
+                lambda event, session, emotion, **kwargs: service.cards.load(event.launcher_type, session).assistant_name
+            )
+            service.cards.set_active_character("default")
+            first = service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="first hello")],
+                )
+            )
+
+            service.cards.set_active_character("aurora")
+            second = service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="second hello")],
+                )
+            )
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            assert first is not None and second is not None
+            self.assertEqual(first.text, "琉璃")
+            self.assertEqual(second.text, "极光")
+
+    def test_repair_character_isolation_state_cleans_cross_persona_pollution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cards_dir = root / "cards"
+            cards_dir.mkdir(parents=True, exist_ok=True)
+            (cards_dir / "default_group.yaml").write_text(
+                "assistant_name: Liuli\nuser_name: User\nlanguage: zh\nProfile:\n  - warm\n",
+                encoding="utf-8",
+            )
+            (cards_dir / "aurora_group.yaml").write_text(
+                "assistant_name: Aurora\nuser_name: Captain\nlanguage: zh\nProfile:\n  - calm\n",
+                encoding="utf-8",
+            )
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=str(root),
+                    group_reply_requires_mention=False,
+                    character="aurora",
+                )
+            )
+            service.cards.set_active_character("aurora")
+            polluted = service.memory.load("612475113", "group", character_id="aurora")
+            polluted.history = [
+                "tester: who are you",
+                "assistant: I am Liuli, your catgirl succubus.",
+            ]
+            service.memory.store.save(polluted)
+            service.state_store.save_member(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                    "character_id": "aurora",
+                    "qq_nickname": "tester",
+                    "preferred_name": "captain",
+                    "onboarding_status": "ready",
+                    "profile_summary": "Liuli is clingy; Aurora speaks crisply; likes ramen",
+                }
+            )
+
+            service._repair_character_isolation_state("aurora")
+
+            repaired = service.memory.load("612475113", "group", character_id="aurora")
+            member = service.state_store.get_member(
+                group_id="612475113",
+                user_id="783190298",
+                character_id="aurora",
+            )
+
+            self.assertFalse(any("Liuli" in line for line in repaired.history))
+            self.assertIsNotNone(member)
+            assert member is not None
+            self.assertEqual(member["profile_summary"], "likes ramen")
+
+    def test_handle_event_ignores_cross_persona_history_and_profile_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cards_dir = root / "cards"
+            cards_dir.mkdir(parents=True, exist_ok=True)
+            (cards_dir / "default_group.yaml").write_text(
+                "assistant_name: Liuli\nuser_name: User\nlanguage: zh\nProfile:\n  - warm\n",
+                encoding="utf-8",
+            )
+            (cards_dir / "aurora_group.yaml").write_text(
+                "assistant_name: Aurora\nuser_name: Captain\nlanguage: zh\nProfile:\n  - calm\n",
+                encoding="utf-8",
+            )
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=str(root),
+                    group_reply_requires_mention=False,
+                    character="aurora",
+                )
+            )
+            service.cards.set_active_character("aurora")
+            polluted = service.memory.load("612475113", "group", character_id="aurora")
+            polluted.history = [
+                "tester: who are you",
+                "assistant: I am Liuli, your catgirl succubus.",
+            ]
+            service.memory.store.save(polluted)
+            service.state_store.save_member(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                    "character_id": "aurora",
+                    "qq_nickname": "tester",
+                    "preferred_name": "captain",
+                    "onboarding_status": "ready",
+                    "profile_summary": "Liuli is clingy; Aurora speaks crisply; likes ramen",
+                }
+            )
+            captured: dict[str, object] = {}
+
+            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+                captured["conversation_view"] = kwargs.get("conversation_view", "")
+                captured["speaker_notes"] = list(kwargs.get("speaker_notes", []))
+                return service.cards.load(event.launcher_type, session).assistant_name
+
+            service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+            result = service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="say it again")],
+                )
+            )
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.text, "Aurora")
+            self.assertNotIn("Liuli", str(captured.get("conversation_view", "")))
+            self.assertFalse(any("Liuli" in str(item) for item in captured.get("speaker_notes", [])))
+
+    def test_llm_user_key_includes_character_and_launcher_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_group_cards(root)
+            config = AppConfig(
+                data_root=str(root),
+                group_reply_requires_mention=False,
+                character="aurora",
+            )
+            service, _ = build_default_service(config)
+            service.cards.set_active_character("aurora")
+            service.config.llm.enabled = True
+            service.generator._dify_client.base_url = "https://example.com"
+            service.generator._dify_client.api_key = "test-key"
+            service.generator._dify_client.model = "test-model"
+            service.generator._dify_client.backend = "openai"
+            calls: list[str] = []
+
+            def fake_invoke(prompt: str, *, user: str = "waifu-standalone") -> str:
+                calls.append(user)
+                return "极光"
+
+            service.generator._dify_client.invoke = fake_invoke  # type: ignore[method-assign]
+
+            result = service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="hello aurora")],
+                )
+            )
+
+            self.assertIsNotNone(result)
+            self.assertTrue(any("aurora:group:612475113:783190298" in call for call in calls))
+
+    def test_reset_directory_member_persona_keeps_shared_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_group_cards(root)
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=str(root),
+                    group_reply_requires_mention=False,
+                    character="aurora",
+                )
+            )
+            service.cards.set_active_character("aurora")
+            saved = service.save_directory_member(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                    "qq_nickname": "tester",
+                    "preferred_name": "爸爸",
+                    "onboarding_status": "ready",
+                    "profile_summary": "Aurora stays calm",
+                    "affinity_score": 0.72,
+                    "notes_count": 4,
+                }
+            )
+
+            self.assertEqual(saved["profile_summary"], "Aurora stays calm")
+            reset = service.reset_directory_member_persona(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                }
+            )
+
+            self.assertIsNotNone(reset)
+            assert reset is not None
+            self.assertEqual(reset["preferred_name"], "爸爸")
+            self.assertEqual(reset["qq_nickname"], "tester")
+            self.assertEqual(reset["profile_summary"], "")
+            self.assertEqual(float(reset["affinity_score"]), 0.0)
+            self.assertEqual(int(reset["notes_count"]), 0)
+
+    def test_delete_knowledge_entry_respects_active_character(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_group_cards(root)
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=str(root),
+                    group_reply_requires_mention=False,
+                    character="aurora",
+                )
+            )
+            service.cards.set_active_character("aurora")
+            aurora_entry = service.save_knowledge_entry(
+                {
+                    "scope_type": "group",
+                    "scope_id": "612475113",
+                    "memory_type": "fact",
+                    "summary": "Aurora likes clean prompts",
+                }
+            )
+            service.state_store.save_knowledge(
+                {
+                    "character_id": "default",
+                    "scope_type": "group",
+                    "scope_id": "612475113",
+                    "memory_type": "fact",
+                    "summary": "Liuli likes sugar",
+                }
+            )
+
+            removed = service.delete_knowledge_entry(int(aurora_entry["id"]))
+
+            self.assertTrue(removed)
+            remaining = service.state_store.list_knowledge(limit=10, character_id="aurora")
+            self.assertEqual(remaining, [])
+            default_entries = service.state_store.list_knowledge(limit=10, character_id="default")
+            self.assertEqual(len(default_entries), 1)
 
     def test_group_message_requires_mention_when_bot_account_is_configured(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
@@ -182,10 +487,186 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertEqual(len(outbound.sent), 2)
 
+    def test_group_follow_up_window_survives_service_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                bot_account_id="3518944354",
+                group_follow_up_window_seconds=16.0,
+            )
+            service1, _ = build_file_service(config)
+            service1.state_store.save_member(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                    "qq_nickname": "tester",
+                    "preferred_name": "爸爸",
+                    "onboarding_status": "ready",
+                }
+            )
+            first = service1.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[
+                        MessageSegment(kind="mention", mention_target="3518944354"),
+                        MessageSegment(kind="text", text=" 你好"),
+                    ],
+                )
+            )
+
+            service2, outbound2 = build_file_service(config)
+            second = service2.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="继续说呀")],
+                )
+            )
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertEqual(len(outbound2.sent), 1)
+
+    def test_pending_search_confirmation_can_reply_without_second_mention(self) -> None:
+        config = AppConfig(
+            bot_account_id="3518944354",
+            group_follow_up_window_seconds=0.0,
+        )
+        service, _ = build_default_service(config)
+        service.state_store.save_member(
+            {
+                "group_id": "612475113",
+                "user_id": "783190298",
+                "qq_nickname": "tester",
+                "preferred_name": "爸爸",
+                "onboarding_status": "ready",
+            }
+        )
+
+        original_query = "能不能帮我看看现在的小米公司股价是多少？"
+        service.search.build_context = lambda event: SearchContext(  # type: ignore[method-assign]
+            query=original_query,
+            summary="这类问题通常需要联网确认，但这次没有拿到可靠结果。",
+            results=[],
+            fetched_at=time.time(),
+            reason="keyword-hit:no-results",
+        )
+        service.generator.generate_reply = lambda *args, **kwargs: "爸爸，这种实时股价最好核验一下，要我再帮你查查吗？"  # type: ignore[method-assign]
+
+        first = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=f" {original_query}"),
+                ],
+            )
+        )
+
+        service.search.search_query = lambda query, reason="manual": SearchContext(  # type: ignore[method-assign]
+            query=query,
+            summary="小米集团当前股价示例为 42 港元。",
+            results=[SearchResult(title="小米集团", snippet="当前股价示例为 42 港元。")],
+            fetched_at=time.time(),
+            reason=reason,
+        )
+
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="好的，你帮我查查吧")],
+            )
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertIn("小米集团", second.text)
+        self.assertIn("42 港元", second.text)
+
+    def test_pending_search_clarification_extends_query_without_second_mention(self) -> None:
+        config = AppConfig(
+            bot_account_id="3518944354",
+            group_follow_up_window_seconds=0.0,
+        )
+        service, _ = build_default_service(config)
+        service.state_store.save_member(
+            {
+                "group_id": "612475113",
+                "user_id": "783190298",
+                "qq_nickname": "tester",
+                "preferred_name": "爸爸",
+                "onboarding_status": "ready",
+            }
+        )
+
+        original_query = "能不能帮我查查今天的股价是多少"
+        service.search.build_context = lambda event: SearchContext(  # type: ignore[method-assign]
+            query=original_query,
+            summary="这类问题通常需要联网确认，但这次没有拿到可靠结果。",
+            results=[],
+            fetched_at=time.time(),
+            reason="keyword-hit:no-results",
+        )
+        service.generator.generate_reply = lambda *args, **kwargs: "爸爸，股价实时变动，最好自己联网核验最新。"  # type: ignore[method-assign]
+
+        first = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=f" {original_query}"),
+                ],
+            )
+        )
+
+        captured_queries: list[str] = []
+
+        def fake_search(query: str, reason: str = "manual") -> SearchContext:
+            captured_queries.append(query)
+            return SearchContext(
+                query=query,
+                summary="小米集团当前股价示例为 42 港元。",
+                results=[SearchResult(title="小米集团", snippet="当前股价示例为 42 港元。")],
+                fetched_at=time.time(),
+                reason=reason,
+            )
+
+        service.search.search_query = fake_search  # type: ignore[method-assign]
+
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="小米公司的哦")],
+            )
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertTrue(any("小米公司的哦" in query for query in captured_queries))
+
     def test_same_launcher_events_do_not_lose_history_under_concurrency(self) -> None:
         config = AppConfig(group_reply_requires_mention=False)
         service, outbound = build_default_service(config)
-        store = _CoordinatedUserSaveStore("612475113", "group")
+        current_character = service._active_character_id()
+        store = _CoordinatedUserSaveStore(current_character, "612475113", "group")
         service.memory = Memory(store)
         events = [
             InboundEvent(
@@ -217,7 +698,7 @@ class WaifuServiceTests(unittest.TestCase):
         for thread in threads:
             thread.join(timeout=2)
 
-        session = service.memory.load("612475113", "group")
+        session = service.memory.load("612475113", "group", character_id=current_character)
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(len(outbound.sent), 2)
         self.assertEqual(sum(1 for line in session.history if line == "tester: first message"), 1)
@@ -424,6 +905,7 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(service.config.qq_sidecar.webui_token, "secret-token")
         self.assertEqual(panel["webui_base_url"], "http://127.0.0.1:6099")
         self.assertTrue(panel["token_configured"])
+        self.assertEqual(service.config.qq_sidecar.webui_api_prefix, "/api")
 
     def test_group_onboarding_prompts_and_saves_preferred_name(self) -> None:
         config = AppConfig(bot_account_id="3518944354")

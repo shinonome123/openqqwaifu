@@ -74,6 +74,7 @@ export const api = {
 
   getMemoryPanel: () => request("GET", "/api/panels/memory"),
   saveKnowledgeEntry: (payload) => request("POST", "/api/knowledge/save", payload),
+  deleteKnowledgeEntry: (id) => request("DELETE", `/api/knowledge/${encodeURIComponent(id)}`),
   getAbilitiesPanel: () => request("GET", "/api/panels/abilities"),
   saveAbilitiesPanel: (payload) => request("POST", "/api/panels/abilities", payload),
   getProactivePanel: (limit = 12) =>
@@ -81,6 +82,11 @@ export const api = {
   generateProactiveDraft: (payload) => request("POST", "/api/proactive/draft", payload),
   getUserPanel: () => request("GET", "/api/panels/user"),
   saveDirectoryMember: (payload) => request("POST", "/api/users/directory/save", payload),
+  resetDirectoryMemberPersona: (groupId, userId) =>
+    request("POST", "/api/users/directory/reset-persona", {
+      group_id: groupId,
+      user_id: userId,
+    }),
   syncDirectoryGroup: (groupId) =>
     request("POST", "/api/users/directory/sync", { group_id: groupId }),
 

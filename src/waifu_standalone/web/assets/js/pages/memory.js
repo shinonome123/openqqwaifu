@@ -174,6 +174,25 @@ export function mount(root) {
     }
   }
 
+  async function onDeleteKnowledge() {
+    if (!knowledgeDraft?.id) return;
+    const ok = await confirmDialog({
+      title: t("memory.knowledge.delete"),
+      message: t("memory.knowledge.deleteConfirm"),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.deleteKnowledgeEntry(knowledgeDraft.id);
+      selectedKnowledgeId = 0;
+      knowledgeDraft = buildEmptyKnowledgeDraft();
+      toastOk(t("memory.knowledge.deleted"));
+      await load();
+    } catch (err) {
+      toastError(err?.message || String(err));
+    }
+  }
+
   function onNewKnowledge() {
     selectedKnowledgeId = 0;
     knowledgeDraft = buildEmptyKnowledgeDraft();
@@ -408,6 +427,16 @@ export function mount(root) {
       title: t("memory.knowledge.editor"),
       subtitle: knowledgeDraft.id ? `#${knowledgeDraft.id}` : t("memory.knowledge.new"),
       actions: [
+        ...(knowledgeDraft.id
+          ? [
+              el("button", {
+                type: "button",
+                class: "btn is-danger",
+                text: t("memory.knowledge.delete"),
+                onClick: onDeleteKnowledge,
+              }),
+            ]
+          : []),
         el("button", {
           type: "button",
           class: "btn is-primary",

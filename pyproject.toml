@@ -11,6 +11,9 @@ requires-python = ">=3.11"
 authors = [
   { name = "OpenAI Codex" }
 ]
+dependencies = [
+  "qrcode[pil]>=7.4.2",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -82,7 +82,7 @@ class MarketplaceConfig:
 class AppConfig:
     service_name: str = "waifu-standalone"
     config_path: str = ""
-    assistant_name: str = "琉璃"
+    assistant_name: str = "Assistant"
     character: str = "default"
     bot_account_id: str = ""
     group_reply_requires_mention: bool = True

@@ -89,5 +89,22 @@ class SearchDeciderTests(unittest.TestCase):
         self.assertEqual(last_search.get("query"), "今天北京天气怎么样")
 
 
+    def test_html_fallback_extracts_real_search_results(self) -> None:
+        decider = SearchDecider(AppConfig(search_enabled=True, search_result_limit=2))
+        html_body = """
+        <div class="result">
+          <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fxiaomi-stock">小米集团-W (01810)_最新价格_行情_走势图—东方财富网</a>
+          <a class="result__snippet">提供小米集团-W (01810)实时行情数据。</a>
+        </div>
+        """
+
+        results = decider._parse_duckduckgo_html_results(html_body)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "小米集团-W (01810)_最新价格_行情_走势图—东方财富网")
+        self.assertEqual(results[0].snippet, "提供小米集团-W (01810)实时行情数据。")
+        self.assertEqual(results[0].url, "https://example.com/xiaomi-stock")
+
+
 if __name__ == "__main__":
     unittest.main()

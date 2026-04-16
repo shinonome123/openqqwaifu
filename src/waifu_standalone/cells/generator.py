@@ -49,6 +49,17 @@ class Generator:
         card = self._cards.load(launcher_type, session)
         return card.assistant_name or self.config.assistant_name
 
+    @staticmethod
+    def _llm_user_key(event: InboundEvent, session: SessionMemory, *, purpose: str) -> str:
+        parts = [
+            str(purpose or "chat").strip() or "chat",
+            str(getattr(session, "character_id", "") or "").strip() or "default",
+            str(event.launcher_type or "").strip() or "person",
+            str(event.launcher_id or "").strip() or "unknown",
+            str(event.sender_id or "").strip() or "waifu-user",
+        ]
+        return ":".join(part.replace(":", "_") for part in parts)
+
     def generate_analysis(
         self,
         event: InboundEvent,
@@ -80,7 +91,10 @@ class Generator:
                 active_skills=active_skills,
             )
             try:
-                response = self._dify_client.invoke(prompt, user=f"analysis-{event.sender_id or 'waifu-user'}")
+                response = self._dify_client.invoke(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose="analysis"),
+                )
                 cleaned = self._clean_response(response)
                 if cleaned:
                     return self._clip(cleaned, limit=self.config.max_thinking_words)
@@ -134,7 +148,10 @@ class Generator:
                 active_skills=active_skills,
             )
             try:
-                response = self._dify_client.invoke(prompt, user=event.sender_id or "waifu-user")
+                response = self._dify_client.invoke(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose="chat"),
+                )
                 cleaned = self._clean_response(response)
                 if cleaned:
                     return cleaned
@@ -201,7 +218,7 @@ class Generator:
             try:
                 response = self._dify_client.invoke(
                     prompt,
-                    user=f"knowledge-{event.sender_id or 'waifu-user'}",
+                    user=self._llm_user_key(event, session, purpose="knowledge"),
                 )
                 parsed = self._parse_knowledge_payload(response, max_entries=max_entries)
                 if parsed["entries"] or parsed["profile_summary"]:
@@ -290,7 +307,7 @@ class Generator:
             try:
                 response = self._dify_client.invoke(
                     prompt,
-                    user=f"onboarding-{stage}-{event.sender_id or 'waifu-user'}",
+                    user=self._llm_user_key(event, session, purpose=f"onboarding-{stage}"),
                 )
                 cleaned = self._clean_response(response)
                 if cleaned:

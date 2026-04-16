@@ -526,6 +526,24 @@ class InMemoryRuntimeStateStore:
                 persona = self._persona_members.get((safe_character_id, safe_group_id, safe_user_id))
             return _merge_member_payload(dict(member), dict(persona) if persona is not None else None, character_id=safe_character_id)
 
+    def reset_member_persona(
+        self,
+        *,
+        group_id: object,
+        user_id: object,
+        character_id: object,
+    ) -> dict[str, Any] | None:
+        safe_group_id, safe_user_id = _normalize_member(group_id, user_id)
+        safe_character_id = _normalize_character_id(character_id)
+        if not safe_character_id:
+            raise ValueError("character_id is required")
+        with self._lock:
+            member = self._members.get((safe_group_id, safe_user_id))
+            if member is None:
+                return None
+            self._persona_members.pop((safe_character_id, safe_group_id, safe_user_id), None)
+            return _merge_member_payload(dict(member), None, character_id=safe_character_id)
+
     def list_members(self, *, limit: int = 120, character_id: object = "") -> list[dict[str, Any]]:
         safe_character_id = _normalize_character_id(character_id)
         with self._lock:
@@ -631,6 +649,23 @@ class InMemoryRuntimeStateStore:
             )
             self._knowledge[entry_id] = entry
             return dict(entry)
+
+    def delete_knowledge(self, entry_id: object, *, character_id: object = "") -> bool:
+        try:
+            safe_entry_id = int(entry_id or 0)
+        except (TypeError, ValueError):
+            return False
+        if safe_entry_id <= 0:
+            return False
+        safe_character_id = _normalize_character_id(character_id)
+        with self._lock:
+            existing = dict(self._knowledge.get(safe_entry_id, {}))
+            if not existing:
+                return False
+            if safe_character_id and _normalize_character_id(existing.get("character_id")) != safe_character_id:
+                return False
+            self._knowledge.pop(safe_entry_id, None)
+        return True
 
     def add_knowledge(
         self,
@@ -1104,6 +1139,30 @@ class SqliteRuntimeStateStore:
                 persona = self._fetch_member_persona(connection, safe_character_id, safe_group_id, safe_user_id)
             return _merge_member_payload(shared, persona, character_id=safe_character_id)
 
+    def reset_member_persona(
+        self,
+        *,
+        group_id: object,
+        user_id: object,
+        character_id: object,
+    ) -> dict[str, Any] | None:
+        safe_group_id, safe_user_id = _normalize_member(group_id, user_id)
+        safe_character_id = _normalize_character_id(character_id)
+        if not safe_character_id:
+            raise ValueError("character_id is required")
+        with self._lock, self._session() as connection:
+            shared = self._fetch_member(connection, safe_group_id, safe_user_id)
+            if shared is None:
+                return None
+            connection.execute(
+                """
+                DELETE FROM member_persona_state
+                WHERE character_id = ? AND group_id = ? AND user_id = ?
+                """,
+                (safe_character_id, safe_group_id, safe_user_id),
+            )
+            return _merge_member_payload(shared, None, character_id=safe_character_id)
+
     def mark_member_membership(
         self,
         *,
@@ -1465,6 +1524,23 @@ class SqliteRuntimeStateStore:
                 )
             result = self._fetch_knowledge(connection, entry_id)
         return result or {}
+
+    def delete_knowledge(self, entry_id: object, *, character_id: object = "") -> bool:
+        try:
+            safe_entry_id = int(entry_id or 0)
+        except (TypeError, ValueError):
+            return False
+        if safe_entry_id <= 0:
+            return False
+        safe_character_id = _normalize_character_id(character_id)
+        with self._lock, self._session() as connection:
+            existing = self._fetch_knowledge(connection, safe_entry_id)
+            if existing is None:
+                return False
+            if safe_character_id and _normalize_character_id(existing.get("character_id")) != safe_character_id:
+                return False
+            cursor = connection.execute("DELETE FROM knowledge_entries WHERE id = ?", (safe_entry_id,))
+        return int(getattr(cursor, "rowcount", 0) or 0) > 0
 
     def add_knowledge(
         self,

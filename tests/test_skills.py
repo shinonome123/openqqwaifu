@@ -57,6 +57,34 @@ command-arg-mode: raw
             self.assertEqual(skill.command_tool, "summary")
             self.assertIn("只给结论", skill.content)
 
+    def test_parse_skill_file_supports_multiline_trigger_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_path = Path(tmpdir) / "skill-list.md"
+            skill_path.write_text(
+                """---
+id: skill-list-command
+name: 技能列表
+description: 列出当前可用技能
+triggers:
+  - 技能菜单
+  - 说说你会的技能
+mode: contains
+user-invocable: true
+disable-model-invocation: true
+command-dispatch: tool
+command-tool: skill-list
+---
+直接展示技能列表。
+""",
+                encoding="utf-8",
+            )
+
+            skill = parse_skill_file(skill_path)
+
+            self.assertEqual(skill.skill_id, "skill-list-command")
+            self.assertEqual(skill.triggers, ["技能菜单", "说说你会的技能"])
+            self.assertTrue(skill.dispatches_tool)
+
     def test_registry_loads_builtin_skills(self) -> None:
         registry = SkillRegistry(AppConfig())
 
@@ -228,7 +256,7 @@ command-arg-mode: raw
     def test_skill_list_dispatch_accepts_skill_menu_phrases(self) -> None:
         service, _ = build_default_service()
 
-        for text in ("技能菜单", "你会干什么", "help"):
+        for text in ("技能菜单", "你会干什么", "说说你会的技能", "help"):
             reply = service.handle_event(
                 InboundEvent(
                     launcher_id="783190298",
@@ -242,7 +270,7 @@ command-arg-mode: raw
             self.assertIsNotNone(reply, msg=text)
             assert reply is not None
             self.assertTrue(reply.text)
-            self.assertNotIn("解锁哪一个", reply.text, msg=text)
+            self.assertIn("掌握的技能", reply.text, msg=text)
 
     def test_generator_injects_only_prompt_visible_skills(self) -> None:
         generator = Generator(AppConfig())

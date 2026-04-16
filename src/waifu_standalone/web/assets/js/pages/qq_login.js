@@ -10,25 +10,72 @@ export function mount(root) {
   let unsubLang = null;
   let state = null;
   let pollTimer = null;
-  let qrStamp = Date.now();
+  let qrStamp = "0";
   let qrFailed = false;
+  let lastQrKey = "";
+  let lastRenderSignature = "";
+
+  function panelSignature(panel) {
+    const isLogin = !!panel?.status?.is_login;
+    return JSON.stringify({
+      configured: !!panel?.configured,
+      token_configured: !!panel?.token_configured,
+      webui_url: panel?.webui_url || "",
+      error: isLogin ? "" : panel?.error || "",
+      status: {
+        is_login: isLogin,
+        is_offline: !!panel?.status?.is_offline,
+        qrcode_url: isLogin ? "" : panel?.status?.qrcode_url || "",
+        login_error: isLogin ? "" : panel?.status?.login_error || "",
+      },
+      login_info: {
+        uin: panel?.login_info?.uin || "",
+        nickname: panel?.login_info?.nickname || "",
+        online: !!panel?.login_info?.online,
+      },
+    });
+  }
+
+  function syncQrState(panel, { force = false } = {}) {
+    const qrKey = String(panel?.status?.qrcode_url || "");
+    if (!force && qrKey === lastQrKey) return false;
+    lastQrKey = qrKey;
+    qrStamp = stableHash(qrKey || String(Date.now()));
+    qrFailed = false;
+    return true;
+  }
 
   root.innerHTML = "";
   const container = el("div", { class: "page" });
   root.appendChild(container);
 
-  async function load(refresh = false) {
+  async function load(refresh = false, { background = false } = {}) {
     try {
-      state = await api.getQqLoginPanel(refresh);
-      if (refresh) {
-        qrStamp = Date.now();
-        qrFailed = false;
+      const nextState = await api.getQqLoginPanel(refresh);
+      const previousSignature = lastRenderSignature;
+      const nextSignature = panelSignature(nextState);
+      const qrChanged = syncQrState(nextState);
+      if (background && state) {
+        state = {
+          ...state,
+          configured: nextState?.configured,
+          token_configured: nextState?.token_configured,
+          webui_url: nextState?.webui_url,
+          error: nextState?.error,
+          status: nextState?.status,
+          login_info: nextState?.login_info,
+        };
+      } else {
+        state = nextState;
       }
       if (stopped) return;
-      render();
+      lastRenderSignature = nextSignature;
+      if (!background || qrChanged || previousSignature !== nextSignature) {
+        render();
+      }
       syncPolling();
     } catch (err) {
-      if (!stopped) toastError(String(err?.message || err));
+      if (!stopped && !background) toastError(String(err?.message || err));
     }
   }
 
@@ -40,8 +87,8 @@ export function mount(root) {
         webui_timeout_seconds: Number(state?.webui_timeout_seconds || 10),
         webui_token: state?.webui_token || "",
       });
-      qrStamp = Date.now();
-      qrFailed = false;
+      syncQrState(state, { force: true });
+      lastRenderSignature = panelSignature(state);
       toastOk(t("actions.savedOk"));
       render();
       syncPolling();
@@ -53,8 +100,8 @@ export function mount(root) {
   async function refreshQr() {
     try {
       state = await api.refreshQqLoginPanel();
-      qrStamp = Date.now();
-      qrFailed = false;
+      syncQrState(state, { force: true });
+      lastRenderSignature = panelSignature(state);
       toastOk(t("qqlogin.qr.refreshed"));
       render();
       syncPolling();
@@ -79,7 +126,7 @@ export function mount(root) {
       !state?.error;
     if (shouldPoll) {
       pollTimer = setInterval(() => {
-        load(true);
+        load(true, { background: true });
       }, POLL_MS);
     }
   }
@@ -138,7 +185,7 @@ export function mount(root) {
     ];
 
     const body = [];
-    if (state?.error) {
+    if (state?.error && !status?.is_login) {
       body.push(el("div", { class: "qq-login-alert is-danger", text: state.error }));
     }
 
@@ -253,10 +300,11 @@ export function mount(root) {
       ? el("div", { class: "qq-login-qr-shell" }, [
           el("img", {
             class: "qq-login-qr-image",
-            src: api.qqLoginQrcodeImageUrl(String(qrStamp)),
+            src: api.qqLoginQrcodeImageUrl(qrStamp),
             alt: t("qqlogin.qr.alt"),
             onError: () => {
               qrFailed = true;
+              lastRenderSignature = "";
               render();
             },
           }),
@@ -348,6 +396,15 @@ export function mount(root) {
     if (pollTimer) clearInterval(pollTimer);
     if (unsubLang) unsubLang();
   };
+}
+
+function stableHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return String(hash >>> 0);
 }
 
 function renderMetaRow(label, value) {

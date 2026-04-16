@@ -376,16 +376,33 @@ def _split_frontmatter(raw: str) -> tuple[str, str]:
 
 def _parse_frontmatter(raw: str) -> dict[str, Any]:
     payload: dict[str, Any] = {}
+    current_key = ""
     for raw_line in raw.splitlines():
         line = _strip_inline_comment(raw_line).strip()
-        if not line or ":" not in line:
+        if not line:
+            continue
+        if line.startswith("- ") and current_key:
+            existing = payload.get(current_key)
+            if isinstance(existing, list):
+                item = _parse_scalar(line[2:].strip())
+                if item is not None:
+                    existing.append(item)
+            continue
+        if ":" not in line:
+            current_key = ""
             continue
         key, value = line.split(":", 1)
         key = key.strip()
         value = value.strip()
         if not key:
+            current_key = ""
+            continue
+        if not value:
+            payload[key] = []
+            current_key = key
             continue
         payload[key] = _parse_scalar(value)
+        current_key = key if isinstance(payload[key], list) else ""
     return payload
 
 

@@ -12,9 +12,9 @@ from ..config import AppConfig
 from ..models import EmotionState, SessionMemory
 
 
-_DEFAULT_ASSISTANT_NAME = "琉璃"
-_DEFAULT_USER_NAME = "用户"
-_DEFAULT_LANGUAGE = "简体中文"
+_DEFAULT_ASSISTANT_NAME = "Assistant"
+_DEFAULT_USER_NAME = "User"
+_DEFAULT_LANGUAGE = "zh-CN"
 _DEFAULT_PORTRAIT_STYLE = "neon-pixel"
 _SECTION_KEYS = ("Profile", "Skills", "Background", "Rules", "Prologue")
 _KNOWN_CARD_KEYS = {
@@ -150,11 +150,11 @@ class CardManager:
         items: list[dict[str, object]] = []
         for character, entry in discovered.items():
             meta = self._load_character_meta(character)
-            person_variant = self._editor_variant(character, "person")
-            group_variant = self._editor_variant(character, "group")
-            shared = self._derive_shared_fields(person_variant["fields"], group_variant["fields"])
+            person_fields = self._listing_variant_fields(character, "person") if entry["has_person"] else {}
+            group_fields = self._listing_variant_fields(character, "group") if entry["has_group"] else {}
+            shared = self._derive_shared_fields(person_fields, group_fields)
             portrait = self._portrait_payload(character, meta)
-            summary = self._derive_summary(person_variant["fields"], group_variant["fields"])
+            summary = self._derive_summary(person_fields, group_fields)
             items.append(
                 {
                     **entry,
@@ -378,12 +378,22 @@ class CardManager:
             source_path = fallback
             content = fallback.read_text(encoding="utf-8") if fallback.exists() else ""
             data = parse_card_file(fallback) if fallback.exists() else {}
+            data = self._override_default_template_identity(data, character=character, launcher_type=launcher_type)
         return {
             "path": str(target_path),
             "source_path": str(source_path),
             "content": content,
             "fields": _payload_to_fields(data, default_assistant=self.config.assistant_name or _DEFAULT_ASSISTANT_NAME),
         }
+
+    def _listing_variant_fields(self, character: str, launcher_type: str) -> dict[str, Any]:
+        source_path = self._find_character_variant_path(character, launcher_type)
+        if source_path is None:
+            return {}
+        return _payload_to_fields(
+            parse_card_file(source_path),
+            default_assistant=self.config.assistant_name or _DEFAULT_ASSISTANT_NAME,
+        )
 
     def _load_card_data(self, launcher_type: str, session: SessionMemory) -> dict[str, Any]:
         character = self._session_character(session)
@@ -402,11 +412,17 @@ class CardManager:
                 if key in {"assistant_name", "user_name", "language", *_SECTION_KEYS}
             }
             if fallback:
+                fallback = self._override_default_template_identity(
+                    fallback,
+                    character=character,
+                    launcher_type=launcher_type,
+                )
                 fallback["_source"] = "session-metadata"
                 return fallback
 
         fallback = self._templates_root / f"default_{launcher_type}.yaml"
         data = parse_card_file(fallback)
+        data = self._override_default_template_identity(data, character=character, launcher_type=launcher_type)
         data["_source"] = str(fallback)
         return data
 
@@ -426,6 +442,18 @@ class CardManager:
                 ]
             )
         return candidates
+
+    def _find_character_variant_path(self, character: str, launcher_type: str) -> Path | None:
+        candidates = [
+            self._cards_root() / f"{character}_{launcher_type}.yaml",
+            self._cards_root() / f"{character}.yaml",
+            self._templates_root / f"{character}_{launcher_type}.yaml",
+            self._templates_root / f"{character}.yaml",
+        ]
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        return None
 
     def _normalize_shared_fields(
         self,
@@ -557,6 +585,27 @@ class CardManager:
         path = self._cards_root() / f"{character}_{launcher_type}.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(content or "").rstrip() + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _override_default_template_identity(
+        payload: dict[str, Any],
+        *,
+        character: str,
+        launcher_type: str,
+    ) -> dict[str, Any]:
+        if str(character or "").strip() in {"", "default"}:
+            return dict(payload)
+        updated = dict(payload)
+        assistant_name = str(updated.get("assistant_name") or "").strip()
+        if not assistant_name or assistant_name == _DEFAULT_ASSISTANT_NAME:
+            updated["assistant_name"] = character
+        background = _coerce_str_list(updated.get("Background"))
+        if not background:
+            if launcher_type == "group":
+                updated["Background"] = [f"你正在以 {character} 的身份参与一个 QQ 群聊。"]
+            else:
+                updated["Background"] = [f"你正在以 {character} 的身份与用户私聊。"]
+        return updated
 
 
 def parse_card_file(path: str | Path) -> dict[str, Any]:

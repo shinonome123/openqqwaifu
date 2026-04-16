@@ -1,7 +1,7 @@
 import { api } from "../api.js";
 import { el, card, fieldRow, textInput, textarea, select, chip, empty, numberInput } from "../components.js";
 import { t, onLangChange } from "../i18n.js";
-import { toastOk, toastError } from "../ui.js";
+import { toastOk, toastError, confirmDialog } from "../ui.js";
 
 const ONBOARDING_OPTIONS = [
   { value: "new", labelKey: "user.directory.status.new" },
@@ -78,6 +78,27 @@ export function mount(root) {
     try {
       const result = await api.syncDirectoryGroup(syncGroupId.trim());
       toastOk(t("user.directory.synced", { count: result?.count ?? 0 }));
+      await load();
+    } catch (err) {
+      toastError(err?.message || String(err));
+    }
+  }
+
+  async function onResetPersona() {
+    if (!memberDraft?.user_id) {
+      toastError(t("user.directory.select"));
+      return;
+    }
+    const ok = await confirmDialog({
+      title: t("user.directory.resetPersona"),
+      message: t("user.directory.resetPersonaConfirm"),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const result = await api.resetDirectoryMemberPersona(memberDraft.group_id || "", memberDraft.user_id);
+      selectMember(result?.member || memberDraft);
+      toastOk(t("user.directory.personaReset"));
       await load();
     } catch (err) {
       toastError(err?.message || String(err));
@@ -200,6 +221,12 @@ export function mount(root) {
       title: t("user.directory.editor"),
       subtitle: memberDraft.preferred_name || memberDraft.group_card || memberDraft.qq_nickname || memberDraft.user_id,
       actions: [
+        el("button", {
+          type: "button",
+          class: "btn is-danger",
+          text: t("user.directory.resetPersona"),
+          onClick: onResetPersona,
+        }),
         el("button", {
           type: "button",
           class: "btn is-primary",

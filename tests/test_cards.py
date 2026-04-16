@@ -48,9 +48,28 @@ class CardTests(unittest.TestCase):
 
             card = manager.load("person", session)
 
-            self.assertEqual(card.assistant_name, "琉璃")
+            self.assertEqual(card.assistant_name, "Assistant")
             self.assertTrue(card.profile)
             self.assertIn("QQ", " ".join(card.background))
+
+    def test_missing_non_default_card_uses_character_name_instead_of_default_template_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = CardManager(AppConfig(data_root=tmpdir, character="aurora"))
+            session = SessionMemory(launcher_id="1", launcher_type="group", character_id="aurora")
+
+            card = manager.load("group", session)
+
+            self.assertEqual(card.assistant_name, "aurora")
+            self.assertTrue(card.source.endswith("default_group.yaml"))
+
+    def test_editor_bundle_missing_non_default_card_shows_character_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = CardManager(AppConfig(data_root=tmpdir, character="aurora"))
+
+            bundle = manager.get_editor_bundle("aurora")
+
+            self.assertEqual(bundle["shared"]["assistant_name"], "aurora")
+            self.assertTrue(str(bundle["group"]["source_path"]).endswith("default_group.yaml"))
 
     def test_card_manager_prefers_data_root_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -82,7 +101,7 @@ class CardTests(unittest.TestCase):
 
             bundle = manager.get_editor_bundle("default")
 
-            self.assertEqual(bundle["shared"]["assistant_name"], "琉璃")
+            self.assertEqual(bundle["shared"]["assistant_name"], "Assistant")
             self.assertIn("profile", bundle["person"]["fields"])
             self.assertIn("rules", bundle["group"]["fields"])
             self.assertFalse(bundle["portrait"]["available"])
@@ -237,6 +256,30 @@ class CardTests(unittest.TestCase):
             self.assertEqual(card.assistant_name, "Aurora")
             self.assertEqual(card.user_name, "Captain")
             self.assertTrue(card.source.endswith("aurora_person.yaml"))
+
+    def test_list_characters_uses_existing_variant_instead_of_default_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cards_root = Path(tmpdir) / "cards"
+            cards_root.mkdir(parents=True, exist_ok=True)
+            (cards_root / "aurora_group.yaml").write_text(
+                "\n".join(
+                    [
+                        "user_name: Captain",
+                        "assistant_name: Aurora",
+                        "Profile:",
+                        "  - calm",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manager = CardManager(AppConfig(data_root=tmpdir, character="aurora"))
+
+            items = {str(item["character"]): item for item in manager.list_characters()}
+
+            self.assertIn("aurora", items)
+            self.assertEqual(items["aurora"]["assistant_name"], "Aurora")
+            self.assertFalse(bool(items["aurora"]["has_person"]))
+            self.assertTrue(bool(items["aurora"]["has_group"]))
 
 
 if __name__ == "__main__":

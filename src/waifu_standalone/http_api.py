@@ -297,6 +297,9 @@ class HttpApi:
     def save_knowledge_entry(self, payload: dict[str, Any]) -> dict[str, Any]:
         return dict(self.service.save_knowledge_entry(payload))
 
+    def delete_knowledge_entry(self, entry_id: int) -> bool:
+        return bool(self.service.delete_knowledge_entry(entry_id))
+
     def get_abilities_panel(self) -> dict[str, Any]:
         return dict(self.service.get_abilities_panel())
 
@@ -406,6 +409,10 @@ class HttpApi:
 
     def save_directory_member(self, payload: dict[str, Any]) -> dict[str, Any]:
         return dict(self.service.save_directory_member(payload))
+
+    def reset_directory_member_persona(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        detail = self.service.reset_directory_member_persona(payload)
+        return dict(detail) if detail else None
 
     def sync_group_members(self, group_id: str) -> dict[str, Any]:
         return dict(self.service.sync_group_members(group_id))
@@ -814,6 +821,21 @@ def make_handler(api: HttpApi):
                     self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                 return
 
+            if parsed.path == "/api/users/directory/reset-persona":
+                payload = self._read_json_body()
+                if payload is None:
+                    return
+                try:
+                    detail = api.reset_directory_member_persona(payload)
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return
+                self._write_json(HTTPStatus.OK, {"status": "ok", "member": detail})
+                return
+
             if parsed.path == "/api/users/directory/sync":
                 payload = self._read_json_body()
                 if payload is None:
@@ -1008,6 +1030,22 @@ def make_handler(api: HttpApi):
                     self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
                     return
                 self._write_json(HTTPStatus.OK, {"status": "ok", "deleted": skill_id})
+                return
+            if parsed.path.startswith("/api/knowledge/"):
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) != 3:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return
+                try:
+                    _, _, raw_entry_id = parts
+                    entry_id = int(raw_entry_id)
+                except ValueError:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "knowledge_id must be an integer"})
+                    return
+                if not api.delete_knowledge_entry(entry_id):
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return
+                self._write_json(HTTPStatus.OK, {"status": "ok", "deleted": entry_id})
                 return
             self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
 

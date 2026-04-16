@@ -40,6 +40,9 @@ from .systems.searching import SearchContext, SearchDecider
 from .systems.value_game import ValueGameEngine
 
 _MASK_SENTINEL = "..."
+_FOLLOW_UP_METADATA_KEY = "follow_up_until"
+_PENDING_SEARCH_METADATA_KEY = "pending_search"
+_PENDING_SEARCH_TTL_SECONDS = 1800.0
 
 
 def _mask_key(key: str) -> str:
@@ -116,6 +119,7 @@ class WaifuService:
             return self._handle_event_locked(event)
 
     def _handle_event_locked(self, event: InboundEvent) -> OutboundMessage | None:
+        current_character = self._active_character_id()
         text = event.command_text(self.config.bot_account_id)
         live_runtime = self._requires_live_llm()
         self._record_inbound(event, text)
@@ -129,8 +133,14 @@ class WaifuService:
             return None
 
         self._remember_directory_member(event)
-        session = self.memory.save_user_event(event)
+        session = self.memory.save_user_event(event, character_id=current_character)
         assistant_name = self.generator.resolve_assistant_name(event.launcher_type, session)
+        session = self._sanitize_session_persona_state(session, assistant_name=assistant_name)
+        self._sanitize_member_persona_state(
+            group_id=event.launcher_id if event.launcher_type == "group" else "",
+            user_id=event.sender_id,
+            character_id=current_character,
+        )
         address = self._resolve_address(event, session)
         latest_message = self._latest_message_text(event, text)
         inbound_behavior = self.event_engine.capture_inbound(event, text=latest_message)
@@ -149,10 +159,27 @@ class WaifuService:
         if onboarding_reply is not None:
             return onboarding_reply
 
+        pending_search_query = self._pending_search_query_for_message(session, latest_message)
+        if pending_search_query:
+            return self._handle_search_request(
+                event,
+                session,
+                query=pending_search_query,
+                address=address,
+                assistant_name=assistant_name,
+            )
+
         active_skills = self.skills.match(latest_message)
         self._store_active_skills(session, active_skills)
 
         dispatch = self.skills.resolve_dispatch(latest_message)
+        if dispatch is None:
+            dispatch = self._resolve_builtin_skill_dispatch(latest_message)
+            if dispatch is not None:
+                skill, _ = dispatch
+                if all(existing.skill_id != skill.skill_id for existing in active_skills):
+                    active_skills = [*active_skills, skill]
+                    self._store_active_skills(session, active_skills)
         if dispatch is not None:
             skill, raw_args = dispatch
             return self._dispatch_skill_request(
@@ -184,8 +211,8 @@ class WaifuService:
             event.launcher_type,
             assistant_name=assistant_name,
             limit=self.config.history_window_messages,
+            character_id=current_character,
         )
-        current_character = str(session.character_id or self._active_character_id()).strip()
         recalled_memory_hints = self.state_store.recall_knowledge(
             scopes=self._knowledge_scopes(event),
             query=latest_message,
@@ -261,10 +288,11 @@ class WaifuService:
             emotion=emotion,
             search_used=bool(search_context.active),
             behavior_reason="reply",
+            character_id=current_character,
         )
         self._writeback_knowledge_if_needed(
             event,
-            session=self.memory.load(event.launcher_id, event.launcher_type),
+            session=self.memory.load(event.launcher_id, event.launcher_type, character_id=current_character),
             latest_message=latest_message,
             assistant_name=assistant_name,
             address=address,
@@ -392,6 +420,27 @@ class WaifuService:
             assistant_name=invocation.assistant_name,
         )
 
+    def _resolve_builtin_skill_dispatch(self, text: str) -> tuple[SkillSpec, str] | None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return None
+        if self.skills.has_dispatch_tool("skill-list") and self._looks_like_skill_list_request(normalized):
+            skill = self.skills.get_skill("skill-list-command")
+            if skill is not None and skill.dispatches_tool:
+                return skill, ""
+        return None
+
+    def _looks_like_skill_list_request(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", "", str(text or "").strip().lower())
+        if not normalized:
+            return False
+        patterns = (
+            r"^(?:说说|讲讲|聊聊|介绍下|介绍一下)?你(?:现在)?(?:都)?会(?:什么|干什么|做什么|哪些|啥)(?:技能|能力|功能)?$",
+            r"^(?:说说|讲讲|聊聊|介绍下|介绍一下)?你(?:有|会)(?:的)?(?:技能|能力|功能)(?:都)?(?:有哪些|是什么)?$",
+            r"^(?:技能|功能|命令)(?:列表|菜单)$",
+        )
+        return any(re.match(pattern, normalized) for pattern in patterns)
+
     def _run_skill_list_tool(self, invocation: ToolInvocation) -> OutboundMessage:
         return self._handle_skill_list_request(
             invocation.event,
@@ -409,6 +458,7 @@ class WaifuService:
         assistant_name: str,
     ) -> OutboundMessage:
         cleaned_query = " ".join(query.split())
+        self._clear_pending_search(session)
         if not cleaned_query:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
@@ -533,20 +583,32 @@ class WaifuService:
         emotion: EmotionState | None = None,
         search_used: bool = False,
         behavior_reason: str = "",
+        character_id: str = "",
     ) -> OutboundMessage:
         if event.launcher_type == "group":
             delay = max(0.0, float(self.config.group_response_delay_seconds))
             if delay > 0:
                 time.sleep(delay)
+        resolved_character_id = str(character_id or self._active_character_id()).strip()
         self.outbound.send(message)
         self._record_outbound(message)
-        self.memory.save_assistant_message(event.launcher_id, event.launcher_type, message.text)
+        self.memory.save_assistant_message(
+            event.launcher_id,
+            event.launcher_type,
+            message.text,
+            character_id=resolved_character_id,
+        )
         self.state_store.mark_member_addressed(
             group_id=event.launcher_id if event.launcher_type == "group" else "",
             user_id=event.sender_id,
-            character_id=self._active_character_id(),
+            character_id=resolved_character_id,
         )
-        self._archive_if_needed(event.launcher_id, event.launcher_type, assistant_name=assistant_name)
+        self._archive_if_needed(
+            event.launcher_id,
+            event.launcher_type,
+            assistant_name=assistant_name,
+            character_id=resolved_character_id,
+        )
         self._record_behavior_event(
             self.event_engine.capture_outbound(event=event, message=message, reason=behavior_reason or "reply")
         )
@@ -560,7 +622,14 @@ class WaifuService:
         self._refresh_follow_up_window(event)
         return message
 
-    def _archive_if_needed(self, launcher_id: str, launcher_type: str, *, assistant_name: str) -> None:
+    def _archive_if_needed(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        assistant_name: str,
+        character_id: str = "",
+    ) -> None:
         if not self.config.summarization_mode:
             return
         archived = self.memory.maybe_archive_history(
@@ -572,6 +641,7 @@ class WaifuService:
                 history_lines,
                 assistant_name=assistant_name,
             ),
+            character_id=str(character_id or self._active_character_id()).strip(),
         )
         if archived is None:
             return
@@ -710,10 +780,183 @@ class WaifuService:
             return "member", f"{event.launcher_id}:{event.sender_id}"
         return "member", event.sender_id
 
+    def _known_assistant_aliases(self) -> dict[str, set[str]]:
+        aliases: dict[str, set[str]] = {}
+        try:
+            for item in self.cards.list_characters():
+                character_id = str(item.get("character", "") or "").strip()
+                if not character_id:
+                    continue
+                names = aliases.setdefault(character_id, set())
+                if bool(item.get("has_person")):
+                    try:
+                        names.add(
+                            str(
+                                self.cards.load(
+                                    "person",
+                                    SessionMemory(
+                                        launcher_id="probe",
+                                        launcher_type="person",
+                                        character_id=character_id,
+                                    ),
+                                ).assistant_name
+                            ).strip()
+                        )
+                    except Exception:
+                        pass
+                if bool(item.get("has_group")):
+                    try:
+                        names.add(
+                            str(
+                                self.cards.load(
+                                    "group",
+                                    SessionMemory(
+                                        launcher_id="probe",
+                                        launcher_type="group",
+                                        character_id=character_id,
+                                    ),
+                                ).assistant_name
+                            ).strip()
+                        )
+                    except Exception:
+                        pass
+                direct_name = str(item.get("assistant_name", "") or "").strip()
+                if direct_name:
+                    names.add(direct_name)
+        except Exception:
+            pass
+        current_character = self._active_character_id()
+        current_names = aliases.setdefault(current_character, set())
+        for launcher_type in ("person", "group"):
+            try:
+                current_names.add(
+                    str(
+                        self.cards.load(
+                            launcher_type,
+                            SessionMemory(
+                                launcher_id="probe",
+                                launcher_type=launcher_type,
+                                character_id=current_character,
+                            ),
+                        ).assistant_name
+                    ).strip()
+                )
+            except Exception:
+                continue
+        fallback = str(self.config.assistant_name or "").strip()
+        if fallback:
+            current_names.add(fallback)
+        return {
+            character_id: {name for name in names if name}
+            for character_id, names in aliases.items()
+            if any(name for name in names)
+        }
+
+    def _known_assistant_names(self) -> dict[str, str]:
+        aliases = self._known_assistant_aliases()
+        return {
+            character_id: sorted(names, key=lambda item: (len(item), item.casefold()))[0]
+            for character_id, names in aliases.items()
+            if names
+        }
+
+    @staticmethod
+    def _mentions_any_assistant_name(text: str, names: set[str]) -> bool:
+        lowered = str(text or "").casefold()
+        return any(name and name.casefold() in lowered for name in names)
+
+    def _sanitize_profile_summary_text(self, summary: str) -> str:
+        fragments: list[str] = []
+        seen: set[str] = set()
+        assistant_names: set[str] = set()
+        for names in self._known_assistant_aliases().values():
+            assistant_names.update(names)
+        for fragment in str(summary or "").split(";"):
+            cleaned = " ".join(fragment.split()).strip().strip(",")
+            if not cleaned:
+                continue
+            if assistant_names and self._mentions_any_assistant_name(cleaned, assistant_names):
+                continue
+            key = cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            fragments.append(cleaned)
+        return "; ".join(fragments[:3])
+
+    def _sanitize_session_persona_state(
+        self,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+    ) -> SessionMemory:
+        known_aliases = self._known_assistant_aliases()
+        other_names: set[str] = set()
+        current_character = str(session.character_id or "").strip()
+        for character_id, names in known_aliases.items():
+            if character_id == current_character:
+                continue
+            other_names.update(name for name in names if name and name != assistant_name)
+        if not other_names:
+            return session
+        filtered_history: list[str] = []
+        changed = False
+        for raw_line in list(session.history):
+            speaker, content = self._split_history_line(raw_line)
+            speaker_is_assistant = speaker == "assistant" or self._mentions_any_assistant_name(speaker, other_names)
+            if speaker_is_assistant and (
+                self._mentions_any_assistant_name(speaker, other_names)
+                or self._mentions_any_assistant_name(content, other_names)
+            ):
+                changed = True
+                continue
+            filtered_history.append(raw_line)
+        if not changed:
+            return session
+        session.history = filtered_history
+        self.memory.store.save(session)
+        return session
+
+    def _sanitize_member_persona_state(
+        self,
+        *,
+        group_id: str,
+        user_id: str,
+        character_id: str,
+    ) -> dict[str, object] | None:
+        member = self.state_store.get_member(
+            group_id=group_id,
+            user_id=user_id,
+            character_id=character_id,
+        )
+        if member is None:
+            return None
+        cleaned_summary = self._sanitize_profile_summary_text(str(member.get("profile_summary", "") or ""))
+        if cleaned_summary == str(member.get("profile_summary", "") or ""):
+            return member
+        return self.state_store.save_member(
+            {
+                "group_id": group_id,
+                "user_id": user_id,
+                "character_id": character_id,
+                "qq_nickname": str(member.get("qq_nickname", "") or ""),
+                "group_card": str(member.get("group_card", "") or ""),
+                "preferred_name": str(member.get("preferred_name", "") or ""),
+                "onboarding_status": str(member.get("onboarding_status", "") or "new"),
+                "membership_status": str(member.get("membership_status", "") or "active"),
+                "profile_summary": cleaned_summary,
+                "affinity_score": member.get("affinity_score", 0.0),
+                "notes_count": int(member.get("notes_count", 0) or 0),
+                "last_seen_at": int(member.get("last_seen_at", 0) or 0),
+                "last_sync_at": int(member.get("last_sync_at", 0) or 0),
+                "last_addressed_at": int(member.get("last_addressed_at", 0) or 0),
+            }
+        )
+
     def _update_member_profile_summary(self, event: InboundEvent, *, extra_summary: str = "") -> None:
         group_id = event.launcher_id if event.launcher_type == "group" else ""
         current_character = self._active_character_id()
-        member = self.state_store.get_member(
+        member = self._sanitize_member_persona_state(
             group_id=group_id,
             user_id=event.sender_id,
             character_id=current_character,
@@ -726,8 +969,8 @@ class WaifuService:
         if callable(count_scope):
             notes_count = int(count_scope("member", scope_id, character_id=current_character) or 0)
         merged_summary = self._merge_profile_summary(
-            str(member.get("profile_summary", "") or ""),
-            extra_summary,
+            self._sanitize_profile_summary_text(str(member.get("profile_summary", "") or "")),
+            self._sanitize_profile_summary_text(extra_summary),
         )
         self.state_store.save_member(
             {
@@ -874,12 +1117,21 @@ class WaifuService:
             return True
         if not bot_account_id:
             return True
-        return self._is_follow_up_window_active(event.launcher_id)
+        if self._is_follow_up_window_active(event.launcher_id):
+            return True
+        return self._has_pending_search_follow_up(event)
 
     def _is_follow_up_window_active(self, launcher_id: str) -> bool:
         with self._state_lock:
             deadline = self._group_follow_up_until.get(launcher_id, 0.0)
-        return time.monotonic() <= deadline
+        if time.monotonic() <= deadline:
+            return True
+        session = self.memory.load(
+            launcher_id,
+            "group",
+            character_id=self._active_character_id(),
+        )
+        return self._session_follow_up_until(session) >= time.time()
 
     def _refresh_follow_up_window(self, event: InboundEvent) -> None:
         if event.launcher_type != "group":
@@ -887,8 +1139,152 @@ class WaifuService:
         window = max(0.0, float(self.config.group_follow_up_window_seconds))
         if window <= 0:
             return
+        deadline_monotonic = time.monotonic() + window
+        deadline_wall = time.time() + window
         with self._state_lock:
-            self._group_follow_up_until[event.launcher_id] = time.monotonic() + window
+            self._group_follow_up_until[event.launcher_id] = deadline_monotonic
+        self._persist_follow_up_window(
+            event.launcher_id,
+            event.launcher_type,
+            deadline_wall=deadline_wall,
+            character_id=self._active_character_id(),
+        )
+
+    def _persist_follow_up_window(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        deadline_wall: float,
+        character_id: str,
+    ) -> None:
+        if launcher_type != "group":
+            return
+        session = self.memory.load(launcher_id, launcher_type, character_id=character_id)
+        session.metadata[_FOLLOW_UP_METADATA_KEY] = float(deadline_wall)
+        self.memory.store.save(session)
+
+    def _session_follow_up_until(self, session: SessionMemory) -> float:
+        raw_value = session.metadata.get(_FOLLOW_UP_METADATA_KEY)
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _pending_search_query_for_message(self, session: SessionMemory, latest_message: str) -> str:
+        pending = self._pending_search_payload(session)
+        if not pending:
+            return ""
+        expires_at = _safe_float(pending, "expires_at", 0.0)
+        if expires_at and expires_at < time.time():
+            self._clear_pending_search(session)
+            return ""
+        if not self._looks_like_search_confirmation(latest_message):
+            if not self._looks_like_search_clarification(latest_message):
+                return ""
+            base_query = str(pending.get("query", "") or "").strip()
+            clarification = " ".join(str(latest_message or "").split()).strip()
+            return " ".join(part for part in (base_query, clarification) if part).strip()
+        return str(pending.get("query", "") or "").strip()
+
+    def _has_pending_search_follow_up(self, event: InboundEvent) -> bool:
+        if event.launcher_type != "group":
+            return False
+        latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
+        session = self.memory.load(
+            event.launcher_id,
+            event.launcher_type,
+            character_id=self._active_character_id(),
+        )
+        return bool(self._pending_search_query_for_message(session, latest_message))
+
+    def _pending_search_payload(self, session: SessionMemory) -> dict[str, object]:
+        raw_value = session.metadata.get(_PENDING_SEARCH_METADATA_KEY, {})
+        if isinstance(raw_value, dict) and str(raw_value.get("query", "") or "").strip():
+            return raw_value
+        legacy_search = session.metadata.get("last_search", {})
+        if not isinstance(legacy_search, dict):
+            return {}
+        query = str(legacy_search.get("query", "") or "").strip()
+        results = legacy_search.get("results", [])
+        fetched_at = _safe_float(legacy_search, "fetched_at", 0.0)
+        if not query or results:
+            return {}
+        if fetched_at and time.time() - fetched_at > _PENDING_SEARCH_TTL_SECONDS:
+            return {}
+        return {
+            "query": query,
+            "created_at": fetched_at or time.time(),
+            "expires_at": (fetched_at or time.time()) + _PENDING_SEARCH_TTL_SECONDS,
+        }
+
+    def _store_pending_search(self, session: SessionMemory, *, query: str) -> None:
+        cleaned_query = " ".join(str(query or "").split()).strip()
+        if not cleaned_query:
+            self._clear_pending_search(session)
+            return
+        session.metadata[_PENDING_SEARCH_METADATA_KEY] = {
+            "query": cleaned_query,
+            "created_at": time.time(),
+            "expires_at": time.time() + _PENDING_SEARCH_TTL_SECONDS,
+        }
+
+    def _clear_pending_search(self, session: SessionMemory) -> None:
+        if _PENDING_SEARCH_METADATA_KEY in session.metadata:
+            session.metadata.pop(_PENDING_SEARCH_METADATA_KEY, None)
+            self.memory.store.save(session)
+
+    @staticmethod
+    def _looks_like_search_confirmation(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "").strip().lower())
+        if not compact:
+            return False
+        patterns = (
+            "好的你帮我查查吧",
+            "好你帮我查查吧",
+            "帮我查查吧",
+            "你帮我查查吧",
+            "帮我查一下吧",
+            "你帮我查一下吧",
+            "那你帮我查查吧",
+            "那你帮我查一下吧",
+            "查查吧",
+            "查一下吧",
+            "去查查吧",
+            "去查一下吧",
+            "帮我查查",
+            "帮我查一下",
+        )
+        if any(pattern in compact for pattern in patterns):
+            return True
+        short_affirmations = {
+            "好的",
+            "好",
+            "行",
+            "行吧",
+            "嗯",
+            "嗯嗯",
+            "可以",
+            "好呀",
+            "好哦",
+        }
+        return compact in short_affirmations
+
+    @staticmethod
+    def _looks_like_search_clarification(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "").strip().lower())
+        if not compact or len(compact) > 24:
+            return False
+        blockers = ("怎么", "为什么", "查不了", "不查", "不用查", "别查", "不是", "我不是")
+        if any(blocker in compact for blocker in blockers):
+            return False
+        markers = ("公司", "集团", "股价", "股票", "港股", "美股", "a股", "hk", "us", "sz", "sh")
+        if any(marker in compact for marker in markers):
+            return True
+        if re.search(r"[a-z]{2,}|\d{3,}", compact):
+            return True
+        cjk_chars = [char for char in compact if "\u4e00" <= char <= "\u9fff"]
+        return 2 <= len(cjk_chars) <= 8
 
     def _extract_image_prompt_legacy(self, text: str) -> str | None:
         stripped = str(text or "").strip()
@@ -1260,7 +1656,13 @@ class WaifuService:
     def _directory_member_notes(self, event: InboundEvent) -> list[str]:
         notes: list[str] = []
         current_group = event.launcher_id if event.launcher_type == "group" else ""
-        members = self.state_store.list_members(limit=240, character_id=self._active_character_id())
+        current_character = self._active_character_id()
+        self._sanitize_member_persona_state(
+            group_id=current_group,
+            user_id=event.sender_id,
+            character_id=current_character,
+        )
+        members = self.state_store.list_members(limit=240, character_id=current_character)
         scoped = [
             item
             for item in members
@@ -1289,6 +1691,7 @@ class WaifuService:
                 notes.append(f"Bond stage with {qq_name}: {bond_stage} ({affinity_score:.2f}).")
             elif preferred_name:
                 notes.append(f"{qq_name} is usually addressed as {preferred_name}.")
+            profile_summary = self._sanitize_profile_summary_text(profile_summary)
             if profile_summary:
                 notes.append(f"Profile summary for {qq_name}: {profile_summary}")
             if onboarding_status and onboarding_status not in {"", "ready"}:
@@ -1395,6 +1798,36 @@ class WaifuService:
 
             if changed:
                 store.save(session)
+
+    def _repair_character_isolation_state(self, character_id: str = "") -> None:
+        known = self._known_assistant_names()
+        target_ids = [str(character_id or "").strip()] if str(character_id or "").strip() else list(known.keys())
+        target_ids = [item for item in target_ids if item]
+        if not target_ids:
+            return
+        store = self.memory.store
+        if hasattr(store, "list_sessions"):
+            for session in store.list_sessions():  # type: ignore[no-any-return]
+                session_character = str(getattr(session, "character_id", "") or "").strip()
+                if session_character not in target_ids:
+                    continue
+                assistant_name = known.get(session_character, "")
+                if not assistant_name:
+                    try:
+                        assistant_name = self.cards.load(session.launcher_type, session).assistant_name
+                    except Exception:
+                        assistant_name = ""
+                if assistant_name:
+                    self._sanitize_session_persona_state(session, assistant_name=assistant_name)
+        list_members = getattr(self.state_store, "list_members", None)
+        if callable(list_members):
+            for session_character in target_ids:
+                for member in list_members(limit=5000, character_id=session_character):
+                    self._sanitize_member_persona_state(
+                        group_id=str(member.get("group_id", "") or ""),
+                        user_id=str(member.get("user_id", "") or ""),
+                        character_id=session_character,
+                    )
 
     @staticmethod
     def _iter_legacy_group_members(raw_members: object) -> list[dict[str, object]]:
@@ -1562,13 +1995,14 @@ class WaifuService:
         return result
 
     def get_session_detail(self, launcher_type: str, launcher_id: str) -> dict[str, object] | None:
-        session = self.memory.load(launcher_id, launcher_type)
+        current_character = self._active_character_id()
+        session = self.memory.load(launcher_id, launcher_type, character_id=current_character)
         clean_metadata = self._sanitize_session_metadata(session.metadata)
         if not session.history and not clean_metadata:
             return None
         graph = self._session_detail_graph(session)
         return {
-            "character_id": str(session.character_id or self._active_character_id()).strip(),
+            "character_id": str(session.character_id or current_character).strip(),
             "launcher_id": session.launcher_id,
             "launcher_type": session.launcher_type,
             "preferred_name": self._session_preferred_name(session),
@@ -1630,6 +2064,7 @@ class WaifuService:
             set_default_character = getattr(self.state_store, "set_default_character", None)
             if callable(set_default_character):
                 set_default_character(active_character)
+            self._repair_character_isolation_state(active_character)
         self._persist_config()
         return {
             "current_character": self.cards.active_character(),
@@ -1852,7 +2287,8 @@ class WaifuService:
         launcher_id: str,
         payload: dict[str, object],
     ) -> dict[str, object] | None:
-        session = self.memory.load(launcher_id, launcher_type)
+        current_character = self._active_character_id()
+        session = self.memory.load(launcher_id, launcher_type, character_id=current_character)
         if not session.history and not self._sanitize_session_metadata(session.metadata):
             return None
         session.preferred_name = ""
@@ -1881,10 +2317,25 @@ class WaifuService:
         next_payload["character_id"] = self._active_character_id()
         return self.state_store.save_member(next_payload)
 
+    def reset_directory_member_persona(self, payload: dict[str, object]) -> dict[str, object] | None:
+        return self.state_store.reset_member_persona(
+            group_id=payload.get("group_id"),
+            user_id=payload.get("user_id"),
+            character_id=self._active_character_id(),
+        )
+
     def save_knowledge_entry(self, payload: dict[str, object]) -> dict[str, object]:
         next_payload = dict(payload)
         next_payload["character_id"] = self._active_character_id()
         return self.state_store.save_knowledge(next_payload)
+
+    def delete_knowledge_entry(self, entry_id: int) -> bool:
+        return bool(
+            self.state_store.delete_knowledge(
+                entry_id,
+                character_id=self._active_character_id(),
+            )
+        )
 
     def handle_notice_payload(self, payload: dict[str, object]) -> dict[str, object]:
         notice_type = str(payload.get("notice_type", "") or "").strip().lower()
@@ -2216,9 +2667,10 @@ class WaifuService:
             or ""
         )
         webui_api_prefix = payload.get("webui_api_prefix", self.config.qq_sidecar.webui_api_prefix)
-        self.config.qq_sidecar.webui_api_prefix = str(
+        next_webui_api_prefix = str(
             self.config.qq_sidecar.webui_api_prefix if webui_api_prefix is None else webui_api_prefix
-        )
+        ).strip()
+        self.config.qq_sidecar.webui_api_prefix = next_webui_api_prefix or "/api"
         self.config.qq_sidecar.webui_timeout_seconds = _safe_float(
             payload, "webui_timeout_seconds", self.config.qq_sidecar.webui_timeout_seconds
         )
@@ -2534,8 +2986,13 @@ class WaifuService:
     def _store_search_context(self, session: SessionMemory, search_context: SearchContext) -> None:
         if search_context.query:
             session.metadata["last_search"] = search_context.as_dict()
+            if search_context.active:
+                session.metadata.pop(_PENDING_SEARCH_METADATA_KEY, None)
+            else:
+                self._store_pending_search(session, query=search_context.query)
         else:
             session.metadata.pop("last_search", None)
+            session.metadata.pop(_PENDING_SEARCH_METADATA_KEY, None)
         self.memory.store.save(session)
 
     def _resolve_address(self, event: InboundEvent, session: SessionMemory) -> str:
@@ -2896,6 +3353,7 @@ def _build_service(
     adopt_character = getattr(service.state_store, "adopt_legacy_character", None)
     if callable(adopt_character):
         adopt_character(service.cards.active_character())
+    service._repair_character_isolation_state()
     if hasattr(service.state_store, "refresh_knowledge_embeddings"):
         service.state_store.refresh_knowledge_embeddings()
     tools.register(
