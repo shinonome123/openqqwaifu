@@ -233,6 +233,11 @@ class InMemoryRuntimeStateStore:
     def set_embedder(self, embedder: Any) -> None:
         self._embedder = embedder
 
+    def close(self) -> None:
+        close = getattr(self._embedder, "close", None)
+        if callable(close):
+            close()
+
     def set_default_character(self, character_id: object) -> None:
         self._default_character_id = _normalize_character_id(character_id)
 
@@ -837,13 +842,24 @@ class SqliteRuntimeStateStore:
     def __init__(self, path: str | Path, embedder: Any = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # _write_lock serializes writers at the Python level so that BEGIN IMMEDIATE
+        # retries don't thrash. WAL mode already allows readers to run concurrently
+        # with a single writer, so read-only hot paths (``recall_knowledge``,
+        # ``list_members`` …) deliberately skip this lock.
+        self._write_lock = threading.Lock()
+        # Back-compat alias: some call sites still reference ``self._lock``.
+        self._lock = self._write_lock
         self._embedder = embedder
         self._default_character_id = ""
         self._init_schema()
 
     def set_embedder(self, embedder: Any) -> None:
         self._embedder = embedder
+
+    def close(self) -> None:
+        close = getattr(self._embedder, "close", None)
+        if callable(close):
+            close()
 
     def set_default_character(self, character_id: object) -> None:
         self._default_character_id = _normalize_character_id(character_id)
@@ -916,6 +932,9 @@ class SqliteRuntimeStateStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
+        # Give writers a grace period so that transient contention retries
+        # transparently instead of raising ``OperationalError: database is locked``.
+        connection.execute("PRAGMA busy_timeout=5000")
         return connection
 
     @contextmanager
@@ -924,6 +943,21 @@ class SqliteRuntimeStateStore:
         try:
             yield connection
             connection.commit()
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _read_session(self):
+        """Open a short-lived read-only connection outside the write lock.
+
+        WAL mode lets reads run concurrently with a single writer, so hot-path
+        readers don't need to serialize on ``self._write_lock``. The connection
+        is still closed eagerly so file handles don't linger (important on
+        Windows where open handles block ``tempfile.TemporaryDirectory`` cleanup).
+        """
+        connection = self._connect()
+        try:
+            yield connection
         finally:
             connection.close()
 
@@ -1356,7 +1390,7 @@ class SqliteRuntimeStateStore:
     ) -> dict[str, Any] | None:
         safe_group_id, safe_user_id = _normalize_member(group_id, user_id)
         safe_character_id = _normalize_character_id(character_id)
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             shared = self._fetch_member(connection, safe_group_id, safe_user_id)
             if shared is None:
                 return None
@@ -1367,7 +1401,7 @@ class SqliteRuntimeStateStore:
 
     def list_members(self, *, limit: int = 120, character_id: object = "") -> list[dict[str, Any]]:
         safe_character_id = _normalize_character_id(character_id)
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             rows = connection.execute(
                 """
                 SELECT *
@@ -1406,13 +1440,13 @@ class SqliteRuntimeStateStore:
         ]
 
     def member_count(self) -> int:
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             row = connection.execute("SELECT COUNT(*) AS count FROM members").fetchone()
         return int(row["count"] if row is not None else 0)
 
     def count_members_in_group(self, group_id: str) -> int:
         gid = str(group_id or "").strip()
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS count FROM members WHERE group_id = ? AND membership_status = 'active'",
                 (gid,),
@@ -1423,7 +1457,7 @@ class SqliteRuntimeStateStore:
         st = str(scope_type or "").strip()
         sid = str(scope_id or "").strip()
         safe_character_id = _normalize_character_id(character_id)
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             row = connection.execute(
                 """
                 SELECT COUNT(*) AS count
@@ -1442,7 +1476,7 @@ class SqliteRuntimeStateStore:
         for st, sid in scopes:
             params.extend([str(st or "").strip(), str(sid or "").strip()])
         safe_character_id = _normalize_character_id(character_id)
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             row = connection.execute(
                 f"SELECT COUNT(*) AS count FROM knowledge_entries WHERE character_id = ? AND ({conditions})",
                 [safe_character_id, *params],
@@ -1581,7 +1615,7 @@ class SqliteRuntimeStateStore:
             params.append(safe_character_id)
         sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
         params.append(max(1, int(limit)))
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [_row_to_knowledge(row) for row in rows]
 
@@ -1599,6 +1633,10 @@ class SqliteRuntimeStateStore:
         scope_set = {(_normalize_string(kind).lower(), _normalize_string(identifier)) for kind, identifier in scopes}
         scope_set.add(("global", ""))
         scope_list = list(scope_set)
+        # Cap the candidate pool to keep scoring O(1) in DB size. A few hundred
+        # of the most recent in-scope entries is more than enough for the
+        # embedding + keyword rerank to pick the final top-N.
+        candidate_limit = max(int(limit) * 20, 200)
         if scope_list:
             conditions = " OR ".join(
                 "(LOWER(scope_type) = ? AND scope_id = ?)" for _ in scope_list
@@ -1611,17 +1649,19 @@ class SqliteRuntimeStateStore:
                 FROM knowledge_entries
                 WHERE character_id = ? AND ({conditions})
                 ORDER BY updated_at DESC, id DESC
+                LIMIT ?
             """
-            params = [safe_character_id, *params]
+            params = [safe_character_id, *params, candidate_limit]
         else:
             sql = """
                 SELECT *
                 FROM knowledge_entries
                 WHERE character_id = ?
                 ORDER BY updated_at DESC, id DESC
+                LIMIT ?
             """
-            params = [safe_character_id]
-        with self._lock, self._session() as connection:
+            params = [safe_character_id, candidate_limit]
+        with self._read_session() as connection:
             rows = connection.execute(sql, params).fetchall()
         scored: list[tuple[float, str]] = []
         for row in rows:
@@ -1645,7 +1685,7 @@ class SqliteRuntimeStateStore:
 
     def knowledge_count(self, *, character_id: object | None = None) -> int:
         safe_character_id = None if character_id is None else _normalize_character_id(character_id)
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             if safe_character_id is None:
                 row = connection.execute("SELECT COUNT(*) AS count FROM knowledge_entries").fetchone()
             else:
@@ -1657,7 +1697,7 @@ class SqliteRuntimeStateStore:
 
     def embedded_knowledge_count(self, *, character_id: object | None = None) -> int:
         safe_character_id = None if character_id is None else _normalize_character_id(character_id)
-        with self._lock, self._session() as connection:
+        with self._read_session() as connection:
             if safe_character_id is None:
                 row = connection.execute(
                     "SELECT COUNT(*) AS count FROM knowledge_entries WHERE embedding_json <> ''"

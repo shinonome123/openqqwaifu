@@ -5,11 +5,11 @@ import hashlib
 import io
 import json
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+
+from ..http_transport import SyncHttpTransport, TransportError
 
 
 class NapCatLoginError(RuntimeError):
@@ -27,6 +27,10 @@ class NapCatLoginBridge:
     _last_status: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _last_status_at: float = field(default=0.0, init=False, repr=False)
     _last_login_info: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _transport: SyncHttpTransport = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._transport = SyncHttpTransport(timeout_seconds=self.timeout)
 
     def configured(self) -> bool:
         base, _ = normalize_webui_settings(self.base_url, self.webui_token)
@@ -138,6 +142,9 @@ class NapCatLoginBridge:
         self._resolved_api_base = ""
         self._last_status = {}
         self._last_status_at = 0.0
+
+    def close(self) -> None:
+        self._transport.close()
 
     def _request_with_auth(
         self,
@@ -316,24 +323,22 @@ class NapCatLoginBridge:
         authorization: str = "",
     ) -> dict[str, Any]:
         endpoint = f"{api_base.rstrip('/')}/{route.lstrip('/')}"
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json; charset=utf-8",
         }
         if authorization:
             headers["Authorization"] = authorization
-        request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as exc:
-            detail = _read_http_error(exc)
-            raise NapCatLoginError(detail) from exc
-        except urllib.error.URLError as exc:
-            reason = getattr(exc, "reason", exc)
-            raise NapCatLoginError(f"NapCat WebUI is unreachable: {reason}") from exc
-        parsed = _parse_json_response(raw)
+            response = self._transport.request(
+                "POST",
+                endpoint,
+                headers=headers,
+                json_payload=payload,
+            )
+        except TransportError as exc:
+            raise NapCatLoginError(_napcat_transport_error_message(exc)) from exc
+        parsed = _parse_json_response(response.content)
         code = parsed.get("code")
         if code not in {None, 0}:
             raise NapCatLoginError(str(parsed.get("message") or parsed.get("error") or "NapCat request failed"))
@@ -349,15 +354,20 @@ def _parse_json_response(raw: bytes) -> dict[str, Any]:
     return data if isinstance(data, dict) else {"data": data}
 
 
-def _read_http_error(exc: urllib.error.HTTPError) -> str:
-    try:
-        payload = _parse_json_response(exc.read())
-    except Exception:
-        payload = {}
-    message = str(payload.get("message") or payload.get("error") or "").strip()
-    if message:
-        return message
-    return f"NapCat WebUI request failed ({exc.code})"
+def _napcat_transport_error_message(exc: TransportError) -> str:
+    body = str(exc.body or "").strip()
+    if body:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            message = str(payload.get("message") or payload.get("error") or "").strip()
+            if message:
+                return message
+    if exc.status_code is not None:
+        return f"NapCat WebUI request failed ({exc.status_code})"
+    return f"NapCat WebUI is unreachable: {exc}"
 
 
 def _normalize_prefix(prefix: str) -> str:

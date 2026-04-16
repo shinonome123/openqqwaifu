@@ -12,6 +12,8 @@ authors = [
   { name = "OpenAI Codex" }
 ]
 dependencies = [
+  "aiohttp>=3.13,<4",
+  "httpx>=0.25,<1",
   "qrcode[pil]>=7.4.2",
 ]
 

@@ -10,7 +10,7 @@ COPY src ./src
 COPY docs ./docs
 COPY examples ./examples
 
-RUN pip install --no-cache-dir "qrcode[pil]>=7.4.2"
+RUN pip install --no-cache-dir .
 
 RUN useradd --create-home appuser
 USER appuser

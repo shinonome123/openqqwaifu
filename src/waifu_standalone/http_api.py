@@ -40,6 +40,12 @@ _ASSET_CONTENT_TYPES = {
     ".woff2": "font/woff2",
     ".map": "application/json; charset=utf-8",
 }
+_NON_ADMIN_GET_PATHS = {
+    "/api/panels/user",
+}
+_NON_ADMIN_POST_PATHS = {
+    "/api/auth/change-password",
+}
 
 
 class RequestTooLarge(ValueError):
@@ -401,11 +407,13 @@ class HttpApi:
         user = self.auth.get_user(username)
         if user is None:
             raise ValueError("user not found")
-        return {
+        payload = {
             "current_user": user,
             "users": self.auth.list_users() if user.get("role") == "admin" else [user],
-            **self.service.get_member_directory_panel(),
         }
+        if user.get("role") == "admin":
+            payload.update(self.service.get_member_directory_panel())
+        return payload
 
     def save_directory_member(self, payload: dict[str, Any]) -> dict[str, Any]:
         return dict(self.service.save_directory_member(payload))
@@ -433,272 +441,55 @@ def make_handler(api: HttpApi):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path == "/healthz":
-                self._write_json(HTTPStatus.OK, {"status": "ok"})
-                return
-
-            if parsed.path in _STATIC_FILES:
-                filename, content_type = _STATIC_FILES[parsed.path]
-                self._write_static_file(filename, content_type)
-                return
-
-            if parsed.path.startswith("/assets/"):
-                relative = parsed.path[len("/assets/"):]
-                asset = _resolve_asset_path(relative)
-                if asset is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                filename, content_type = asset
-                self._write_static_file(filename, content_type)
-                return
-
-            if parsed.path == "/api/auth/state":
-                self._write_json(HTTPStatus.OK, api.auth_state(self._session_token()))
-                return
-
             current_user = None
+            if self._dispatch_static_get(parsed):
+                return
+
             if parsed.path.startswith("/api/"):
                 current_user = self._require_auth()
                 if current_user is None:
                     return
-
-            if parsed.path == "/api/dashboard":
-                self._write_json(HTTPStatus.OK, api.dashboard_snapshot())
-                return
-
-            if parsed.path == "/api/portraits":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                character = str(query.get("character", [""])[0] or "").strip()
-                if not character:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "character is required"})
+                if not self._authorize_api_request("GET", parsed.path, current_user):
                     return
-                try:
-                    asset = api.get_character_portrait(character)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                if asset is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                body, content_type = asset
-                self._write_bytes(HTTPStatus.OK, body, content_type)
+
+            routes = {
+                "/api/dashboard": self._get_dashboard,
+                "/api/portraits": self._get_portrait,
+                "/api/console": self._get_console,
+                "/api/runtime": self._get_runtime,
+                "/api/events/recent": self._get_recent_events,
+                "/api/events/behavior": self._get_behavior_events,
+                "/api/panels/character": self._get_character_panel,
+                "/api/panels/ai": self._get_ai_panel,
+                "/api/panels/memory": self._get_memory_panel,
+                "/api/panels/abilities": self._get_abilities_panel,
+                "/api/panels/proactive": self._get_proactive_panel,
+                "/api/panels/skills": self._get_skills_panel,
+                "/api/panels/sidecar": self._get_sidecar_panel,
+                "/api/panels/qq-login": self._get_qq_login_panel,
+                "/api/qq-login/qrcode-image": self._get_qq_login_qrcode_image,
+                "/api/panels/other": self._get_other_panel,
+                "/api/panels/user": lambda p: self._get_user_panel(p, current_user),
+                "/api/marketplace/search": self._get_marketplace_search,
+                "/api/skills": self._get_skills,
+                "/api/tools": self._get_tools,
+                "/api/skill-packs/template": self._get_skill_pack_template,
+                "/api/skills/template": self._get_skill_template,
+                "/api/sessions": self._get_sessions,
+            }
+            handler = routes.get(parsed.path)
+            if handler is not None:
+                handler(parsed)
                 return
 
-            if parsed.path == "/api/console":
-                self._write_json(HTTPStatus.OK, api.console_panels())
-                return
-
-            if parsed.path == "/api/runtime":
-                self._write_json(HTTPStatus.OK, api.runtime_stats())
-                return
-
-            if parsed.path == "/api/events/recent":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                limit = _coerce_limit(query.get("limit", ["50"])[0])
-                self._write_json(HTTPStatus.OK, api.recent_events(limit=limit))
-                return
-
-            if parsed.path == "/api/events/behavior":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                limit = _coerce_limit(query.get("limit", ["80"])[0])
-                launcher_type = str(query.get("launcher_type", [""])[0] or "").strip()
-                launcher_id = str(query.get("launcher_id", [""])[0] or "").strip()
-                if launcher_type:
-                    try:
-                        launcher_type = _validate_launcher_type(launcher_type)
-                    except ValueError as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                        return
-                if launcher_id:
-                    try:
-                        launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
-                    except ValueError as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                        return
-                self._write_json(
-                    HTTPStatus.OK,
-                    api.behavior_events(limit=limit, launcher_type=launcher_type, launcher_id=launcher_id),
-                )
-                return
-
-            if parsed.path == "/api/panels/character":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                character = query.get("character", [""])[0]
-                self._write_json(HTTPStatus.OK, api.get_character_panel(character))
-                return
-
-            if parsed.path == "/api/panels/ai":
-                self._write_json(HTTPStatus.OK, api.get_ai_panel())
-                return
-
-            if parsed.path == "/api/panels/memory":
-                self._write_json(HTTPStatus.OK, api.get_memory_panel())
-                return
-
-            if parsed.path == "/api/panels/abilities":
-                self._write_json(HTTPStatus.OK, api.get_abilities_panel())
-                return
-
-            if parsed.path == "/api/panels/proactive":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                limit = _coerce_limit(query.get("limit", ["12"])[0])
-                self._write_json(HTTPStatus.OK, api.get_proactive_panel(limit=limit))
-                return
-
-            if parsed.path == "/api/panels/skills":
-                self._write_json(HTTPStatus.OK, api.get_skills_panel())
-                return
-
-            if parsed.path == "/api/panels/sidecar":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
-                self._write_json(HTTPStatus.OK, api.get_sidecar_panel(refresh=refresh))
-                return
-
-            if parsed.path == "/api/panels/qq-login":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
-                self._write_json(HTTPStatus.OK, api.get_qq_login_panel(refresh=refresh))
-                return
-
-            if parsed.path == "/api/qq-login/qrcode-image":
-                try:
-                    asset = api.get_qq_login_qrcode_image()
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                if asset is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                body, content_type = asset
-                self._write_bytes(HTTPStatus.OK, body, content_type)
-                return
-
-            if parsed.path == "/api/panels/other":
-                self._write_json(HTTPStatus.OK, api.get_other_panel())
-                return
-
-            if parsed.path == "/api/panels/user":
-                self._write_json(HTTPStatus.OK, api.get_user_panel(str(current_user["username"])))
-                return
-
-            if parsed.path == "/api/marketplace/search":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                q = query.get("q", [""])[0]
-                source_id = query.get("source_id", [""])[0]
-                limit = _coerce_limit(query.get("limit", ["12"])[0])
-                if source_id:
-                    try:
-                        source_id = _validate_route_segment(source_id, name="source_id")
-                    except ValueError as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                        return
-                self._write_json(HTTPStatus.OK, api.search_marketplace(q, source_id=source_id, limit=limit))
-                return
-
-            if parsed.path == "/api/skills":
-                self._write_json(HTTPStatus.OK, api.list_skills())
-                return
-
-            if parsed.path == "/api/tools":
-                self._write_json(HTTPStatus.OK, api.list_tools())
-                return
-
-            if parsed.path == "/api/skill-packs/template":
-                self._write_json(HTTPStatus.OK, api.skill_pack_template())
-                return
-
-            if parsed.path == "/api/skills/template":
-                self._write_json(HTTPStatus.OK, api.new_skill_template())
-                return
-
-            if parsed.path.startswith("/api/skills/"):
-                parts = [unquote(part) for part in parsed.path.split("/") if part]
-                if len(parts) != 3:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                try:
-                    _, _, skill_id = parts
-                    skill_id = _validate_route_segment(skill_id, name="skill_id")
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                detail = api.get_skill_detail(skill_id)
-                if detail is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                self._write_json(HTTPStatus.OK, detail)
-                return
-
-            if parsed.path == "/api/sessions":
-                query = parse_qs(parsed.query, keep_blank_values=False)
-                limit = _coerce_limit(query.get("limit", ["24"])[0])
-                self._write_json(HTTPStatus.OK, {"sessions": api.list_sessions(limit=limit)})
-                return
-
-            if parsed.path.startswith("/api/sessions/"):
-                parts = [unquote(part) for part in parsed.path.split("/") if part]
-                if len(parts) != 4:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                try:
-                    _, _, launcher_type, launcher_id = parts
-                    launcher_type = _validate_launcher_type(launcher_type)
-                    launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                detail = api.get_session_detail(launcher_type, launcher_id)
-                if detail is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                self._write_json(HTTPStatus.OK, detail)
+            if self._dispatch_dynamic_get(parsed):
                 return
 
             self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path == "/onebot/events":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                status, body = api.handle_json(payload)
-                if status < HTTPStatus.BAD_REQUEST:
-                    self.send_response(HTTPStatus.NO_CONTENT)
-                    self.end_headers()
-                    return
-                self._write_json(status, body)
-                return
-
-            if parsed.path == "/api/auth/bootstrap":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    body, cookie = api.bootstrap_auth(payload)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
-                return
-
-            if parsed.path == "/api/auth/login":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    body, cookie = api.login(payload)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized", "reason": str(exc)})
-                    return
-                self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
-                return
-
-            if parsed.path == "/api/auth/logout":
-                self._read_json_body(allow_empty=True)
-                body, cookie = api.logout(self._session_token())
-                self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
+            if self._dispatch_static_post(parsed):
                 return
 
             current_user = None
@@ -706,305 +497,38 @@ def make_handler(api: HttpApi):
                 current_user = self._require_auth()
                 if current_user is None:
                     return
+                if not self._authorize_api_request("POST", parsed.path, current_user):
+                    return
 
-            if parsed.path == "/api/auth/change-password":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    body = api.change_password(str(current_user["username"]), payload)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                self._write_json(HTTPStatus.OK, body)
+            routes = {
+                "/api/auth/change-password": lambda p: self._post_change_password(p, current_user),
+                "/api/skills/reload": self._post_reload_skills,
+                "/api/providers/test": self._post_test_provider,
+                "/api/sidecar/test": self._post_test_sidecar,
+                "/api/panels/character": self._post_character_panel,
+                "/api/character/preview": self._post_character_preview,
+                "/api/panels/ai": self._post_ai_panel,
+                "/api/panels/abilities": self._post_abilities_panel,
+                "/api/proactive/draft": self._post_proactive_draft,
+                "/api/panels/sidecar": self._post_sidecar_panel,
+                "/api/panels/qq-login": self._post_qq_login_panel,
+                "/api/qq-login/refresh": self._post_qq_login_refresh,
+                "/api/panels/other": self._post_other_panel,
+                "/api/users/directory/save": self._post_directory_member_save,
+                "/api/users/directory/reset-persona": self._post_directory_member_reset_persona,
+                "/api/users/directory/sync": self._post_directory_sync,
+                "/api/knowledge/save": self._post_knowledge_save,
+                "/api/marketplace/import": self._post_marketplace_import,
+                "/api/skill-packs/export": self._post_skill_pack_export,
+                "/api/skill-packs/import": self._post_skill_pack_import,
+                "/api/skills/install": self._post_skill_install,
+            }
+            handler = routes.get(parsed.path)
+            if handler is not None:
+                handler(parsed)
                 return
 
-            if parsed.path == "/api/skills/reload":
-                self._read_json_body(allow_empty=True)
-                self._write_json(HTTPStatus.OK, api.reload_skills())
-                return
-
-            if parsed.path == "/api/providers/test":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    result = api.test_provider(payload)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                self._write_json(HTTPStatus.OK, result)
-                return
-
-            if parsed.path == "/api/sidecar/test":
-                self._read_json_body(allow_empty=True)
-                self._write_json(HTTPStatus.OK, api.test_sidecar())
-                return
-
-            if parsed.path == "/api/panels/character":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                self._write_json(HTTPStatus.OK, api.save_character_panel(payload))
-                return
-
-            if parsed.path == "/api/character/preview":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    self._write_json(HTTPStatus.OK, api.preview_character_panel(payload))
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                return
-
-            if parsed.path == "/api/panels/ai":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                self._write_json(HTTPStatus.OK, api.save_ai_panel(payload))
-                return
-
-            if parsed.path == "/api/panels/abilities":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                self._write_json(HTTPStatus.OK, api.save_abilities_panel(payload))
-                return
-
-            if parsed.path == "/api/proactive/draft":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    self._write_json(HTTPStatus.OK, api.generate_proactive_draft(payload))
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                return
-
-            if parsed.path == "/api/panels/sidecar":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                self._write_json(HTTPStatus.OK, api.save_sidecar_panel(payload))
-                return
-
-            if parsed.path == "/api/panels/qq-login":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                self._write_json(HTTPStatus.OK, api.save_qq_login_panel(payload))
-                return
-
-            if parsed.path == "/api/qq-login/refresh":
-                self._read_json_body(allow_empty=True)
-                try:
-                    self._write_json(HTTPStatus.OK, api.refresh_qq_login_panel())
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                return
-
-            if parsed.path == "/api/panels/other":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                self._write_json(HTTPStatus.OK, api.save_other_panel(payload))
-                return
-
-            if parsed.path == "/api/users/directory/save":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    self._write_json(HTTPStatus.OK, {"status": "ok", "member": api.save_directory_member(payload)})
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                return
-
-            if parsed.path == "/api/users/directory/reset-persona":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    detail = api.reset_directory_member_persona(payload)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                if detail is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                self._write_json(HTTPStatus.OK, {"status": "ok", "member": detail})
-                return
-
-            if parsed.path == "/api/users/directory/sync":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    self._write_json(
-                        HTTPStatus.OK,
-                        api.sync_group_members(str(payload.get("group_id", "") or "")),
-                    )
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                return
-
-            if parsed.path == "/api/knowledge/save":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                try:
-                    self._write_json(HTTPStatus.OK, {"status": "ok", "entry": api.save_knowledge_entry(payload)})
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                return
-
-            if parsed.path == "/api/marketplace/import":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                source_id = str(payload.get("source_id", "") or "")
-                github_url = str(payload.get("github_url", "") or "")
-                if not github_url:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "github_url is required"})
-                    return
-                if source_id:
-                    try:
-                        source_id = _validate_route_segment(source_id, name="source_id")
-                    except ValueError as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                        return
-                try:
-                    detail = api.import_marketplace_skill(source_id=source_id, github_url=github_url)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
-                return
-
-            if parsed.path == "/api/skill-packs/export":
-                payload = self._read_json_body(allow_empty=True)
-                if payload is None:
-                    return
-                skill_ids = payload.get("skill_ids", [])
-                if not isinstance(skill_ids, list):
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "skill_ids must be a list"})
-                    return
-                result = api.export_skill_pack(
-                    skill_ids=[str(item) for item in skill_ids if str(item).strip()],
-                    include_builtin=bool(payload.get("include_builtin", False)),
-                    name=str(payload.get("name", "") or ""),
-                    description=str(payload.get("description", "") or ""),
-                )
-                self._write_json(HTTPStatus.OK, result)
-                return
-
-            if parsed.path == "/api/skill-packs/import":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                pack_payload = payload.get("bundle")
-                if pack_payload is None:
-                    pack_payload = payload.get("payload")
-                if pack_payload is None:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "bundle is required"})
-                    return
-                try:
-                    result = api.import_skill_pack(pack_payload, overwrite=bool(payload.get("overwrite", True)))
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                self._write_json(HTTPStatus.OK, {"status": "ok", "pack": result})
-                return
-
-            if parsed.path == "/api/skills/install":
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                markdown = str(payload.get("markdown", "") or "")
-                filename = payload.get("filename")
-                if not markdown.strip():
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "markdown is required"})
-                    return
-                try:
-                    detail = api.install_skill(markdown, filename=str(filename) if filename else None)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
-                return
-
-            if parsed.path.startswith("/api/skills/") and parsed.path.endswith("/toggle"):
-                parts = [unquote(part) for part in parsed.path.split("/") if part]
-                if len(parts) != 4:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                try:
-                    _, _, skill_id, _ = parts
-                    skill_id = _validate_route_segment(skill_id, name="skill_id")
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                enabled = bool(payload.get("enabled", True))
-                detail = api.set_skill_enabled(skill_id, enabled)
-                if detail is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
-                return
-
-            if parsed.path.startswith("/api/skills/") and parsed.path.endswith("/save"):
-                parts = [unquote(part) for part in parsed.path.split("/") if part]
-                if len(parts) != 4:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                try:
-                    _, _, skill_id, _ = parts
-                    skill_id = _validate_route_segment(skill_id, name="skill_id")
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                markdown = str(payload.get("markdown", "") or "")
-                if not markdown.strip():
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "markdown is required"})
-                    return
-                try:
-                    detail = api.save_skill(skill_id, markdown)
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                if detail is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
-                return
-
-            if parsed.path.startswith("/api/memory/sessions/") and parsed.path.endswith("/save"):
-                parts = [unquote(part) for part in parsed.path.split("/") if part]
-                if len(parts) != 6:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                try:
-                    _, _, _, launcher_type, launcher_id, _ = parts
-                    launcher_type = _validate_launcher_type(launcher_type)
-                    launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
-                except ValueError as exc:
-                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
-                payload = self._read_json_body()
-                if payload is None:
-                    return
-                detail = api.save_memory_session(launcher_type, launcher_id, payload)
-                if detail is None:
-                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
-                self._write_json(HTTPStatus.OK, {"status": "ok", "session": detail})
+            if self._dispatch_dynamic_post(parsed):
                 return
 
             self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
@@ -1015,39 +539,581 @@ def make_handler(api: HttpApi):
                 current_user = self._require_auth()
                 if current_user is None:
                     return
+                if not self._authorize_api_request("DELETE", parsed.path, current_user):
+                    return
+            if self._dispatch_dynamic_delete(parsed):
+                return
+            self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+
+        def _dispatch_static_get(self, parsed) -> bool:
+            if parsed.path in _STATIC_FILES:
+                filename, content_type = _STATIC_FILES[parsed.path]
+                self._write_static_file(filename, content_type)
+                return True
+            if parsed.path.startswith("/assets/"):
+                relative = parsed.path[len("/assets/"):]
+                asset = _resolve_asset_path(relative)
+                if asset is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                filename, content_type = asset
+                self._write_static_file(filename, content_type)
+                return True
+            routes = {
+                "/healthz": self._get_healthz,
+                "/api/auth/state": self._get_auth_state,
+            }
+            handler = routes.get(parsed.path)
+            if handler is None:
+                return False
+            handler(parsed)
+            return True
+
+        def _dispatch_static_post(self, parsed) -> bool:
+            routes = {
+                "/onebot/events": self._post_onebot_events,
+                "/api/auth/bootstrap": self._post_auth_bootstrap,
+                "/api/auth/login": self._post_auth_login,
+                "/api/auth/logout": self._post_auth_logout,
+            }
+            handler = routes.get(parsed.path)
+            if handler is None:
+                return False
+            handler(parsed)
+            return True
+
+        def _dispatch_dynamic_get(self, parsed) -> bool:
             if parsed.path.startswith("/api/skills/"):
                 parts = [unquote(part) for part in parsed.path.split("/") if part]
                 if len(parts) != 3:
                     self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
+                    return True
                 try:
                     _, _, skill_id = parts
                     skill_id = _validate_route_segment(skill_id, name="skill_id")
                 except ValueError as exc:
                     self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-                    return
+                    return True
+                detail = api.get_skill_detail(skill_id)
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                self._write_json(HTTPStatus.OK, detail)
+                return True
+            if parsed.path.startswith("/api/sessions/"):
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) != 4:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                try:
+                    _, _, launcher_type, launcher_id = parts
+                    launcher_type = _validate_launcher_type(launcher_type)
+                    launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
+                detail = api.get_session_detail(launcher_type, launcher_id)
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                self._write_json(HTTPStatus.OK, detail)
+                return True
+            return False
+
+        def _dispatch_dynamic_post(self, parsed) -> bool:
+            if parsed.path.startswith("/api/skills/") and parsed.path.endswith("/toggle"):
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) != 4:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                try:
+                    _, _, skill_id, _ = parts
+                    skill_id = _validate_route_segment(skill_id, name="skill_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
+                payload = self._read_json_body()
+                if payload is None:
+                    return True
+                enabled = bool(payload.get("enabled", True))
+                detail = api.set_skill_enabled(skill_id, enabled)
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
+                return True
+            if parsed.path.startswith("/api/skills/") and parsed.path.endswith("/save"):
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) != 4:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                try:
+                    _, _, skill_id, _ = parts
+                    skill_id = _validate_route_segment(skill_id, name="skill_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
+                payload = self._read_json_body()
+                if payload is None:
+                    return True
+                markdown = str(payload.get("markdown", "") or "")
+                if not markdown.strip():
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "markdown is required"})
+                    return True
+                try:
+                    detail = api.save_skill(skill_id, markdown)
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
+                return True
+            if parsed.path.startswith("/api/memory/sessions/") and parsed.path.endswith("/save"):
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) != 6:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                try:
+                    _, _, _, launcher_type, launcher_id, _ = parts
+                    launcher_type = _validate_launcher_type(launcher_type)
+                    launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
+                payload = self._read_json_body()
+                if payload is None:
+                    return True
+                detail = api.save_memory_session(launcher_type, launcher_id, payload)
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                self._write_json(HTTPStatus.OK, {"status": "ok", "session": detail})
+                return True
+            return False
+
+        def _dispatch_dynamic_delete(self, parsed) -> bool:
+            if parsed.path.startswith("/api/skills/"):
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) != 3:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                try:
+                    _, _, skill_id = parts
+                    skill_id = _validate_route_segment(skill_id, name="skill_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
                 if not api.delete_skill(skill_id):
                     self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
+                    return True
                 self._write_json(HTTPStatus.OK, {"status": "ok", "deleted": skill_id})
-                return
+                return True
             if parsed.path.startswith("/api/knowledge/"):
                 parts = [unquote(part) for part in parsed.path.split("/") if part]
                 if len(parts) != 3:
                     self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
+                    return True
                 try:
                     _, _, raw_entry_id = parts
                     entry_id = int(raw_entry_id)
                 except ValueError:
                     self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "knowledge_id must be an integer"})
-                    return
+                    return True
                 if not api.delete_knowledge_entry(entry_id):
                     self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
-                    return
+                    return True
                 self._write_json(HTTPStatus.OK, {"status": "ok", "deleted": entry_id})
+                return True
+            return False
+
+        def _get_healthz(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, {"status": "ok"})
+
+        def _get_auth_state(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.auth_state(self._session_token()))
+
+        def _get_dashboard(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.dashboard_snapshot())
+
+        def _get_portrait(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            character = str(query.get("character", [""])[0] or "").strip()
+            if not character:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "character is required"})
                 return
-            self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+            try:
+                asset = api.get_character_portrait(character)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            if asset is None:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                return
+            body, content_type = asset
+            self._write_bytes(HTTPStatus.OK, body, content_type)
+
+        def _get_console(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.console_panels())
+
+        def _get_runtime(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.runtime_stats())
+
+        def _get_recent_events(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            limit = _coerce_limit(query.get("limit", ["50"])[0])
+            self._write_json(HTTPStatus.OK, api.recent_events(limit=limit))
+
+        def _get_behavior_events(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            limit = _coerce_limit(query.get("limit", ["80"])[0])
+            launcher_type = str(query.get("launcher_type", [""])[0] or "").strip()
+            launcher_id = str(query.get("launcher_id", [""])[0] or "").strip()
+            if launcher_type:
+                try:
+                    launcher_type = _validate_launcher_type(launcher_type)
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return
+            if launcher_id:
+                try:
+                    launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return
+            self._write_json(
+                HTTPStatus.OK,
+                api.behavior_events(limit=limit, launcher_type=launcher_type, launcher_id=launcher_id),
+            )
+
+        def _get_character_panel(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            character = query.get("character", [""])[0]
+            self._write_json(HTTPStatus.OK, api.get_character_panel(character))
+
+        def _get_ai_panel(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.get_ai_panel())
+
+        def _get_memory_panel(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.get_memory_panel())
+
+        def _get_abilities_panel(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.get_abilities_panel())
+
+        def _get_proactive_panel(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            limit = _coerce_limit(query.get("limit", ["12"])[0])
+            self._write_json(HTTPStatus.OK, api.get_proactive_panel(limit=limit))
+
+        def _get_skills_panel(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.get_skills_panel())
+
+        def _get_sidecar_panel(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
+            self._write_json(HTTPStatus.OK, api.get_sidecar_panel(refresh=refresh))
+
+        def _get_qq_login_panel(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
+            self._write_json(HTTPStatus.OK, api.get_qq_login_panel(refresh=refresh))
+
+        def _get_qq_login_qrcode_image(self, parsed) -> None:
+            try:
+                asset = api.get_qq_login_qrcode_image()
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            if asset is None:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                return
+            body, content_type = asset
+            self._write_bytes(HTTPStatus.OK, body, content_type)
+
+        def _get_other_panel(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.get_other_panel())
+
+        def _get_user_panel(self, parsed, current_user: dict[str, Any] | None) -> None:
+            if not isinstance(current_user, dict):
+                self._write_json(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized", "reason": "authentication required"})
+                return
+            self._write_json(HTTPStatus.OK, api.get_user_panel(str(current_user["username"])))
+
+        def _get_marketplace_search(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            q = query.get("q", [""])[0]
+            source_id = query.get("source_id", [""])[0]
+            limit = _coerce_limit(query.get("limit", ["12"])[0])
+            if source_id:
+                try:
+                    source_id = _validate_route_segment(source_id, name="source_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return
+            self._write_json(HTTPStatus.OK, api.search_marketplace(q, source_id=source_id, limit=limit))
+
+        def _get_skills(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.list_skills())
+
+        def _get_tools(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.list_tools())
+
+        def _get_skill_pack_template(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.skill_pack_template())
+
+        def _get_skill_template(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.new_skill_template())
+
+        def _get_sessions(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            limit = _coerce_limit(query.get("limit", ["24"])[0])
+            self._write_json(HTTPStatus.OK, {"sessions": api.list_sessions(limit=limit)})
+
+        def _post_onebot_events(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            status, body = api.handle_json(payload)
+            if status < HTTPStatus.BAD_REQUEST:
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.end_headers()
+                return
+            self._write_json(status, body)
+
+        def _post_auth_bootstrap(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                body, cookie = api.bootstrap_auth(payload)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
+
+        def _post_auth_login(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                body, cookie = api.login(payload)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
+
+        def _post_auth_logout(self, parsed) -> None:
+            self._read_json_body(allow_empty=True)
+            body, cookie = api.logout(self._session_token())
+            self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
+
+        def _post_change_password(self, parsed, current_user: dict[str, Any] | None) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                username = str((current_user or {}).get("username", ""))
+                body = api.change_password(username, payload)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, body)
+
+        def _post_reload_skills(self, parsed) -> None:
+            self._read_json_body(allow_empty=True)
+            self._write_json(HTTPStatus.OK, api.reload_skills())
+
+        def _post_test_provider(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                result = api.test_provider(payload)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _post_test_sidecar(self, parsed) -> None:
+            self._read_json_body(allow_empty=True)
+            self._write_json(HTTPStatus.OK, api.test_sidecar())
+
+        def _post_character_panel(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._write_json(HTTPStatus.OK, api.save_character_panel(payload))
+
+        def _post_character_preview(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                self._write_json(HTTPStatus.OK, api.preview_character_panel(payload))
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_ai_panel(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._write_json(HTTPStatus.OK, api.save_ai_panel(payload))
+
+        def _post_abilities_panel(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._write_json(HTTPStatus.OK, api.save_abilities_panel(payload))
+
+        def _post_proactive_draft(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                self._write_json(HTTPStatus.OK, api.generate_proactive_draft(payload))
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_sidecar_panel(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._write_json(HTTPStatus.OK, api.save_sidecar_panel(payload))
+
+        def _post_qq_login_panel(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._write_json(HTTPStatus.OK, api.save_qq_login_panel(payload))
+
+        def _post_qq_login_refresh(self, parsed) -> None:
+            self._read_json_body(allow_empty=True)
+            try:
+                self._write_json(HTTPStatus.OK, api.refresh_qq_login_panel())
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_other_panel(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._write_json(HTTPStatus.OK, api.save_other_panel(payload))
+
+        def _post_directory_member_save(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                self._write_json(HTTPStatus.OK, {"status": "ok", "member": api.save_directory_member(payload)})
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_directory_member_reset_persona(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                detail = api.reset_directory_member_persona(payload)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            if detail is None:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                return
+            self._write_json(HTTPStatus.OK, {"status": "ok", "member": detail})
+
+        def _post_directory_sync(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                self._write_json(
+                    HTTPStatus.OK,
+                    api.sync_group_members(str(payload.get("group_id", "") or "")),
+                )
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_knowledge_save(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                self._write_json(HTTPStatus.OK, {"status": "ok", "entry": api.save_knowledge_entry(payload)})
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_marketplace_import(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            source_id = str(payload.get("source_id", "") or "")
+            github_url = str(payload.get("github_url", "") or "")
+            if not github_url:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "github_url is required"})
+                return
+            if source_id:
+                try:
+                    source_id = _validate_route_segment(source_id, name="source_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return
+            try:
+                detail = api.import_marketplace_skill(source_id=source_id, github_url=github_url)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
+
+        def _post_skill_pack_export(self, parsed) -> None:
+            payload = self._read_json_body(allow_empty=True)
+            if payload is None:
+                return
+            skill_ids = payload.get("skill_ids", [])
+            if not isinstance(skill_ids, list):
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "skill_ids must be a list"})
+                return
+            result = api.export_skill_pack(
+                skill_ids=[str(item) for item in skill_ids if str(item).strip()],
+                include_builtin=bool(payload.get("include_builtin", False)),
+                name=str(payload.get("name", "") or ""),
+                description=str(payload.get("description", "") or ""),
+            )
+            self._write_json(HTTPStatus.OK, result)
+
+        def _post_skill_pack_import(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            pack_payload = payload.get("bundle")
+            if pack_payload is None:
+                pack_payload = payload.get("payload")
+            if pack_payload is None:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "bundle is required"})
+                return
+            try:
+                result = api.import_skill_pack(pack_payload, overwrite=bool(payload.get("overwrite", True)))
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, {"status": "ok", "pack": result})
+
+        def _post_skill_install(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            markdown = str(payload.get("markdown", "") or "")
+            filename = payload.get("filename")
+            if not markdown.strip():
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "markdown is required"})
+                return
+            try:
+                detail = api.install_skill(markdown, filename=str(filename) if filename else None)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -1111,6 +1177,24 @@ def make_handler(api: HttpApi):
             self._write_json(HTTPStatus.UNAUTHORIZED, status)
             return None
 
+        def _authorize_api_request(
+            self,
+            method: str,
+            path: str,
+            current_user: dict[str, Any] | None,
+        ) -> bool:
+            if str((current_user or {}).get("role", "")).strip().lower() == "admin":
+                return True
+            if method == "GET" and path in _NON_ADMIN_GET_PATHS:
+                return True
+            if method == "POST" and path in _NON_ADMIN_POST_PATHS:
+                return True
+            self._write_json(
+                HTTPStatus.FORBIDDEN,
+                {"status": "forbidden", "reason": "admin privileges required"},
+            )
+            return False
+
         def _read_json_body(self, *, allow_empty: bool = False) -> dict[str, Any] | None:
             try:
                 raw = _read_request_body(self)
@@ -1144,8 +1228,10 @@ def make_handler(api: HttpApi):
     return Handler
 
 
-def run_server(api: HttpApi, host: str, port: int) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(api))
+def run_server(api: HttpApi, host: str, port: int) -> Any:
+    from .http_api_async import AsyncCompatServer
+
+    return AsyncCompatServer(api, host, port)
 
 
 def _validate_route_segment(raw_value: str, *, name: str) -> str:

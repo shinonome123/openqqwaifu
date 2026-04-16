@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -62,6 +63,24 @@ class SearchDeciderTests(unittest.TestCase):
         self.assertEqual(calls, ["最新汇率多少"])
         self.assertEqual(first.summary, second.summary)
         self.assertEqual(decider.cache_size(), 1)
+
+    def test_async_build_context_uses_async_fetcher(self) -> None:
+        class _AsyncOnlySearchClient:
+            def fetch(self, query: str) -> list[SearchResult]:
+                raise AssertionError("sync fetch should not run")
+
+            async def afetch(self, query: str) -> list[SearchResult]:
+                return [SearchResult(title="hangzhou weather", snippet="cloudy, 22C")]
+
+        decider = SearchDecider(
+            AppConfig(search_enabled=True, search_result_limit=2),
+            search_client=_AsyncOnlySearchClient(),
+        )
+        context = asyncio.run(decider.asearch_query("hangzhou weather", reason="manual"))
+
+        self.assertTrue(context.active)
+        self.assertEqual(context.query, "hangzhou weather")
+        self.assertIn("hangzhou weather", context.summary)
 
     def test_service_uses_search_summary_in_fallback_reply(self) -> None:
         service, _ = build_default_service(AppConfig(search_enabled=True))

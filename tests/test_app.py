@@ -83,6 +83,19 @@ class _CoordinatedUserSaveStore(InMemoryStore):
         return super().save(session)
 
 
+class _DelayedCaptureOutbound(CapturingOutboundPort):
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+
+    def send(self, message) -> None:  # type: ignore[no-untyped-def]
+        raise AssertionError("sync send should not run for delayed async outbound")
+
+    async def send_async(self, message) -> None:  # type: ignore[no-untyped-def]
+        with self._lock:
+            self.sent.append(message)
+
+
 class WaifuServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service, self.outbound = build_default_service()
@@ -115,7 +128,6 @@ class WaifuServiceTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-
     def test_person_event_updates_preferred_name(self) -> None:
         event = InboundEvent(
             launcher_id="783190298",
@@ -516,6 +528,7 @@ class WaifuServiceTests(unittest.TestCase):
                     ],
                 )
             )
+            service1.close(timeout=5.0)
 
             service2, outbound2 = build_file_service(config)
             second = service2.handle_event(
@@ -527,6 +540,7 @@ class WaifuServiceTests(unittest.TestCase):
                     segments=[MessageSegment(kind="text", text="继续说呀")],
                 )
             )
+            service2.close(timeout=5.0)
 
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
@@ -594,6 +608,43 @@ class WaifuServiceTests(unittest.TestCase):
         assert second is not None
         self.assertIn("小米集团", second.text)
         self.assertIn("42 港元", second.text)
+
+    def test_handle_event_uses_async_search_context_when_available(self) -> None:
+        service, _ = build_default_service(AppConfig(search_enabled=True))
+        async_called = threading.Event()
+
+        async def fake_abuild_context(event: InboundEvent) -> SearchContext:
+            async_called.set()
+            return SearchContext(
+                query="北京天气",
+                summary="北京天气：今天晴，最高温 26 度。",
+                results=[SearchResult(title="北京天气", snippet="今天晴，最高温 26 度。")],
+                fetched_at=time.time(),
+                reason="keyword-hit",
+            )
+
+        def fail_build_context(event: InboundEvent) -> SearchContext:
+            raise AssertionError("sync build_context should not be used")
+
+        service.search.should_search = lambda event: True  # type: ignore[method-assign]
+        service.search.abuild_context = fake_abuild_context  # type: ignore[method-assign]
+        service.search.build_context = fail_build_context  # type: ignore[method-assign]
+
+        reply = service.handle_event(
+            InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="今天北京天气怎么样")],
+            )
+        )
+
+        self.assertTrue(async_called.is_set())
+        self.assertIsNotNone(reply)
+        session = service.memory.load("783190298", "person")
+        last_search = session.metadata.get("last_search", {})
+        self.assertEqual(last_search.get("query"), "北京天气")
 
     def test_pending_search_clarification_extends_query_without_second_mention(self) -> None:
         config = AppConfig(
@@ -777,6 +828,36 @@ class WaifuServiceTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(result)
+        self.assertEqual(len(outbound.sent), 1)
+
+    def test_group_response_delay_does_not_block_request_thread_for_real_outbound(self) -> None:
+        outbound = _DelayedCaptureOutbound()
+        service, _ = build_default_service(
+            AppConfig(
+                bot_account_id="3518944354",
+                group_reply_requires_mention=False,
+                group_response_delay_seconds=0.2,
+            )
+        )
+        service.outbound = outbound
+
+        started = time.monotonic()
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="hello there")],
+            )
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertIsNotNone(result)
+        self.assertLess(elapsed, 0.15)
+        self.assertEqual(len(outbound.sent), 0)
+
+        service.flush_background_tasks(timeout=2.0)
         self.assertEqual(len(outbound.sent), 1)
 
     def test_repeat_trigger_replies_when_same_group_line_is_repeated(self) -> None:
@@ -1039,6 +1120,7 @@ class WaifuServiceTests(unittest.TestCase):
                 segments=[MessageSegment(kind="text", text="我喜欢雨天和猫")],
             )
         )
+        service.flush_background_tasks(timeout=5.0)
 
         self.assertIsNotNone(result)
         knowledge_entries = service.state_store.list_knowledge(

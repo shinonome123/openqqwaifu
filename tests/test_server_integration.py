@@ -20,6 +20,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from waifu_standalone.app import build_runtime_service
+from waifu_standalone.cells.auth import AuthManager
 from waifu_standalone.cells.skill_registry import build_skill_markdown_template
 from waifu_standalone.config import AppConfig, QQSidecarConfig
 from waifu_standalone.http_api import HttpApi, run_server
@@ -80,6 +81,39 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["user"]["username"], "admin")
         return opener
+
+    def _build_login_opener(
+        self,
+        host: str,
+        port: int,
+        *,
+        username: str,
+        password: str,
+    ) -> urllib.request.OpenerDirector:
+        jar = cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        request = urllib.request.Request(
+            f"http://{host}:{port}/api/auth/login",
+            data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with opener.open(request, timeout=5) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["user"]["username"], username)
+        return opener
+
+    @staticmethod
+    def _seed_users(data_root: str, *users: tuple[str, str, str]) -> None:
+        auth = AuthManager(data_root)
+        auth.bootstrap_admin("admin", "password123")
+        if not users:
+            return
+        with auth._lock:
+            for username, password, role in users:
+                auth._users[username] = auth._build_user_record(username, password=password, role=role)
+            auth._save_locked()
 
     def _open_json(
         self,
@@ -215,6 +249,33 @@ class ServerIntegrationTests(unittest.TestCase):
                 self.assertEqual(body["session_count"], 1)
                 self.assertEqual(body["recent_outbound_count"], 1)
                 self.assertEqual(body["tools"]["count"], 4)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_non_admin_login_is_forbidden_from_admin_api_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._seed_users(tmpdir, ("viewer", "password123", "user"))
+            service, _ = build_runtime_service(AppConfig(data_root=tmpdir))
+            api = HttpApi(service)
+            server = run_server(api, "127.0.0.1", 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                host, port = server.server_address
+                opener = self._build_login_opener(host, port, username="viewer", password="password123")
+
+                _, user_panel = self._open_json(opener, f"http://{host}:{port}/api/panels/user")
+                self.assertEqual(user_panel["current_user"]["username"], "viewer")
+                self.assertNotIn("members", user_panel)
+
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    opener.open(f"http://{host}:{port}/api/dashboard", timeout=5)
+
+                self.assertEqual(ctx.exception.code, HTTPStatus.FORBIDDEN)
+                body = json.loads(ctx.exception.read().decode("utf-8"))
+                self.assertEqual(body["status"], "forbidden")
             finally:
                 server.shutdown()
                 server.server_close()

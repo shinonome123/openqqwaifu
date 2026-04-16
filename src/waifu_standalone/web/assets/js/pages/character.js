@@ -44,6 +44,7 @@ export function mount(root) {
   let dragStartX = null;
   let previewing = false;
   let preview = null;
+  let loadRequestId = 0;
 
   root.innerHTML = "";
   const container = el("div", { class: "page" });
@@ -69,6 +70,7 @@ export function mount(root) {
   }
 
   async function loadAll(character = "") {
+    const requestId = ++loadRequestId;
     loading = true;
     render();
     try {
@@ -77,14 +79,17 @@ export function mount(root) {
         api.getOtherPanel(),
         api.getAiPanel(),
       ]);
-      if (stopped) return;
+      if (stopped || requestId !== loadRequestId) return false;
       other = nextOther;
       ai = nextAi;
       applyBundle(nextBundle);
+      return true;
     } catch (err) {
+      if (stopped || requestId !== loadRequestId) return false;
       toastError(String(err?.message || err));
+      return false;
     } finally {
-      if (!stopped) {
+      if (!stopped && requestId === loadRequestId) {
         loading = false;
         render();
       }
@@ -93,8 +98,8 @@ export function mount(root) {
 
   async function selectCharacter(name, { scroll = false } = {}) {
     if (!name) return;
-    await loadAll(name);
-    if (scroll) {
+    const applied = await loadAll(name);
+    if (applied && scroll) {
       scrollToWorkbench();
     }
   }
@@ -359,8 +364,6 @@ export function mount(root) {
 
   function renderHeader() {
     const runtimeName = String(other?.service_name || "");
-    const configPath = String(other?.config_path || "");
-    const dataRoot = String(other?.data_root || "");
     const activeCharacter = String(bundle?.current_character || "");
     return el("div", { class: "page-header" }, [
       el("div", { class: "page-header-text" }, [
@@ -369,8 +372,6 @@ export function mount(root) {
         el("div", { class: "row" }, [
           runtimeName ? chip({ label: runtimeName, variant: "info" }) : null,
           activeCharacter ? chip({ label: `live:${activeCharacter}`, variant: "ok" }) : null,
-          dataRoot ? chip({ label: dataRoot, variant: "outline" }) : null,
-          configPath ? chip({ label: configPath, variant: "outline" }) : null,
         ]),
       ]),
       el("div", { class: "page-actions" }, [
@@ -824,8 +825,8 @@ function cloneVariant(source) {
 
 function cloneShared(source) {
   return {
-    assistant_name: String(source?.assistant_name || "琉璃"),
-    user_name: String(source?.user_name || "用户"),
+    assistant_name: String(source?.assistant_name || "Assistant"),
+    user_name: String(source?.user_name || "User"),
     language: String(source?.language || "简体中文"),
   };
 }

@@ -145,13 +145,15 @@ export function mount(root) {
               }),
             ]),
           ]),
-          el("div", { class: "row" }, [
-            chip({ label: skill.id, variant: "outline" }),
-            skill.source_kind ? chip({ label: skill.source_kind, variant: "info" }) : null,
-            skill.source ? chip({ label: skill.source, variant: "outline" }) : null,
-            skill.command_dispatch === "tool"
-              ? chip({ label: `tool:${skill.command_tool || "unknown"}`, variant: "ok" })
-              : chip({ label: "prompt", variant: "outline" }),
+            el("div", { class: "row" }, [
+              chip({ label: skill.id, variant: "outline" }),
+              skill.source_kind ? chip({ label: skill.source_kind, variant: "info" }) : null,
+              safeSourceLabel(skill.source)
+                ? chip({ label: safeSourceLabel(skill.source), variant: "outline" })
+                : null,
+              skill.command_dispatch === "tool"
+                ? chip({ label: `tool:${skill.command_tool || "unknown"}`, variant: "ok" })
+                : chip({ label: "prompt", variant: "outline" }),
           ]),
         ]),
       ),
@@ -257,4 +259,16 @@ export function mount(root) {
     stopped = true;
     if (unsubLang) unsubLang();
   };
+}
+
+function safeSourceLabel(source) {
+  const value = String(source || "").trim();
+  if (!value) return "";
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname || parsed.origin || value;
+  } catch (err) {
+    const normalized = value.replace(/\\/g, "/");
+    return normalized.split("/").pop() || "";
+  }
 }

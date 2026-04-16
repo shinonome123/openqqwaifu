@@ -10,6 +10,9 @@ from .models import SessionMemory
 HISTORY_LIMIT = 120
 _SAFE_LAUNCHER_ID_CHARS = frozenset("-_")
 _ALLOWED_LAUNCHER_TYPES = frozenset({"group", "person"})
+_SESSION_LOG_SUFFIX = ".jsonl"
+_LEGACY_SESSION_SUFFIX = ".json"
+_COMPACT_THRESHOLD_BYTES = 256 * 1024
 
 
 def clone_session(session: SessionMemory) -> SessionMemory:
@@ -67,35 +70,42 @@ class FileMemoryStore:
 
     def load(self, launcher_id: str, launcher_type: str, character_id: str = "") -> SessionMemory:
         safe_character_id = self._sanitize_character_id(character_id)
-        path = self._session_path(launcher_id, launcher_type, character_id=safe_character_id)
-        if not path.exists():
-            return SessionMemory(
+        log_path = self._session_path(launcher_id, launcher_type, character_id=safe_character_id)
+        loaded = self._load_latest_snapshot(
+            log_path,
+            launcher_id=launcher_id,
+            launcher_type=launcher_type,
+            character_id=safe_character_id,
+        )
+        if loaded is not None:
+            return loaded
+
+        legacy_path = self._legacy_session_path(launcher_id, launcher_type, character_id=safe_character_id)
+        if legacy_path.exists():
+            legacy_session = self._load_legacy_snapshot(
+                legacy_path,
                 launcher_id=launcher_id,
                 launcher_type=launcher_type,
                 character_id=safe_character_id,
             )
-        data = json.loads(path.read_text(encoding="utf-8"))
-        resolved_character_id = str(data.get("character_id", safe_character_id)).strip() or safe_character_id
+            self._append_snapshot(log_path, legacy_session)
+            return legacy_session
+
         return SessionMemory(
-            launcher_id=str(data.get("launcher_id", launcher_id)),
-            launcher_type=str(data.get("launcher_type", launcher_type)),
-            character_id=resolved_character_id,
-            history=list(data.get("history", [])),
-            preferred_name=str(data.get("preferred_name", "")),
-            metadata=deepcopy(data.get("metadata", {})),
+            launcher_id=launcher_id,
+            launcher_type=launcher_type,
+            character_id=safe_character_id,
         )
 
     def save(self, session: SessionMemory) -> SessionMemory:
         session.character_id = self._sanitize_character_id(session.character_id)
-        path = self._session_path(session.launcher_id, session.launcher_type, character_id=session.character_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(
-            json.dumps(asdict(session), ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        tmp_path.replace(path)
-        return clone_session(session)
+        log_path = self._session_path(session.launcher_id, session.launcher_type, character_id=session.character_id)
+        self._append_snapshot(log_path, session)
+        self._maybe_compact(log_path, session)
+        # Disk is the source of truth for this store; the caller's session object
+        # already mirrors what we persisted, so returning it directly avoids a
+        # per-message deepcopy on the hot path.
+        return session
 
     def append(self, launcher_id: str, launcher_type: str, line: str, character_id: str = "") -> SessionMemory:
         session = self.load(launcher_id, launcher_type, character_id=character_id)
@@ -104,46 +114,53 @@ class FileMemoryStore:
         return self.save(session)
 
     def list_sessions(self) -> list[SessionMemory]:
-        sessions: list[SessionMemory] = []
-        for path in sorted(self.root.glob("*.json")):
-            parsed = self._parse_session_path(path)
-            if parsed is None:
-                continue
-            character_id, launcher_type, launcher_id = parsed
-            try:
-                sessions.append(self.load(launcher_id, launcher_type, character_id=character_id))
-            except (ValueError, json.JSONDecodeError, OSError):
-                continue
-        for directory in sorted(path for path in self.root.iterdir() if path.is_dir()):
-            for path in sorted(directory.glob("*.json")):
+        sessions: dict[tuple[str, str, str], SessionMemory] = {}
+        for suffix in (_SESSION_LOG_SUFFIX, _LEGACY_SESSION_SUFFIX):
+            for path in self._iter_session_paths(suffix):
                 parsed = self._parse_session_path(path)
                 if parsed is None:
                     continue
+                if parsed in sessions:
+                    continue
                 character_id, launcher_type, launcher_id = parsed
                 try:
-                    sessions.append(self.load(launcher_id, launcher_type, character_id=character_id))
+                    sessions[parsed] = self.load(launcher_id, launcher_type, character_id=character_id)
                 except (ValueError, json.JSONDecodeError, OSError):
                     continue
-        return sessions
+        return [sessions[key] for key in sorted(sessions)]
 
     def session_path(self, launcher_id: str, launcher_type: str, character_id: str = "") -> Path:
         return self._session_path(launcher_id, launcher_type, character_id=character_id)
 
     def _session_path(self, launcher_id: str, launcher_type: str, character_id: str = "") -> Path:
+        return self._build_session_path(
+            launcher_id,
+            launcher_type,
+            character_id=character_id,
+            suffix=_SESSION_LOG_SUFFIX,
+        )
+
+    def _legacy_session_path(self, launcher_id: str, launcher_type: str, character_id: str = "") -> Path:
+        return self._build_session_path(
+            launcher_id,
+            launcher_type,
+            character_id=character_id,
+            suffix=_LEGACY_SESSION_SUFFIX,
+        )
+
+    def _build_session_path(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        character_id: str = "",
+        suffix: str,
+    ) -> Path:
         safe_launcher_type = self._sanitize_launcher_type(launcher_type)
         safe_launcher_id = self._sanitize_launcher_id(launcher_id)
         safe_character_id = self._sanitize_character_id(character_id)
         target_root = self.root / safe_character_id if safe_character_id else self.root
-        path = (target_root / f"{safe_launcher_type}_{safe_launcher_id}.json").resolve()
-        root = self.root.resolve()
-        if not path.is_relative_to(root):
-            raise ValueError("session path escapes storage root")
-        return path
-
-    def _legacy_session_path(self, launcher_id: str, launcher_type: str) -> Path:
-        safe_launcher_type = self._sanitize_launcher_type(launcher_type)
-        safe_launcher_id = self._sanitize_launcher_id(launcher_id)
-        path = (self.root / f"{safe_launcher_type}_{safe_launcher_id}.json").resolve()
+        path = (target_root / f"{safe_launcher_type}_{safe_launcher_id}{suffix}").resolve()
         root = self.root.resolve()
         if not path.is_relative_to(root):
             raise ValueError("session path escapes storage root")
@@ -157,8 +174,10 @@ class FileMemoryStore:
         relative_parts = resolved.relative_to(root).parts
         if not relative_parts:
             return None
-        filename = Path(relative_parts[-1]).stem
-        parts = filename.split("_", 1)
+        filename = Path(relative_parts[-1])
+        if filename.suffix not in {_SESSION_LOG_SUFFIX, _LEGACY_SESSION_SUFFIX}:
+            return None
+        parts = filename.stem.split("_", 1)
         if len(parts) != 2:
             return None
         launcher_type, launcher_id = parts
@@ -166,6 +185,94 @@ class FileMemoryStore:
             return None
         character_id = relative_parts[0] if len(relative_parts) == 2 else ""
         return character_id, launcher_type, launcher_id
+
+    def _iter_session_paths(self, suffix: str) -> list[Path]:
+        paths = sorted(self.root.glob(f"*{suffix}"))
+        for directory in sorted(path for path in self.root.iterdir() if path.is_dir()):
+            paths.extend(sorted(directory.glob(f"*{suffix}")))
+        return paths
+
+    def _load_latest_snapshot(
+        self,
+        path: Path,
+        *,
+        launcher_id: str,
+        launcher_type: str,
+        character_id: str,
+    ) -> SessionMemory | None:
+        if not path.exists():
+            return None
+        for raw_line in reversed(path.read_text(encoding="utf-8").splitlines()):
+            line = raw_line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            return self._session_from_payload(
+                data,
+                launcher_id=launcher_id,
+                launcher_type=launcher_type,
+                character_id=character_id,
+            )
+        return None
+
+    def _load_legacy_snapshot(
+        self,
+        path: Path,
+        *,
+        launcher_id: str,
+        launcher_type: str,
+        character_id: str,
+    ) -> SessionMemory:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return self._session_from_payload(
+            data,
+            launcher_id=launcher_id,
+            launcher_type=launcher_type,
+            character_id=character_id,
+        )
+
+    def _session_from_payload(
+        self,
+        data: object,
+        *,
+        launcher_id: str,
+        launcher_type: str,
+        character_id: str,
+    ) -> SessionMemory:
+        if not isinstance(data, dict):
+            raise json.JSONDecodeError("session payload must be an object", doc=str(data), pos=0)
+        resolved_character_id = str(data.get("character_id", character_id)).strip() or character_id
+        raw_history = data.get("history", [])
+        history = [str(item) for item in raw_history] if isinstance(raw_history, list) else []
+        raw_metadata = data.get("metadata", {})
+        metadata: dict[str, object] = raw_metadata if isinstance(raw_metadata, dict) else {}
+        return SessionMemory(
+            launcher_id=str(data.get("launcher_id", launcher_id)),
+            launcher_type=str(data.get("launcher_type", launcher_type)),
+            character_id=resolved_character_id,
+            history=history,
+            preferred_name=str(data.get("preferred_name", "")),
+            metadata=metadata,
+        )
+
+    def _append_snapshot(self, path: Path, session: SessionMemory) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(asdict(session), ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n")
+
+    def _maybe_compact(self, path: Path, session: SessionMemory) -> None:
+        try:
+            if path.stat().st_size <= _COMPACT_THRESHOLD_BYTES:
+                return
+        except OSError:
+            return
+        tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+        tmp_path.write_text(
+            json.dumps(asdict(session), ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
 
     @staticmethod
     def _sanitize_launcher_id(launcher_id: str) -> str:

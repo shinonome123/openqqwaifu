@@ -94,6 +94,7 @@ export function openModal({ title, body, actions }) {
   return new Promise((resolve) => {
     const root = ensureModalRoot();
     const modal = document.createElement("div");
+    let closed = false;
     modal.className = "modal";
     modal.innerHTML = `
       <div class="modal-header">
@@ -131,12 +132,15 @@ export function openModal({ title, body, actions }) {
     requestAnimationFrame(() => root.classList.add("is-open"));
 
     function finish(value) {
+      if (closed) return;
+      closed = true;
       root.classList.remove("is-open");
       setTimeout(() => {
         root.hidden = true;
         root.innerHTML = "";
       }, 200);
       document.removeEventListener("keydown", keyHandler);
+      root.removeEventListener("click", clickHandler);
       resolve(value);
     }
 
@@ -144,10 +148,12 @@ export function openModal({ title, body, actions }) {
       if (e.key === "Escape") finish(null);
     }
 
-    document.addEventListener("keydown", keyHandler);
-    root.addEventListener("click", (e) => {
+    function clickHandler(e) {
       if (e.target === root || e.target.closest("[data-dismiss]")) finish(null);
-    });
+    }
+
+    document.addEventListener("keydown", keyHandler);
+    root.addEventListener("click", clickHandler);
   });
 }
 

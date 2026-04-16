@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import threading
@@ -87,6 +88,20 @@ class OneBotActionsTests(unittest.TestCase):
         self.assertEqual(_CaptureHandler.requests[0][0], "/send_private_msg")
         payload = _CaptureHandler.requests[0][1]
         self.assertEqual(payload["user_id"], 10001)
+
+    def test_async_send_posts_as_onebot_action(self) -> None:
+        message = OutboundMessage(
+            launcher_id="612475113",
+            launcher_type="group",
+            text="async hello",
+        )
+
+        asyncio.run(self.port.send_async(message))
+
+        self.assertEqual(_CaptureHandler.requests[0][0], "/send_group_msg")
+        payload = _CaptureHandler.requests[0][1]
+        self.assertEqual(payload["group_id"], 612475113)
+        self.assertEqual(payload["message"][0]["data"]["text"], "async hello")
 
     def test_non_ok_onebot_response_raises(self) -> None:
         _CaptureHandler.response_body = {"status": "failed", "retcode": 1200}

@@ -106,19 +106,25 @@ const ROUTES = [
     mount: advanced.mount,
   },
 ];
+const NON_ADMIN_ROUTE_IDS = new Set(["user"]);
 
 function iconPath(d) {
   return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}" /></svg>`;
 }
 
-function buildNav(onNavigate, currentId) {
+function visibleRoutesForUser(user) {
+  const isAdmin = user?.role === "admin";
+  return ROUTES.filter((route) => isAdmin || NON_ADMIN_ROUTE_IDS.has(route.id));
+}
+
+function buildNav(routes, onNavigate, currentId) {
   const nav = document.getElementById("nav");
   if (!nav) return;
   nav.innerHTML = "";
 
   const groupsOrder = ["control", "identity", "intelligence", "behavior", "runtime", "system"];
   const byGroup = new Map();
-  ROUTES.forEach((route) => {
+  routes.forEach((route) => {
     const list = byGroup.get(route.group) || [];
     list.push(route);
     byGroup.set(route.group, list);
@@ -224,8 +230,21 @@ function initTopbarUser(user, router) {
   const btn = document.getElementById("topbar-user");
   if (!btn || !user) return;
   btn.hidden = false;
-  btn.textContent = `${user.username} · ${roleLabel(user.role)}`;
-  btn.addEventListener("click", () => router.navigate("user"));
+  btn.textContent = `${user.username} | ${roleLabel(user.role)}`;
+  btn.addEventListener("click", () => {
+    const target = router.route("user") ? "user" : router.current();
+    router.navigate(target);
+  });
+}
+
+function initBrandLink(router, targetRouteId) {
+  const brand = document.querySelector(".sidebar-brand");
+  if (!brand || !targetRouteId) return;
+  brand.setAttribute("href", `#${targetRouteId}`);
+  brand.addEventListener("click", (event) => {
+    event.preventDefault();
+    router.navigate(targetRouteId);
+  });
 }
 
 async function main() {
@@ -257,16 +276,21 @@ function mountConsole(currentUser) {
   if (!app || !outlet) return;
   app.className = "app";
 
-  const router = createRouter(ROUTES, "overview");
+  const visibleRoutes = visibleRoutesForUser(currentUser);
+  const defaultRoute = visibleRoutes.some((route) => route.id === "overview")
+    ? "overview"
+    : visibleRoutes[0]?.id || "user";
+  const router = createRouter(visibleRoutes, defaultRoute);
   let healthTimer = null;
   let currentTeardown = null;
 
-  buildNav((id) => router.navigate(id), router.current());
+  buildNav(visibleRoutes, (id) => router.navigate(id), router.current());
   applyI18nTo(document.body);
   initSidebarToggle();
   initLangPicker();
   initThemeToggle();
   initTopbarUser(currentUser, router);
+  initBrandLink(router, defaultRoute);
 
   router.onChange((route) => {
     if (typeof currentTeardown === "function") {
@@ -301,7 +325,7 @@ function mountConsole(currentUser) {
     });
     const topbarUser = document.getElementById("topbar-user");
     if (topbarUser && currentUser) {
-      topbarUser.textContent = `${currentUser.username} · ${roleLabel(currentUser.role)}`;
+      topbarUser.textContent = `${currentUser.username} | ${roleLabel(currentUser.role)}`;
     }
   });
 
@@ -310,10 +334,14 @@ function mountConsole(currentUser) {
 
   const saveBtn = document.getElementById("save-config");
   if (saveBtn) {
-    saveBtn.addEventListener("click", () => {
-      const active = document.querySelector(".page-actions .btn.is-primary");
-      if (active && active !== saveBtn) active.click();
-    });
+    const canSaveConfig = currentUser?.role === "admin";
+    saveBtn.hidden = !canSaveConfig;
+    if (canSaveConfig) {
+      saveBtn.addEventListener("click", () => {
+        const active = document.querySelector(".page-actions .btn.is-primary");
+        if (active && active !== saveBtn) active.click();
+      });
+    }
   }
 
   return () => {

@@ -306,7 +306,7 @@ export function mount(root) {
         const trimmed = String(line || "").trim();
         let cls = "transcript-line";
         if (/^\s*(?:\u7528\u6237|user)\s*:/i.test(trimmed)) cls += " is-user";
-        if (/^\s*(?:\u52a9\u624b|assistant|\u7409\u7483)\s*:/i.test(trimmed)) cls += " is-assistant";
+        if (/^\s*(?:\u52a9\u624b|assistant)\s*:/i.test(trimmed)) cls += " is-assistant";
         transcript.appendChild(el("div", { class: cls, text: trimmed }));
       });
     }

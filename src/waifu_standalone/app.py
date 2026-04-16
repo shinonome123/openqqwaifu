@@ -1,23 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .cells.cards import CardManager
 from .cells.config import ConfigManager, serialize_app_config
-from .cells.embedding_service import EmbeddingClient
+from .cells.embedding_clients import EmbeddingClient, build_embedding_client
 from .cells.generator import Generator
+from .cells.image_clients import build_image_client
+from .cells.llm_clients import build_llm_client
 from .cells.marketplace import MarketplaceClient
 from .cells.skill_pack import build_skill_pack_template, export_skill_pack, import_skill_pack
 from .cells.skill_registry import SkillRegistry, SkillSpec, build_skill_markdown_template
 from .cells.tool_registry import ToolInvocation, ToolRegistry
+from .console_panels import ConsolePanels
 from .config import AppConfig
 from .contracts import OutboundPort
+from .knowledge_curator import KnowledgeCurator
 from .gateways.napcat_login import (
     NapCatLoginBridge,
     NapCatLoginError,
@@ -25,8 +31,10 @@ from .gateways.napcat_login import (
     qrcode_payload_to_image_source,
 )
 from .gateways.onebot_actions import OneBotActionClient, OneBotHttpOutboundPort
+from .http_transport import AsyncRuntime
 from .memory import FileMemoryStore, InMemoryStore
 from .models import EmotionState, InboundEvent, MessageSegment, OutboundMessage, SessionMemory
+from .notice_dispatcher import NoticeDispatcher
 from .organs.memory_graph import MemoryGraphBuilder
 from .organs.memories import Memory
 from .organs.proactive import ProactivePlanner
@@ -43,6 +51,8 @@ _MASK_SENTINEL = "..."
 _FOLLOW_UP_METADATA_KEY = "follow_up_until"
 _PENDING_SEARCH_METADATA_KEY = "pending_search"
 _PENDING_SEARCH_TTL_SECONDS = 1800.0
+_BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openqqwaifu-bg")
+_ASYNC_RUNTIME = AsyncRuntime()
 
 
 def _mask_key(key: str) -> str:
@@ -82,6 +92,12 @@ def _safe_float(payload: dict[str, object], key: str, default: float) -> float:
         return default
 
 
+def _close_component(component: object) -> None:
+    close = getattr(component, "close", None)
+    if callable(close):
+        close()
+
+
 @dataclass(slots=True)
 class WaifuService:
     config: AppConfig
@@ -110,6 +126,16 @@ class WaifuService:
     _event_counter: int = 0
     _state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _session_locks: dict[tuple[str, str], threading.Lock] = field(default_factory=dict, repr=False)
+    _background_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _background_tasks: set[Future[object]] = field(default_factory=set, repr=False)
+    console: ConsolePanels = field(init=False, repr=False)
+    knowledge: KnowledgeCurator = field(init=False, repr=False)
+    notice: NoticeDispatcher = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.console = ConsolePanels(self)
+        self.knowledge = KnowledgeCurator(self)
+        self.notice = NoticeDispatcher(self)
 
     def _active_character_id(self) -> str:
         return str(self.cards.active_character() or self.config.character or "default").strip() or "default"
@@ -203,8 +229,9 @@ class WaifuService:
                 active_skills=active_skills,
             )
 
+        search_future = self._start_search_context(event)
         emotion = self.emotions.analyze(event, session)
-        search_context = self.search.build_context(event)
+        search_context = self._resolve_search_context(event, search_future)
         self._store_search_context(session, search_context)
         conversation_view = self.memory.format_dialogue(
             event.launcher_id,
@@ -290,7 +317,7 @@ class WaifuService:
             behavior_reason="reply",
             character_id=current_character,
         )
-        self._writeback_knowledge_if_needed(
+        self._schedule_knowledge_writeback(
             event,
             session=self.memory.load(event.launcher_id, event.launcher_type, character_id=current_character),
             latest_message=latest_message,
@@ -299,6 +326,8 @@ class WaifuService:
             conversation_view=conversation_view,
         )
         return emitted
+
+    _SESSION_LOCKS_MAX = 512
 
     def _session_lock_for(self, event: InboundEvent) -> threading.Lock:
         key = (
@@ -311,7 +340,144 @@ class WaifuService:
             if lock is None:
                 lock = threading.Lock()
                 self._session_locks[key] = lock
+                # Bound the lock table so a long-running server with many distinct
+                # (character, launcher) combos doesn't grow memory forever.
+                # Evict idle locks (ones nobody is currently holding) oldest-first.
+                if len(self._session_locks) > self._SESSION_LOCKS_MAX:
+                    self._evict_idle_session_locks()
             return lock
+
+    def _evict_idle_session_locks(self) -> None:
+        """Drop unheld session locks, keeping map size bounded.
+
+        Called under ``self._state_lock``. A lock is only removed if ``acquire``
+        succeeds non-blocking — that proves nobody else holds it, so freeing it
+        is safe. We intentionally don't use ``WeakValueDictionary`` because the
+        caller-side ``with lock:`` blocks would be unsafe if the lock got GC'd.
+        """
+        evicted = 0
+        target = max(self._SESSION_LOCKS_MAX // 4, 1)
+        # Iterate over a snapshot so we can mutate the underlying dict.
+        for stale_key, stale_lock in list(self._session_locks.items()):
+            if evicted >= target:
+                break
+            if stale_lock.acquire(blocking=False):
+                try:
+                    self._session_locks.pop(stale_key, None)
+                    evicted += 1
+                finally:
+                    stale_lock.release()
+
+    def _submit_background_task(self, task_name: str, callback: Callable[[], object]) -> None:
+        future = _BACKGROUND_EXECUTOR.submit(callback)
+        with self._background_lock:
+            self._background_tasks.add(future)
+        future.add_done_callback(lambda completed, name=task_name: self._background_task_done(name, completed))
+
+    def _submit_background_coro(self, task_name: str, coroutine: object) -> None:
+        future = _ASYNC_RUNTIME.submit(coroutine)
+        with self._background_lock:
+            self._background_tasks.add(future)
+        future.add_done_callback(lambda completed, name=task_name: self._background_task_done(name, completed))
+
+    def _start_search_context(self, event: InboundEvent) -> Future[SearchContext] | None:
+        if not self.search.should_search(event):
+            return None
+        search_state = getattr(self.search, "__dict__", {})
+        if "build_context" in search_state and "abuild_context" not in search_state:
+            return None
+        return _ASYNC_RUNTIME.submit(self.search.abuild_context(event))
+
+    def _resolve_search_context(
+        self,
+        event: InboundEvent,
+        search_future: Future[SearchContext] | None,
+    ) -> SearchContext:
+        if search_future is None:
+            if self.search.should_search(event):
+                return self.search.build_context(event)
+            return SearchContext()
+        try:
+            return search_future.result()
+        except Exception:
+            return self.search.build_context(event)
+
+    def _background_task_done(self, task_name: str, future: Future[object]) -> None:
+        with self._background_lock:
+            self._background_tasks.discard(future)
+        try:
+            future.result()
+        except Exception as exc:
+            with self._state_lock:
+                self._event_counter += 1
+                self._recent_events.append(
+                    {
+                        "seq": self._event_counter,
+                        "kind": "background_error",
+                        "task": task_name,
+                        "timestamp": time.time(),
+                        "error": str(exc),
+                    }
+                )
+                self._recent_events = self._recent_events[-200:]
+
+    def flush_background_tasks(self, *, timeout: float | None = None) -> None:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._background_lock:
+                pending = list(self._background_tasks)
+            if not pending:
+                return
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if deadline is not None and remaining <= 0.0:
+                raise TimeoutError("background tasks did not finish before timeout")
+            wait(pending, timeout=remaining)
+
+    def close(self, *, timeout: float | None = None) -> None:
+        self.flush_background_tasks(timeout=timeout)
+        for component in (
+            self.generator,
+            self.search,
+            self.marketplace,
+            self.outbound,
+            self.napcat_login,
+            self.state_store,
+        ):
+            if component is not None:
+                _close_component(component)
+
+    def _schedule_knowledge_writeback(
+        self,
+        event: InboundEvent,
+        *,
+        session: SessionMemory,
+        latest_message: str,
+        assistant_name: str,
+        address: str,
+        conversation_view: str,
+    ) -> None:
+        if not self.config.knowledge_auto_extract:
+            return
+        event_copy = deepcopy(event)
+        session_copy = SessionMemory(
+            launcher_id=session.launcher_id,
+            launcher_type=session.launcher_type,
+            character_id=session.character_id,
+            history=list(session.history),
+            preferred_name=session.preferred_name,
+            metadata=deepcopy(session.metadata),
+        )
+        self._submit_background_coro(
+            "knowledge_writeback",
+            self._awriteback_knowledge_if_needed(
+                event_copy,
+                session=session_copy,
+                latest_message=latest_message,
+                assistant_name=assistant_name,
+                address=address,
+                conversation_view=conversation_view,
+            ),
+        )
 
     def _handle_image_request(
         self,
@@ -585,12 +751,9 @@ class WaifuService:
         behavior_reason: str = "",
         character_id: str = "",
     ) -> OutboundMessage:
-        if event.launcher_type == "group":
-            delay = max(0.0, float(self.config.group_response_delay_seconds))
-            if delay > 0:
-                time.sleep(delay)
         resolved_character_id = str(character_id or self._active_character_id()).strip()
-        self.outbound.send(message)
+        delay = self._outbound_delay_seconds(event)
+        self._dispatch_outbound_message(message, delay_seconds=delay)
         self._record_outbound(message)
         self.memory.save_assistant_message(
             event.launcher_id,
@@ -621,6 +784,37 @@ class WaifuService:
         )
         self._refresh_follow_up_window(event)
         return message
+
+    def _outbound_delay_seconds(self, event: InboundEvent) -> float:
+        if event.launcher_type != "group":
+            return 0.0
+        if type(self.outbound) is CapturingOutboundPort:
+            return 0.0
+        return max(0.0, float(self.config.group_response_delay_seconds))
+
+    def _dispatch_outbound_message(self, message: OutboundMessage, *, delay_seconds: float) -> None:
+        if delay_seconds <= 0:
+            self.outbound.send(message)
+            return
+        send_async = getattr(self.outbound, "send_async", None)
+        if callable(send_async):
+            self._submit_background_coro(
+                "delayed_outbound_send",
+                self._adelayed_outbound_send(message, delay_seconds=delay_seconds),
+            )
+            return
+
+        def delayed_send() -> None:
+            time.sleep(delay_seconds)
+            self.outbound.send(message)
+
+        self._submit_background_task("delayed_outbound_send", delayed_send)
+
+    async def _adelayed_outbound_send(self, message: OutboundMessage, *, delay_seconds: float) -> None:
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        send_async = getattr(self.outbound, "send_async")
+        await send_async(message)
 
     def _archive_if_needed(
         self,
@@ -670,43 +864,33 @@ class WaifuService:
         address: str,
         conversation_view: str,
     ) -> None:
-        if not self.config.knowledge_auto_extract:
-            return
-        cleaned_message = " ".join(str(latest_message or "").split()).strip()
-        if not cleaned_message:
-            return
-        if self.generator._asks_for_name(cleaned_message):
-            return
-        member = self._member_record(event) or {}
-        if str(member.get("onboarding_status", "") or "").strip() == "pending_name":
-            if self._extract_directory_preferred_name(cleaned_message):
-                return
-        if self._extract_image_prompt(cleaned_message):
-            return
-        extracted = self.generator.extract_knowledge(
+        self.knowledge._writeback_knowledge_if_needed(
             event,
-            session,
+            session=session,
+            latest_message=latest_message,
             assistant_name=assistant_name,
-            latest_message=cleaned_message,
-            conversation_view=conversation_view,
             address=address,
-            max_entries=max(1, int(self.config.knowledge_auto_extract_limit)),
-            allow_fallback=True,
+            conversation_view=conversation_view,
         )
-        entries = extracted.get("entries", []) if isinstance(extracted, dict) else []
-        profile_summary = str(extracted.get("profile_summary", "") or "").strip() if isinstance(extracted, dict) else ""
-        if not entries and not profile_summary:
-            return
-        saved_entries: list[dict[str, object]] = []
-        for item in entries if isinstance(entries, list) else []:
-            saved = self._persist_extracted_knowledge(event, item, message_id=event.message_id)
-            if saved:
-                saved_entries.append(saved)
-        if saved_entries or profile_summary:
-            self._update_member_profile_summary(
-                event,
-                extra_summary=profile_summary,
-            )
+
+    async def _awriteback_knowledge_if_needed(
+        self,
+        event: InboundEvent,
+        *,
+        session: SessionMemory,
+        latest_message: str,
+        assistant_name: str,
+        address: str,
+        conversation_view: str,
+    ) -> None:
+        await self.knowledge._awriteback_knowledge_if_needed(
+            event,
+            session=session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            address=address,
+            conversation_view=conversation_view,
+        )
 
     def _persist_extracted_knowledge(
         self,
@@ -715,70 +899,13 @@ class WaifuService:
         *,
         message_id: str = "",
     ) -> dict[str, object] | None:
-        summary = " ".join(str(entry.get("summary", "") or "").split()).strip()
-        if not summary:
-            return None
-        scope_type, scope_id = self._knowledge_scope_for_candidate(event, entry)
-        memory_type = str(entry.get("memory_type", "") or "fact").strip().lower() or "fact"
-        tags = [str(tag).strip() for tag in entry.get("tags", []) if str(tag).strip()] if isinstance(entry.get("tags"), list) else []
-        confidence = _safe_float(entry, "confidence", 0.6)
-        source_message_ids = [str(message_id).strip()] if str(message_id or "").strip() else []
-        existing = self._existing_knowledge_entry(scope_type, scope_id, summary)
-        payload: dict[str, object] = {
-            "character_id": self._active_character_id(),
-            "scope_type": scope_type,
-            "scope_id": scope_id,
-            "memory_type": memory_type,
-            "summary": summary,
-            "tags": tags,
-            "confidence": confidence,
-            "source_message_ids": source_message_ids,
-        }
-        if existing is not None:
-            payload["id"] = existing.get("id", 0)
-            merged_tags = {
-                *[str(tag).strip() for tag in existing.get("tags", []) if str(tag).strip()],
-                *tags,
-            }
-            merged_source_ids = {
-                *[str(item).strip() for item in existing.get("source_message_ids", []) if str(item).strip()],
-                *source_message_ids,
-            }
-            payload["tags"] = sorted(merged_tags)[:8]
-            payload["source_message_ids"] = sorted(merged_source_ids)
-            payload["confidence"] = max(confidence, _safe_float(existing, "confidence", confidence))
-        return self.state_store.save_knowledge(payload)
+        return self.knowledge._persist_extracted_knowledge(event, entry, message_id=message_id)
 
     def _existing_knowledge_entry(self, scope_type: str, scope_id: str, summary: str) -> dict[str, object] | None:
-        current_character = self._active_character_id()
-        limit = max(
-            80,
-            int(self.state_store.knowledge_count(character_id=current_character))
-            if hasattr(self.state_store, "knowledge_count")
-            else 80,
-        )
-        target = " ".join(str(summary or "").split()).strip().casefold()
-        for item in self.state_store.list_knowledge(limit=limit, character_id=current_character):
-            if str(item.get("scope_type", "") or "").strip() != scope_type:
-                continue
-            if str(item.get("scope_id", "") or "").strip() != scope_id:
-                continue
-            current = " ".join(str(item.get("summary", "") or "").split()).strip().casefold()
-            if current == target:
-                return item
-        return None
+        return self.knowledge._existing_knowledge_entry(scope_type, scope_id, summary)
 
     def _knowledge_scope_for_candidate(self, event: InboundEvent, entry: dict[str, object]) -> tuple[str, str]:
-        scope_hint = str(entry.get("scope_hint", "") or "").strip().lower()
-        if scope_hint == "group" and event.launcher_type == "group":
-            return "group", event.launcher_id
-        if scope_hint == "global":
-            return "global", ""
-        if scope_hint == "person" and event.launcher_type == "person":
-            return "person", event.launcher_id
-        if event.launcher_type == "group":
-            return "member", f"{event.launcher_id}:{event.sender_id}"
-        return "member", event.sender_id
+        return self.knowledge._knowledge_scope_for_candidate(event, entry)
 
     def _known_assistant_aliases(self) -> dict[str, set[str]]:
         aliases: dict[str, set[str]] = {}
@@ -1007,104 +1134,14 @@ class WaifuService:
                 parts.append(cleaned)
         return "; ".join(parts[:3])
 
-    def _sidecar_action_client(self) -> OneBotActionClient:
-        if not self.config.qq_sidecar.outbound_base_url:
-            raise ValueError("sidecar is not available")
-        return OneBotActionClient(
-            base_url=self.config.qq_sidecar.outbound_base_url,
-            timeout=self.config.qq_sidecar.outbound_timeout_seconds,
-            access_token=self.config.qq_sidecar.access_token,
-        )
-
     def _handle_group_increase_notice(self, payload: dict[str, object]) -> dict[str, object]:
-        group_id = str(payload.get("group_id", "") or "").strip()
-        user_id = str(payload.get("user_id", "") or "").strip()
-        if not group_id or not user_id:
-            return {"status": "ignored", "reason": "missing group_id or user_id"}
-        bot_id = str(payload.get("self_id", "") or self.config.bot_account_id or "").strip()
-        if bot_id and user_id == bot_id and self.config.member_auto_sync:
-            synced = self.sync_group_members(group_id)
-            return {"status": "ok", "reason": "bot_joined_group", "sync": synced}
-
-        member_payload: dict[str, object] = {
-            "group_id": group_id,
-            "user_id": user_id,
-            "membership_status": "active",
-            "last_sync_at": int(time.time()),
-        }
-        if self.config.member_auto_sync:
-            try:
-                response = self._sidecar_action_client().get_group_member_info(group_id, user_id, no_cache=False)
-                data = response.get("data", response)
-                if isinstance(data, dict):
-                    member_payload["qq_nickname"] = str(data.get("nickname", "") or "")
-                    member_payload["group_card"] = str(data.get("card", "") or "")
-            except Exception:
-                pass
-        saved = self.state_store.save_member(member_payload)
-        return {"status": "ok", "reason": "member_joined", "member": saved}
+        return self.notice._handle_group_increase_notice(payload)
 
     def _handle_group_decrease_notice(self, payload: dict[str, object]) -> dict[str, object]:
-        group_id = str(payload.get("group_id", "") or "").strip()
-        user_id = str(payload.get("user_id", "") or "").strip()
-        sub_type = str(payload.get("sub_type", "") or "").strip().lower()
-        if not group_id or not user_id:
-            return {"status": "ignored", "reason": "missing group_id or user_id"}
-        bot_id = str(payload.get("self_id", "") or self.config.bot_account_id or "").strip()
-        synced_at = int(time.time())
-        if bot_id and user_id == bot_id:
-            mark_missing = getattr(self.state_store, "mark_group_members_missing", None)
-            affected = 0
-            if callable(mark_missing):
-                affected = int(
-                    mark_missing(
-                        group_id=group_id,
-                        active_user_ids=[],
-                        membership_status="removed",
-                        last_sync_at=synced_at,
-                    )
-                    or 0
-                )
-            return {"status": "ok", "reason": "bot_left_group", "affected_members": affected}
-
-        status = "left" if sub_type == "leave" else "removed"
-        saved = self.state_store.mark_member_membership(
-            group_id=group_id,
-            user_id=user_id,
-            membership_status=status,
-            last_sync_at=synced_at,
-        )
-        if saved is None:
-            saved = self.state_store.save_member(
-                {
-                    "group_id": group_id,
-                    "user_id": user_id,
-                    "membership_status": status,
-                    "last_sync_at": synced_at,
-                }
-            )
-        return {"status": "ok", "reason": "member_left_group", "member": saved}
+        return self.notice._handle_group_decrease_notice(payload)
 
     def _handle_group_card_notice(self, payload: dict[str, object]) -> dict[str, object]:
-        group_id = str(payload.get("group_id", "") or "").strip()
-        user_id = str(payload.get("user_id", "") or "").strip()
-        if not group_id or not user_id:
-            return {"status": "ignored", "reason": "missing group_id or user_id"}
-        card_value = (
-            str(payload.get("card_new", "") or "").strip()
-            or str(payload.get("card", "") or "").strip()
-            or str(payload.get("nickname", "") or "").strip()
-        )
-        saved = self.state_store.save_member(
-            {
-                "group_id": group_id,
-                "user_id": user_id,
-                "group_card": card_value,
-                "membership_status": "active",
-                "last_sync_at": int(time.time()),
-            }
-        )
-        return {"status": "ok", "reason": "group_card_updated", "member": saved}
+        return self.notice._handle_group_card_notice(payload)
 
     def _should_reply(self, event: InboundEvent) -> bool:
         if event.launcher_type != "group":
@@ -1575,68 +1612,16 @@ class WaifuService:
 
     @staticmethod
     def _merge_memory_hints(primary: list[str], secondary: list[str], *, limit: int) -> list[str]:
-        merged: list[str] = []
-        seen: set[str] = set()
-        for candidate in [*(primary or []), *(secondary or [])]:
-            text = str(candidate or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            merged.append(text)
-            if len(merged) >= max(1, int(limit)):
-                break
-        return merged
+        return KnowledgeCurator._merge_memory_hints(primary, secondary, limit=limit)
 
     def _knowledge_scopes(self, event: InboundEvent) -> list[tuple[str, str]]:
-        scopes = [(event.launcher_type, event.launcher_id), ("global", "")]
-        if event.launcher_type == "group":
-            scopes.append(("member", f"{event.launcher_id}:{event.sender_id}"))
-        else:
-            scopes.append(("member", event.sender_id))
-        return scopes
+        return self.knowledge._knowledge_scopes(event)
 
     def _member_record(self, event: InboundEvent) -> dict[str, Any] | None:
-        return self.state_store.get_member(
-            group_id=event.launcher_id if event.launcher_type == "group" else "",
-            user_id=event.sender_id,
-            character_id=self._active_character_id(),
-        )
+        return self.knowledge._member_record(event)
 
     def _session_knowledge_entries(self, event: InboundEvent, query: str) -> list[dict[str, Any]]:
-        scopes = set(self._knowledge_scopes(event))
-        query_terms = self._extract_terms(query)
-        entries = self.state_store.list_knowledge(
-            limit=max(80, self.config.memory_graph_limit * 6),
-            character_id=self._active_character_id(),
-        )
-        scored: list[tuple[float, dict[str, Any]]] = []
-        for entry in entries:
-            scope = (
-                str(entry.get("scope_type", "") or "").strip().lower() or "global",
-                str(entry.get("scope_id", "") or "").strip(),
-            )
-            if scope not in scopes:
-                continue
-            summary = str(entry.get("summary", "") or "").strip().lower()
-            tags = [str(item or "").strip().lower() for item in entry.get("tags", []) if str(item or "").strip()]
-            score = float(entry.get("confidence") or 0.0)
-            if not query_terms:
-                score += 0.1
-            else:
-                for term in query_terms:
-                    if term in summary:
-                        score += 1.2
-                    elif any(term in tag or tag in term for tag in tags):
-                        score += 1.6
-            scored.append((score, dict(entry)))
-        scored.sort(
-            key=lambda item: (
-                -float(item[0]),
-                -int(item[1].get("updated_at") or 0),
-                -int(item[1].get("id") or 0),
-            )
-        )
-        return [entry for _, entry in scored[: max(1, int(self.config.memory_graph_limit))]]
+        return self.knowledge._session_knowledge_entries(event, query)
 
     def _behavior_context(self, event: InboundEvent, *, limit: int = 8) -> list[dict[str, Any]]:
         launcher_type = str(event.launcher_type or "").strip()
@@ -1654,49 +1639,7 @@ class WaifuService:
         return scoped[-max(1, int(limit)) :][::-1]
 
     def _directory_member_notes(self, event: InboundEvent) -> list[str]:
-        notes: list[str] = []
-        current_group = event.launcher_id if event.launcher_type == "group" else ""
-        current_character = self._active_character_id()
-        self._sanitize_member_persona_state(
-            group_id=current_group,
-            user_id=event.sender_id,
-            character_id=current_character,
-        )
-        members = self.state_store.list_members(limit=240, character_id=current_character)
-        scoped = [
-            item
-            for item in members
-            if str(item.get("group_id", "") or "").strip() == current_group
-        ]
-        active_key = (current_group, event.sender_id)
-        scoped.sort(
-            key=lambda item: (
-                (str(item.get("group_id", "") or "").strip(), str(item.get("user_id", "") or "").strip()) != active_key,
-                -(int(item.get("last_seen_at") or 0)),
-                -(int(item.get("updated_at") or 0)),
-            )
-        )
-        for member in scoped[:4]:
-            qq_name = str(member.get("qq_nickname", "") or "").strip() or event.sender_name
-            preferred_name = str(member.get("preferred_name", "") or "").strip()
-            profile_summary = str(member.get("profile_summary", "") or "").strip()
-            onboarding_status = str(member.get("onboarding_status", "") or "").strip()
-            affinity_score = float(member.get("affinity_score") or 0.0)
-            bond_stage = self.value_game.bond_stage(affinity_score)
-            if str(member.get("user_id", "") or "").strip() == event.sender_id:
-                if preferred_name:
-                    notes.append(f"{qq_name} prefers to be called {preferred_name}.")
-                else:
-                    notes.append(f"The current speaker is {qq_name}.")
-                notes.append(f"Bond stage with {qq_name}: {bond_stage} ({affinity_score:.2f}).")
-            elif preferred_name:
-                notes.append(f"{qq_name} is usually addressed as {preferred_name}.")
-            profile_summary = self._sanitize_profile_summary_text(profile_summary)
-            if profile_summary:
-                notes.append(f"Profile summary for {qq_name}: {profile_summary}")
-            if onboarding_status and onboarding_status not in {"", "ready"}:
-                notes.append(f"{qq_name} is still in onboarding status: {onboarding_status}.")
-        return notes
+        return self.knowledge._directory_member_notes(event)
 
     def _migrate_legacy_session_state(self) -> None:
         store = self.memory.store
@@ -1870,94 +1813,7 @@ class WaifuService:
         )
 
     def dashboard_snapshot(self) -> dict[str, object]:
-        current_character = self._active_character_id()
-        sessions = self.list_sessions(limit=24)
-        knowledge_count = self.state_store.knowledge_count(character_id=current_character)
-        member_count = self.state_store.member_count()
-        proactive_candidates = self.proactive.list_candidates(
-            members=self.state_store.list_members(limit=200, character_id=current_character),
-            limit=self.config.proactive_candidate_limit,
-        )
-        with self._state_lock:
-            recent_outbound = [self._message_to_dict(message) for message in self._recent_outbound[-12:][::-1]]
-            recent_behavior_events = [dict(item) for item in self._recent_behavior_events[-12:][::-1]]
-            active_launchers = sorted(
-                launcher_id
-                for launcher_id, until in self._group_follow_up_until.items()
-                if until > time.monotonic()
-            )
-        return {
-            "service_name": self.config.service_name,
-            "assistant_name": self.config.assistant_name,
-            "character": current_character,
-            "bot_account_id": self.config.bot_account_id,
-            "group_reply_requires_mention": self.config.group_reply_requires_mention,
-            "max_active_skills": self.config.max_active_skills,
-            "search_enabled": self.config.search_enabled,
-            "thinking_mode": self.config.thinking_mode,
-            "summarization_mode": self.config.summarization_mode,
-            "event_mode": self.config.event_mode,
-            "narrator_mode": self.config.narrator_mode,
-            "value_game_mode": self.config.value_game_mode,
-            "memory_graph_mode": self.config.memory_graph_mode,
-            "proactive_mode": self.config.proactive_mode,
-            "reply_window_seconds": self.config.group_follow_up_window_seconds,
-            "group_response_delay_seconds": self.config.group_response_delay_seconds,
-            "repeat_trigger_count": self.config.repeat_trigger_count,
-            "multimodal_enabled": self.config.multimodal_enabled,
-            "history_window_messages": self.config.history_window_messages,
-            "memory_recall_limit": self.config.memory_recall_limit,
-            "short_term_memory_limit": self.config.short_term_memory_limit,
-            "memory_summary_batch_size": self.config.memory_summary_batch_size,
-            "ignore_prefixes": list(self.config.ignore_prefixes),
-            "message_behavior": {
-                "requires_mention": self.config.group_reply_requires_mention,
-                "follow_up_window_seconds": self.config.group_follow_up_window_seconds,
-                "response_delay_seconds": self.config.group_response_delay_seconds,
-                "repeat_trigger_count": self.config.repeat_trigger_count,
-                "multimodal_enabled": self.config.multimodal_enabled,
-            },
-            "skills": self.skills.describe(),
-            "tools": self.tools.describe(),
-            "search": {
-                "enabled": self.config.search_enabled,
-                "result_limit": self.config.search_result_limit,
-                "timeout_seconds": self.config.search_timeout_seconds,
-                "cache_size": self.search.cache_size(),
-            },
-            "outbound_mode": self._outbound_mode_label(),
-            "llm": {
-                "enabled": self.config.llm.enabled,
-                "backend": self.config.llm.backend,
-                "base_url": self.config.llm.base_url,
-                "ready": self.generator.llm_ready,
-            },
-            "image_generation": {
-                "enabled": self.config.image_generation.enabled,
-                "base_url": self.config.image_generation.base_url,
-                "model": self.config.image_generation.model,
-                "ready": self.generator.image_ready,
-            },
-            "qq_sidecar": {
-                "adapter_name": self.config.qq_sidecar.adapter_name,
-                "dry_run": False,
-                "outbound_base_url": self.config.qq_sidecar.outbound_base_url,
-                "inbound_host": self.config.qq_sidecar.inbound_host,
-                "inbound_port": self.config.qq_sidecar.inbound_port,
-            },
-            "skill_workspace": str(self.skills.workspace_root),
-            "session_count": len(sessions),
-            "knowledge_count": knowledge_count,
-            "member_count": member_count,
-            "sessions": sessions,
-            "recent_outbound_count": len(recent_outbound),
-            "recent_outbound": recent_outbound,
-            "recent_behavior_events": recent_behavior_events,
-            "proactive_candidates": proactive_candidates[:6],
-            "active_follow_up_count": len(active_launchers),
-            "active_follow_up_launchers": active_launchers,
-            "updated_at": time.time(),
-        }
+        return self.console.dashboard_snapshot()
 
     def list_sessions(self, limit: int = 24) -> list[dict[str, object]]:
         store = self.memory.store
@@ -2018,138 +1874,19 @@ class WaifuService:
         return self.tools.describe()
 
     def get_console_panels(self) -> dict[str, object]:
-        return {
-            "character": self.get_character_panel(),
-            "ai": self.get_ai_panel(),
-            "memory": self.get_memory_panel(),
-            "abilities": self.get_abilities_panel(),
-            "skills": self.get_skills_panel(),
-            "qq_login": self.get_qq_login_panel(refresh=False),
-            "sidecar": self.get_sidecar_panel(refresh=False),
-            "other": self.get_other_panel(),
-        }
+        return self.console.get_console_panels()
 
     def get_character_panel(self, character: str = "") -> dict[str, object]:
-        target = str(character or self.cards.active_character()).strip() or "default"
-        bundle = self.cards.get_editor_bundle(target)
-        return {
-            "current_character": self.cards.active_character(),
-            **bundle,
-        }
+        return self.console.get_character_panel(character)
 
     def save_character_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        character = str(payload.get("character") or self.config.character or "default").strip() or "default"
-        set_active = bool(payload.get("set_active", True))
-        person = str(payload.get("person_content") or "")
-        group = str(payload.get("group_content") or "")
-        person_fields = payload.get("person_fields")
-        group_fields = payload.get("group_fields")
-        shared_fields = payload.get("shared_fields")
-        portrait = payload.get("portrait")
-        bundle = self.cards.save_editor_bundle(
-            character,
-            person,
-            group,
-            person_fields=person_fields if isinstance(person_fields, dict) else None,
-            group_fields=group_fields if isinstance(group_fields, dict) else None,
-            shared_fields=shared_fields if isinstance(shared_fields, dict) else None,
-            portrait=portrait if isinstance(portrait, dict) else None,
-        )
-        if isinstance(portrait, dict) and bool(portrait.get("generate", portrait.get("auto_generate", False))):
-            generated = self._generate_character_portrait(character, bundle, portrait)
-            bundle["portrait"] = generated
-        if set_active:
-            active_character = self.cards.set_active_character(character)
-            self.config.character = active_character
-            set_default_character = getattr(self.state_store, "set_default_character", None)
-            if callable(set_default_character):
-                set_default_character(active_character)
-            self._repair_character_isolation_state(active_character)
-        self._persist_config()
-        return {
-            "current_character": self.cards.active_character(),
-            **bundle,
-        }
+        return self.console.save_character_panel(payload)
 
     def get_character_portrait(self, character: str) -> tuple[bytes, str] | None:
-        return self.cards.load_portrait_asset(character)
+        return self.console.get_character_portrait(character)
 
     def preview_character_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        launcher_type = str(payload.get("launcher_type") or "person").strip().lower()
-        if launcher_type not in {"person", "group"}:
-            raise ValueError("launcher_type must be 'person' or 'group'")
-        message = str(payload.get("message") or "").strip()
-        if not message:
-            raise ValueError("message is required")
-
-        shared_fields = payload.get("shared_fields") if isinstance(payload.get("shared_fields"), dict) else {}
-        person_fields = payload.get("person_fields") if isinstance(payload.get("person_fields"), dict) else {}
-        group_fields = payload.get("group_fields") if isinstance(payload.get("group_fields"), dict) else {}
-        variant_fields = person_fields if launcher_type == "person" else group_fields
-        card = self.cards.build_preview_card(
-            shared_fields=shared_fields if isinstance(shared_fields, dict) else None,
-            variant_fields=variant_fields if isinstance(variant_fields, dict) else None,
-        )
-
-        user_name = str(payload.get("user_name") or card.user_name or "User").strip() or card.user_name or "User"
-        history = self._normalize_preview_history(payload.get("history"), assistant_name=card.assistant_name)
-        session = SessionMemory(
-            launcher_id=f"preview-{launcher_type}",
-            launcher_type=launcher_type,
-            history=self._preview_history_lines(history),
-            metadata={},
-        )
-        event = InboundEvent(
-            launcher_id=session.launcher_id,
-            launcher_type=launcher_type,
-            sender_id="preview-user",
-            sender_name=user_name,
-            segments=[MessageSegment(kind="text", text=message)],
-        )
-        emotion = self.emotions.analyze(event, session)
-        conversation_view = self._preview_conversation_view(
-            session.history,
-            assistant_name=card.assistant_name,
-            limit=self.config.history_window_messages,
-        )
-        analysis_hint = self.generator.generate_analysis(
-            event,
-            session,
-            assistant_name=card.assistant_name,
-            conversation_view=conversation_view,
-            memory_hints=[],
-            speaker_notes=[],
-            active_skills=[],
-            address_override=user_name,
-            card_override=card,
-        )
-        reply_text = self.generator.generate_reply(
-            event,
-            session,
-            emotion,
-            assistant_name=card.assistant_name,
-            address_override=user_name,
-            card_override=card,
-            conversation_view=conversation_view,
-            memory_hints=[],
-            speaker_notes=[],
-            analysis_hint=analysis_hint,
-            active_skills=[],
-        )
-        transcript = [
-            *history,
-            {"role": "user", "text": message},
-            {"role": "assistant", "text": reply_text},
-        ]
-        return {
-            "launcher_type": launcher_type,
-            "assistant_name": card.assistant_name,
-            "user_name": user_name,
-            "reply_text": reply_text,
-            "analysis_hint": analysis_hint,
-            "transcript": transcript,
-            "llm_ready": self.generator.llm_ready,
-        }
+        return self.console.preview_character_panel(payload)
 
     def _generate_character_portrait(
         self,
@@ -2157,129 +1894,16 @@ class WaifuService:
         bundle: dict[str, object],
         portrait_payload: dict[str, object],
     ) -> dict[str, object]:
-        current = dict(bundle.get("portrait", {}) if isinstance(bundle.get("portrait"), dict) else {})
-        shared_fields = bundle.get("shared", {}) if isinstance(bundle.get("shared"), dict) else {}
-        person = bundle.get("person", {}) if isinstance(bundle.get("person"), dict) else {}
-        group = bundle.get("group", {}) if isinstance(bundle.get("group"), dict) else {}
-        person_fields = person.get("fields", {}) if isinstance(person.get("fields"), dict) else {}
-        group_fields = group.get("fields", {}) if isinstance(group.get("fields"), dict) else {}
-        style = str(portrait_payload.get("style") or current.get("style") or "neon-pixel")
-        prompt_suffix = str(
-            portrait_payload.get("prompt_suffix")
-            or current.get("prompt_suffix")
-            or ""
-        )
-        auto_generate = bool(portrait_payload.get("auto_generate", current.get("auto_generate", True)))
-        prompt = self.cards.build_portrait_prompt(
-            character,
-            shared_fields=shared_fields,
-            person_fields=person_fields,
-            group_fields=group_fields,
-            portrait={
-                "style": style,
-                "prompt_suffix": prompt_suffix,
-            },
-        )
-        if not self.generator.image_ready:
-            current.update(
-                {
-                    "style": style,
-                    "prompt_suffix": prompt_suffix,
-                    "auto_generate": auto_generate,
-                    "last_prompt": prompt,
-                    "notice": "image provider is not configured",
-                }
-            )
-            return current
-        try:
-            generated = self.generator.generate_image(prompt)
-            image_bytes, content_type = self.generator.resolve_generated_image(generated.image_ref)
-            portrait = self.cards.save_portrait_asset(
-                character,
-                image_bytes,
-                content_type,
-                prompt=prompt,
-                style=style,
-                prompt_suffix=prompt_suffix,
-                auto_generate=auto_generate,
-            )
-            portrait["generated"] = True
-            return portrait
-        except Exception as exc:
-            current.update(
-                {
-                    "style": style,
-                    "prompt_suffix": prompt_suffix,
-                    "auto_generate": auto_generate,
-                    "last_prompt": prompt,
-                    "error": str(exc),
-                }
-            )
-            return current
+        return self.console._generate_character_portrait(character, bundle, portrait_payload)
 
     def get_ai_panel(self) -> dict[str, object]:
-        panel = {
-            "llm": deepcopy(serialize_app_config(self.config)["llm"]),
-            "image_generation": deepcopy(serialize_app_config(self.config)["image_generation"]),
-            "embedding": deepcopy(serialize_app_config(self.config)["embedding"]),
-        }
-        for section in ("llm", "image_generation", "embedding"):
-            sub = panel.get(section)
-            if isinstance(sub, dict) and "api_key" in sub:
-                sub["api_key"] = _mask_key(str(sub["api_key"] or ""))
-        return panel
+        return self.console.get_ai_panel()
 
     def save_ai_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        llm = payload.get("llm", {})
-        image_generation = payload.get("image_generation", {})
-        embedding = payload.get("embedding", {})
-        if isinstance(llm, dict):
-            self.config.llm.enabled = bool(llm.get("enabled", self.config.llm.enabled))
-            self.config.llm.backend = str(llm.get("backend", self.config.llm.backend) or self.config.llm.backend)
-            self.config.llm.base_url = str(llm.get("base_url", self.config.llm.base_url) or "")
-            _llm_key = str(llm.get("api_key", "") or "")
-            if _llm_key and not _is_masked(_llm_key):
-                self.config.llm.api_key = _llm_key
-            self.config.llm.model = str(llm.get("model", self.config.llm.model) or "")
-            self.config.llm.app_type = str(llm.get("app_type", self.config.llm.app_type) or self.config.llm.app_type)
-            self.config.llm.timeout_seconds = _safe_float(llm, "timeout_seconds", self.config.llm.timeout_seconds)
-        if isinstance(image_generation, dict):
-            self.config.image_generation.enabled = bool(image_generation.get("enabled", self.config.image_generation.enabled))
-            self.config.image_generation.base_url = str(image_generation.get("base_url", self.config.image_generation.base_url) or "")
-            _img_key = str(image_generation.get("api_key", "") or "")
-            if _img_key and not _is_masked(_img_key):
-                self.config.image_generation.api_key = _img_key
-            self.config.image_generation.model = str(image_generation.get("model", self.config.image_generation.model) or self.config.image_generation.model)
-            self.config.image_generation.timeout_seconds = _safe_float(image_generation, "timeout_seconds", self.config.image_generation.timeout_seconds)
-            self.config.image_generation.response_format = str(image_generation.get("response_format", self.config.image_generation.response_format) or self.config.image_generation.response_format)
-            self.config.image_generation.aspect_ratio = str(image_generation.get("aspect_ratio", self.config.image_generation.aspect_ratio) or self.config.image_generation.aspect_ratio)
-            self.config.image_generation.resolution = str(image_generation.get("resolution", self.config.image_generation.resolution) or "")
-        if isinstance(embedding, dict):
-            self.config.embedding.enabled = bool(embedding.get("enabled", self.config.embedding.enabled))
-            self.config.embedding.backend = str(embedding.get("backend", self.config.embedding.backend) or self.config.embedding.backend)
-            self.config.embedding.base_url = str(embedding.get("base_url", self.config.embedding.base_url) or "")
-            _emb_key = str(embedding.get("api_key", "") or "")
-            if _emb_key and not _is_masked(_emb_key):
-                self.config.embedding.api_key = _emb_key
-            self.config.embedding.model = str(embedding.get("model", self.config.embedding.model) or self.config.embedding.model)
-            self.config.embedding.timeout_seconds = _safe_float(embedding, "timeout_seconds", self.config.embedding.timeout_seconds)
-        self._refresh_runtime_components(rebuild_generator=True)
-        self._persist_config()
-        return self.get_ai_panel()
+        return self.console.save_ai_panel(payload)
 
     def get_memory_panel(self) -> dict[str, object]:
-        sessions = self.list_sessions(limit=60)
-        current_character = self._active_character_id()
-        knowledge_entries = self.state_store.list_knowledge(limit=80, character_id=current_character)
-        return {
-            "character_id": current_character,
-            "sessions": sessions,
-            "knowledge_entries": knowledge_entries,
-            "knowledge_count": self.state_store.knowledge_count(character_id=current_character),
-            "embedded_knowledge_count": self.state_store.embedded_knowledge_count(character_id=current_character),
-            "member_count": self.state_store.member_count(),
-            "behavior_event_count": len(self.get_behavior_events(limit=200)),
-        }
+        return self.console.get_memory_panel()
 
     def save_memory_session(
         self,
@@ -2287,186 +1911,34 @@ class WaifuService:
         launcher_id: str,
         payload: dict[str, object],
     ) -> dict[str, object] | None:
-        current_character = self._active_character_id()
-        session = self.memory.load(launcher_id, launcher_type, character_id=current_character)
-        if not session.history and not self._sanitize_session_metadata(session.metadata):
-            return None
-        session.preferred_name = ""
-        history_value = payload.get("history", session.history)
-        if isinstance(history_value, list):
-            session.history = [str(item) for item in history_value]
-        elif isinstance(history_value, str):
-            session.history = [line for line in history_value.splitlines() if line.strip()]
-        metadata_value = payload.get("metadata", session.metadata)
-        if isinstance(metadata_value, dict):
-            session.metadata = self._sanitize_session_metadata(metadata_value)
-        self.memory.store.save(session)
-        return self.get_session_detail(launcher_type, launcher_id)
+        return self.console.save_memory_session(launcher_type, launcher_id, payload)
 
     def get_member_directory_panel(self, *, limit: int = 120) -> dict[str, object]:
-        current_character = self._active_character_id()
-        return {
-            "character_id": current_character,
-            "members": self.state_store.list_members(limit=limit, character_id=current_character),
-            "member_count": self.state_store.member_count(),
-            "proactive_enabled": self.config.proactive_mode,
-        }
+        return self.console.get_member_directory_panel(limit=limit)
 
     def save_directory_member(self, payload: dict[str, object]) -> dict[str, object]:
-        next_payload = dict(payload)
-        next_payload["character_id"] = self._active_character_id()
-        return self.state_store.save_member(next_payload)
+        return self.console.save_directory_member(payload)
 
     def reset_directory_member_persona(self, payload: dict[str, object]) -> dict[str, object] | None:
-        return self.state_store.reset_member_persona(
-            group_id=payload.get("group_id"),
-            user_id=payload.get("user_id"),
-            character_id=self._active_character_id(),
-        )
+        return self.console.reset_directory_member_persona(payload)
 
     def save_knowledge_entry(self, payload: dict[str, object]) -> dict[str, object]:
-        next_payload = dict(payload)
-        next_payload["character_id"] = self._active_character_id()
-        return self.state_store.save_knowledge(next_payload)
+        return self.console.save_knowledge_entry(payload)
 
     def delete_knowledge_entry(self, entry_id: int) -> bool:
-        return bool(
-            self.state_store.delete_knowledge(
-                entry_id,
-                character_id=self._active_character_id(),
-            )
-        )
+        return self.console.delete_knowledge_entry(entry_id)
 
     def handle_notice_payload(self, payload: dict[str, object]) -> dict[str, object]:
-        notice_type = str(payload.get("notice_type", "") or "").strip().lower()
-        if notice_type == "group_increase":
-            return self._handle_group_increase_notice(payload)
-        if notice_type == "group_decrease":
-            return self._handle_group_decrease_notice(payload)
-        if notice_type == "group_card":
-            return self._handle_group_card_notice(payload)
-        return {"status": "ignored", "reason": "unsupported notice_type"}
+        return self.notice.handle_notice_payload(payload)
 
     def sync_group_members(self, group_id: str) -> dict[str, object]:
-        safe_group_id = str(group_id or "").strip()
-        if not safe_group_id:
-            raise ValueError("group_id is required")
-        client = self._sidecar_action_client()
-        response = client.get_group_member_list(safe_group_id)
-        members = response.get("data", response)
-        if not isinstance(members, list):
-            raise ValueError("group member payload is invalid")
-        synced: list[dict[str, object]] = []
-        active_user_ids: list[str] = []
-        synced_at = int(time.time())
-        for item in members:
-            if not isinstance(item, dict):
-                continue
-            user_id = str(item.get("user_id", "") or "").strip()
-            if not user_id:
-                continue
-            active_user_ids.append(user_id)
-            saved = self.state_store.save_member(
-                {
-                    "group_id": safe_group_id,
-                    "user_id": user_id,
-                    "qq_nickname": str(item.get("nickname", "") or ""),
-                    "group_card": str(item.get("card", "") or ""),
-                    "membership_status": "active",
-                    "last_sync_at": synced_at,
-                }
-            )
-            synced.append(saved)
-        missing_count = 0
-        mark_missing = getattr(self.state_store, "mark_group_members_missing", None)
-        if callable(mark_missing):
-            missing_count = int(
-                mark_missing(
-                    group_id=safe_group_id,
-                    active_user_ids=active_user_ids,
-                    membership_status="left",
-                    last_sync_at=synced_at,
-                )
-                or 0
-            )
-        return {
-            "status": "ok",
-            "group_id": safe_group_id,
-            "count": len(synced),
-            "marked_missing_count": missing_count,
-            "members": synced[:20],
-        }
+        return self.notice.sync_group_members(group_id)
 
     def get_abilities_panel(self) -> dict[str, object]:
-        return {
-            "search_enabled": self.config.search_enabled,
-            "search_result_limit": self.config.search_result_limit,
-            "search_timeout_seconds": self.config.search_timeout_seconds,
-            "thinking_mode": self.config.thinking_mode,
-            "conversation_analysis": self.config.conversation_analysis,
-            "summarization_mode": self.config.summarization_mode,
-            "member_auto_sync": self.config.member_auto_sync,
-            "knowledge_auto_extract": self.config.knowledge_auto_extract,
-            "knowledge_auto_extract_limit": self.config.knowledge_auto_extract_limit,
-            "event_mode": self.config.event_mode,
-            "event_buffer_limit": self.config.event_buffer_limit,
-            "narrator_mode": self.config.narrator_mode,
-            "narrator_style": self.config.narrator_style,
-            "narrator_detail_level": self.config.narrator_detail_level,
-            "value_game_mode": self.config.value_game_mode,
-            "value_game_reply_bonus": self.config.value_game_reply_bonus,
-            "memory_graph_mode": self.config.memory_graph_mode,
-            "memory_graph_limit": self.config.memory_graph_limit,
-            "proactive_mode": self.config.proactive_mode,
-            "proactive_inactive_hours": self.config.proactive_inactive_hours,
-            "proactive_candidate_limit": self.config.proactive_candidate_limit,
-            "proactive_min_affinity": self.config.proactive_min_affinity,
-            "max_active_skills": self.config.max_active_skills,
-            "history_window_messages": self.config.history_window_messages,
-            "memory_recall_limit": self.config.memory_recall_limit,
-            "max_thinking_words": self.config.max_thinking_words,
-            "short_term_memory_limit": self.config.short_term_memory_limit,
-            "memory_summary_batch_size": self.config.memory_summary_batch_size,
-            "tools": self.list_tools(),
-            "marketplace": self.marketplace.describe(),
-        }
+        return self.console.get_abilities_panel()
 
     def save_abilities_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        self.config.search_enabled = bool(payload.get("search_enabled", self.config.search_enabled))
-        self.config.search_result_limit = _safe_int(payload, "search_result_limit", self.config.search_result_limit)
-        self.config.search_timeout_seconds = _safe_float(payload, "search_timeout_seconds", self.config.search_timeout_seconds)
-        self.config.thinking_mode = bool(payload.get("thinking_mode", self.config.thinking_mode))
-        self.config.conversation_analysis = bool(payload.get("conversation_analysis", self.config.conversation_analysis))
-        self.config.summarization_mode = bool(payload.get("summarization_mode", self.config.summarization_mode))
-        self.config.member_auto_sync = bool(payload.get("member_auto_sync", self.config.member_auto_sync))
-        self.config.knowledge_auto_extract = bool(payload.get("knowledge_auto_extract", self.config.knowledge_auto_extract))
-        self.config.knowledge_auto_extract_limit = _safe_int(
-            payload,
-            "knowledge_auto_extract_limit",
-            self.config.knowledge_auto_extract_limit,
-        )
-        self.config.event_mode = bool(payload.get("event_mode", self.config.event_mode))
-        self.config.event_buffer_limit = _safe_int(payload, "event_buffer_limit", self.config.event_buffer_limit)
-        self.config.narrator_mode = bool(payload.get("narrator_mode", self.config.narrator_mode))
-        self.config.narrator_style = str(payload.get("narrator_style", self.config.narrator_style) or self.config.narrator_style)
-        self.config.narrator_detail_level = _safe_int(payload, "narrator_detail_level", self.config.narrator_detail_level)
-        self.config.value_game_mode = bool(payload.get("value_game_mode", self.config.value_game_mode))
-        self.config.value_game_reply_bonus = _safe_float(payload, "value_game_reply_bonus", self.config.value_game_reply_bonus)
-        self.config.memory_graph_mode = bool(payload.get("memory_graph_mode", self.config.memory_graph_mode))
-        self.config.memory_graph_limit = _safe_int(payload, "memory_graph_limit", self.config.memory_graph_limit)
-        self.config.proactive_mode = bool(payload.get("proactive_mode", self.config.proactive_mode))
-        self.config.proactive_inactive_hours = _safe_float(payload, "proactive_inactive_hours", self.config.proactive_inactive_hours)
-        self.config.proactive_candidate_limit = _safe_int(payload, "proactive_candidate_limit", self.config.proactive_candidate_limit)
-        self.config.proactive_min_affinity = _safe_float(payload, "proactive_min_affinity", self.config.proactive_min_affinity)
-        self.config.max_active_skills = _safe_int(payload, "max_active_skills", self.config.max_active_skills)
-        self.config.history_window_messages = _safe_int(payload, "history_window_messages", self.config.history_window_messages)
-        self.config.memory_recall_limit = _safe_int(payload, "memory_recall_limit", self.config.memory_recall_limit)
-        self.config.max_thinking_words = _safe_int(payload, "max_thinking_words", self.config.max_thinking_words)
-        self.config.short_term_memory_limit = _safe_int(payload, "short_term_memory_limit", self.config.short_term_memory_limit)
-        self.config.memory_summary_batch_size = _safe_int(payload, "memory_summary_batch_size", self.config.memory_summary_batch_size)
-        self._refresh_runtime_components()
-        self._persist_config()
-        return self.get_abilities_panel()
+        return self.console.save_abilities_panel(payload)
 
     def get_behavior_events(
         self,
@@ -2491,42 +1963,16 @@ class WaifuService:
         return filtered
 
     def get_proactive_panel(self, *, limit: int = 12) -> dict[str, object]:
-        current_character = self._active_character_id()
-        members = self.state_store.list_members(limit=max(120, limit * 8), character_id=current_character)
-        candidates = self.proactive.list_candidates(members=members, limit=limit)
-        return {
-            "character_id": current_character,
-            "enabled": self.config.proactive_mode,
-            "inactive_hours": self.config.proactive_inactive_hours,
-            "candidate_limit": self.config.proactive_candidate_limit,
-            "candidates": candidates,
-        }
+        return self.console.get_proactive_panel(limit=limit)
 
     def generate_proactive_draft(self, payload: dict[str, object]) -> dict[str, object]:
-        group_id = str(payload.get("group_id", "") or "").strip()
-        user_id = str(payload.get("user_id", "") or "").strip()
-        if not user_id:
-            raise ValueError("user_id is required")
-        member = self.state_store.get_member(group_id=group_id, user_id=user_id, character_id=self._active_character_id())
-        if member is None:
-            raise ValueError("member not found")
-        relationship_hint = str(payload.get("relationship_hint", "") or "").strip()
-        draft = self.proactive.build_draft(
-            member=member,
-            assistant_name=self.config.assistant_name,
-            relationship_hint=relationship_hint,
-        )
-        return {"status": "ok", "draft": draft}
+        return self.console.generate_proactive_draft(payload)
 
     def get_skills_panel(self) -> dict[str, object]:
-        return {
-            "skills": self.list_skills(),
-            "tools": self.list_tools(),
-            "marketplace": self.marketplace.describe(),
-        }
+        return self.console.get_skills_panel()
 
     def search_marketplace(self, query: str, *, source_id: str = "", limit: int = 12) -> dict[str, object]:
-        return self.marketplace.search(query, source_id=source_id, limit=limit)
+        return self.console.search_marketplace(query, source_id=source_id, limit=limit)
 
     def import_marketplace_skill(
         self,
@@ -2534,232 +1980,34 @@ class WaifuService:
         source_id: str,
         github_url: str,
     ) -> dict[str, object]:
-        payload = self.marketplace.fetch_skill_markdown(source_id, github_url)
-        skill = self.install_skill(payload["markdown"], filename=payload["filename"])
-        skill["raw_url"] = payload["raw_url"]
-        return skill
+        return self.console.import_marketplace_skill(source_id=source_id, github_url=github_url)
 
     def get_sidecar_panel(self, *, refresh: bool = False) -> dict[str, object]:
-        status: dict[str, object] = {
-            "mode": "offline",
-            "adapter_name": self.config.qq_sidecar.adapter_name,
-            "outbound_base_url": self.config.qq_sidecar.outbound_base_url,
-            "access_token": _mask_key(self.config.qq_sidecar.access_token),
-            "inbound_host": self.config.qq_sidecar.inbound_host,
-            "inbound_port": self.config.qq_sidecar.inbound_port,
-            "webui_base_url": self.config.qq_sidecar.webui_base_url,
-            "webui_api_prefix": self.config.qq_sidecar.webui_api_prefix,
-            "webui_timeout_seconds": self.config.qq_sidecar.webui_timeout_seconds,
-            "webui_token": _mask_key(self.config.qq_sidecar.webui_token),
-            "webui_url": self.napcat_login.webui_url() if self.napcat_login is not None else "",
-            "reverse_ws_url": self.config.qq_sidecar.reverse_ws_url,
-            "outbound_timeout_seconds": self.config.qq_sidecar.outbound_timeout_seconds,
-            "dry_run": False,
-            "llm_ready": self.generator.llm_ready,
-            "details": {},
-        }
-        if self.config.qq_sidecar.outbound_base_url:
-            status["mode"] = "configured"
-        if refresh and self.config.qq_sidecar.outbound_base_url:
-            client = OneBotActionClient(
-                base_url=self.config.qq_sidecar.outbound_base_url,
-                timeout=self.config.qq_sidecar.outbound_timeout_seconds,
-                access_token=self.config.qq_sidecar.access_token,
-            )
-            try:
-                status["mode"] = "online"
-                status["details"] = {
-                    "version": client.get_version_info(),
-                    "login": client.get_login_info(),
-                    "status": client.get_status(),
-                }
-            except Exception as exc:
-                status["mode"] = "error"
-                status["error"] = str(exc)
-        if self.napcat_login is not None:
-            qq_login = self.napcat_login.panel(refresh=refresh)
-            status["qq_login"] = qq_login
-            if refresh:
-                self._adopt_login_info(qq_login.get("login_info"))
-        return status
+        return self.console.get_sidecar_panel(refresh=refresh)
 
     def save_sidecar_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        self._apply_sidecar_payload(payload)
-        self._refresh_runtime_components(rebuild_outbound=True)
-        self._persist_config()
-        return self.get_sidecar_panel(refresh=False)
+        return self.console.save_sidecar_panel(payload)
 
     def get_qq_login_panel(self, *, refresh: bool = False) -> dict[str, object]:
-        panel = {
-            "configured": bool(str(self.config.qq_sidecar.webui_base_url or "").strip()),
-            "token_configured": bool(str(self.config.qq_sidecar.webui_token or "").strip()),
-            "webui_base_url": self.config.qq_sidecar.webui_base_url,
-            "webui_api_prefix": self.config.qq_sidecar.webui_api_prefix,
-            "webui_timeout_seconds": self.config.qq_sidecar.webui_timeout_seconds,
-            "webui_token": _mask_key(self.config.qq_sidecar.webui_token),
-            "webui_url": self.napcat_login.webui_url() if self.napcat_login is not None else "",
-            "status": {
-                "is_login": False,
-                "is_offline": False,
-                "qrcode_url": "",
-                "login_error": "",
-            },
-            "login_info": {},
-        }
-        if self.napcat_login is None:
-            return panel
-        bridge_panel = self.napcat_login.panel(refresh=refresh)
-        panel.update(bridge_panel)
-        if refresh:
-            self._adopt_login_info(bridge_panel.get("login_info"))
-        return panel
+        return self.console.get_qq_login_panel(refresh=refresh)
 
     def save_qq_login_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        self._apply_sidecar_payload(payload)
-        self._refresh_runtime_components(rebuild_outbound=False)
-        self._persist_config()
-        return self.get_qq_login_panel(refresh=False)
+        return self.console.save_qq_login_panel(payload)
 
     def refresh_qq_login_panel(self) -> dict[str, object]:
-        if self.napcat_login is None:
-            raise ValueError("NapCat QQ login bridge is unavailable")
-        try:
-            self.napcat_login.refresh_qrcode()
-        except NapCatLoginError as exc:
-            raise ValueError(str(exc)) from exc
-        return self.get_qq_login_panel(refresh=True)
+        return self.console.refresh_qq_login_panel()
 
     def get_qq_login_qrcode_image(self) -> tuple[bytes, str] | None:
-        if self.napcat_login is None:
-            return None
-        try:
-            payload = self.napcat_login.qrcode_payload()
-            content_type, body = qrcode_payload_to_image_source(payload)
-        except NapCatLoginError as exc:
-            raise ValueError(str(exc)) from exc
-        return body, content_type
+        return self.console.get_qq_login_qrcode_image()
 
     def _apply_sidecar_payload(self, payload: dict[str, object]) -> None:
-        self.config.qq_sidecar.adapter_name = str(
-            payload.get("adapter_name", self.config.qq_sidecar.adapter_name)
-            or self.config.qq_sidecar.adapter_name
-        )
-        self.config.qq_sidecar.outbound_base_url = str(
-            payload.get("outbound_base_url", self.config.qq_sidecar.outbound_base_url) or ""
-        )
-        self.config.qq_sidecar.outbound_timeout_seconds = _safe_float(
-            payload, "outbound_timeout_seconds", self.config.qq_sidecar.outbound_timeout_seconds
-        )
-        _access_token_raw = str(
-            payload.get("access_token", "") or ""
-        )
-        if _access_token_raw and not _is_masked(_access_token_raw):
-            self.config.qq_sidecar.access_token = _access_token_raw
-        self.config.qq_sidecar.inbound_host = str(
-            payload.get("inbound_host", self.config.qq_sidecar.inbound_host)
-            or self.config.qq_sidecar.inbound_host
-        )
-        self.config.qq_sidecar.inbound_port = _safe_int(
-            payload, "inbound_port", self.config.qq_sidecar.inbound_port
-        )
-        webui_base_raw = str(
-            payload.get("webui_base_url", self.config.qq_sidecar.webui_base_url)
-            or ""
-        )
-        webui_api_prefix = payload.get("webui_api_prefix", self.config.qq_sidecar.webui_api_prefix)
-        next_webui_api_prefix = str(
-            self.config.qq_sidecar.webui_api_prefix if webui_api_prefix is None else webui_api_prefix
-        ).strip()
-        self.config.qq_sidecar.webui_api_prefix = next_webui_api_prefix or "/api"
-        self.config.qq_sidecar.webui_timeout_seconds = _safe_float(
-            payload, "webui_timeout_seconds", self.config.qq_sidecar.webui_timeout_seconds
-        )
-        webui_token_raw = str(
-            payload.get("webui_token", "") or ""
-        )
-        if _is_masked(webui_token_raw):
-            webui_token_raw = self.config.qq_sidecar.webui_token
-        normalized_webui_base, normalized_webui_token = normalize_webui_settings(
-            webui_base_raw,
-            webui_token_raw,
-        )
-        self.config.qq_sidecar.webui_base_url = normalized_webui_base
-        self.config.qq_sidecar.webui_token = normalized_webui_token
-        self.config.qq_sidecar.reverse_ws_url = str(
-            payload.get("reverse_ws_url", self.config.qq_sidecar.reverse_ws_url)
-            or self.config.qq_sidecar.reverse_ws_url
-        )
-        self.config.qq_sidecar.dry_run = False
+        self.console._apply_sidecar_payload(payload)
 
     def get_other_panel(self) -> dict[str, object]:
-        return {
-            "service_name": self.config.service_name,
-            "assistant_name": self.config.assistant_name,
-            "bot_account_id": self.config.bot_account_id,
-            "group_reply_requires_mention": self.config.group_reply_requires_mention,
-            "image_command_prefix": self.config.image_command_prefix,
-            "image_command_aliases": list(self.config.image_command_aliases),
-            "ignore_prefixes": list(self.config.ignore_prefixes),
-            "group_follow_up_window_seconds": self.config.group_follow_up_window_seconds,
-            "group_response_delay_seconds": self.config.group_response_delay_seconds,
-            "repeat_trigger_count": self.config.repeat_trigger_count,
-            "multimodal_enabled": self.config.multimodal_enabled,
-            "data_root": self.config.data_root,
-            "config_path": self.config.config_path,
-            "marketplace": deepcopy(serialize_app_config(self.config)["marketplace"]),
-        }
+        return self.console.get_other_panel()
 
     def save_other_panel(self, payload: dict[str, object]) -> dict[str, object]:
-        follow_up_raw = payload.get("group_follow_up_window_seconds", self.config.group_follow_up_window_seconds)
-        reply_delay_raw = payload.get("group_response_delay_seconds", self.config.group_response_delay_seconds)
-        repeat_trigger_raw = payload.get("repeat_trigger_count", self.config.repeat_trigger_count)
-        self.config.service_name = str(payload.get("service_name", self.config.service_name) or self.config.service_name)
-        self.config.assistant_name = str(payload.get("assistant_name", self.config.assistant_name) or self.config.assistant_name)
-        self.config.bot_account_id = str(payload.get("bot_account_id", self.config.bot_account_id) or "")
-        self.config.group_reply_requires_mention = bool(payload.get("group_reply_requires_mention", self.config.group_reply_requires_mention))
-        self.config.image_command_prefix = str(payload.get("image_command_prefix", self.config.image_command_prefix) or self.config.image_command_prefix)
-        self.config.image_command_aliases = self._coerce_list(payload.get("image_command_aliases", self.config.image_command_aliases))
-        self.config.ignore_prefixes = self._coerce_list(payload.get("ignore_prefixes", self.config.ignore_prefixes))
-        self.config.group_follow_up_window_seconds = max(
-            0.0,
-            float(self.config.group_follow_up_window_seconds if follow_up_raw is None else follow_up_raw),
-        )
-        self.config.group_response_delay_seconds = max(
-            0.0,
-            float(self.config.group_response_delay_seconds if reply_delay_raw is None else reply_delay_raw),
-        )
-        self.config.repeat_trigger_count = max(
-            0,
-            int(self.config.repeat_trigger_count if repeat_trigger_raw is None else repeat_trigger_raw),
-        )
-        self.config.multimodal_enabled = bool(payload.get("multimodal_enabled", self.config.multimodal_enabled))
-        marketplace = payload.get("marketplace", {})
-        if isinstance(marketplace, dict):
-            self.config.marketplace.enabled = bool(marketplace.get("enabled", self.config.marketplace.enabled))
-            self.config.marketplace.default_query = str(marketplace.get("default_query", self.config.marketplace.default_query) or self.config.marketplace.default_query)
-            sources = marketplace.get("sources")
-            if isinstance(sources, list):
-                next_sources = []
-                for item in sources:
-                    if not isinstance(item, dict):
-                        continue
-                    next_sources.append(type(self.config.marketplace.sources[0])(
-                        source_id=str(item.get("source_id", item.get("id", "skillsmp")) or "skillsmp"),
-                        name=str(item.get("name", "SkillsMP") or "SkillsMP"),
-                        kind=str(item.get("kind", "skillsmp") or "skillsmp"),
-                        enabled=bool(item.get("enabled", True)),
-                        base_url=str(item.get("base_url", "https://skillsmp.com") or "https://skillsmp.com"),
-                        search_path=str(item.get("search_path", "/api/v1/skills/search") or "/api/v1/skills/search"),
-                        browse_url=str(item.get("browse_url", "https://skillsmp.com/zh") or "https://skillsmp.com/zh"),
-                        api_key=str(item.get("api_key", "") or ""),
-                        timeout_seconds=float(item.get("timeout_seconds", 10.0) or 10.0),
-                        max_results=int(item.get("max_results", 12) or 12),
-                    ))
-                if next_sources:
-                    self.config.marketplace.sources = next_sources
-        self._refresh_runtime_components()
-        self._persist_config()
-        return self.get_other_panel()
+        return self.console.save_other_panel(payload)
 
     def skill_pack_template(self) -> dict[str, object]:
         return build_skill_pack_template()
@@ -3112,65 +2360,10 @@ class WaifuService:
         )
 
     def _detail_knowledge_entries(self, session: SessionMemory) -> list[dict[str, Any]]:
-        entries = self.state_store.list_knowledge(
-            limit=max(80, self.config.memory_graph_limit * 8),
-            character_id=str(session.character_id or self._active_character_id()).strip(),
-        )
-        scopes = {(session.launcher_type, session.launcher_id), ("global", "")}
-        if session.launcher_type == "person":
-            scopes.add(("member", session.launcher_id))
-        filtered = [
-            dict(entry)
-            for entry in entries
-            if (
-                str(entry.get("scope_type", "") or "").strip(),
-                str(entry.get("scope_id", "") or "").strip(),
-            )
-            in scopes
-        ]
-        filtered.sort(key=lambda item: (-float(item.get("confidence") or 0.0), -int(item.get("updated_at") or 0)))
-        return filtered[: max(1, int(self.config.memory_graph_limit))]
+        return self.knowledge._detail_knowledge_entries(session)
 
     def _knowledge_count_for_session(self, session: SessionMemory) -> int:
-        current_character = str(session.character_id or self._active_character_id()).strip()
-        count_fn = getattr(self.state_store, "count_knowledge_for_scopes", None)
-        if callable(count_fn):
-            if session.launcher_type == "group":
-                scopes = [("group", session.launcher_id)]
-            else:
-                scopes = [
-                    ("person", session.launcher_id),
-                    ("member", session.launcher_id),
-                ]
-            return count_fn(scopes, character_id=current_character)
-        total = max(1, int(self.state_store.knowledge_count(character_id=current_character)))
-        entries = self.state_store.list_knowledge(limit=total, character_id=current_character)
-        if session.launcher_type == "group":
-            member_prefix = f"{session.launcher_id}:"
-            return sum(
-                1
-                for entry in entries
-                if (
-                    str(entry.get("scope_type", "") or "").strip() == "group"
-                    and str(entry.get("scope_id", "") or "").strip() == session.launcher_id
-                )
-                or (
-                    str(entry.get("scope_type", "") or "").strip() == "member"
-                    and str(entry.get("scope_id", "") or "").strip().startswith(member_prefix)
-                )
-            )
-        return sum(
-            1
-            for entry in entries
-            if (
-                str(entry.get("scope_type", "") or "").strip() == "person"
-                and str(entry.get("scope_id", "") or "").strip() == session.launcher_id
-            )
-            or (
-                str(entry.get("scope_type", "") or "").strip() == "member"
-                and str(entry.get("scope_id", "") or "").strip() == session.launcher_id
-            )
-        )
+        return self.knowledge._knowledge_count_for_session(session)
 
     @staticmethod
     def _sanitize_session_metadata(metadata: dict[str, object] | object) -> dict[str, object]:
@@ -3297,14 +2490,7 @@ def _build_runtime_outbound(app_config: AppConfig) -> OutboundPort:
 
 
 def _build_embedding_client(app_config: AppConfig) -> EmbeddingClient:
-    return EmbeddingClient(
-        enabled=app_config.embedding.enabled,
-        backend=app_config.embedding.backend,
-        base_url=app_config.embedding.base_url,
-        api_key=app_config.embedding.api_key,
-        model=app_config.embedding.model,
-        timeout_seconds=app_config.embedding.timeout_seconds,
-    )
+    return build_embedding_client(app_config)
 
 
 def _build_napcat_login_bridge(app_config: AppConfig) -> NapCatLoginBridge:
@@ -3322,7 +2508,11 @@ def _build_service(
     state_store: Any,
     outbound: OutboundPort,
 ) -> tuple[WaifuService, OutboundPort]:
-    generator = Generator(app_config)
+    generator = Generator(
+        app_config,
+        llm_client=build_llm_client(app_config),
+        image_client=build_image_client(app_config),
+    )
     cards = generator._cards
     skills = SkillRegistry(app_config)
     tools = ToolRegistry()

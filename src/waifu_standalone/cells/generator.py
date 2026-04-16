@@ -8,42 +8,43 @@ from ..config import AppConfig
 from ..contracts import GeneratedImage
 from ..models import EmotionState, InboundEvent, SessionMemory
 from .cards import CardManager, CharacterCard
-from .dify_service import DifyChatClient, DifyChatError
+from .image_clients import ImageClient, ImageClientError, build_image_client
+from .llm_clients import LLMClient, LLMClientError, build_llm_client
 from .skill_registry import SkillSpec
-from .xai_image_service import XAIImageClient, XAIImageError
 
 
 class Generator:
     """Prompt builder plus optional remote model clients."""
 
-    def __init__(self, config: AppConfig):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        llm_client: LLMClient | None = None,
+        image_client: ImageClient | None = None,
+    ):
         self.config = config
         self._cards = CardManager(config)
-        self._dify_client = DifyChatClient(
-            base_url=config.llm.base_url,
-            api_key=config.llm.api_key,
-            model=config.llm.model,
-            backend=config.llm.backend,
-            timeout_seconds=config.llm.timeout_seconds,
-            app_type=config.llm.app_type,
-        )
-        self._image_client = XAIImageClient(
-            base_url=config.image_generation.base_url,
-            api_key=config.image_generation.api_key,
-            model=config.image_generation.model,
-            timeout_seconds=config.image_generation.timeout_seconds,
-            response_format=config.image_generation.response_format,
-            aspect_ratio=config.image_generation.aspect_ratio,
-            resolution=config.image_generation.resolution,
-        )
+        self._dify_client = llm_client or build_llm_client(config)
+        self._image_client = image_client or build_image_client(config)
 
     @property
     def llm_ready(self) -> bool:
-        return self.config.llm.enabled and self._dify_client.enabled
+        return self.config.llm.enabled and self._llm_client.enabled
+
+    @property
+    def _llm_client(self) -> LLMClient:
+        return self._dify_client
 
     @property
     def image_ready(self) -> bool:
         return self.config.image_generation.enabled and self._image_client.enabled
+
+    def close(self) -> None:
+        for client in (self._dify_client, self._image_client):
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
     def resolve_assistant_name(self, launcher_type: str, session: SessionMemory) -> str:
         card = self._cards.load(launcher_type, session)
@@ -98,7 +99,7 @@ class Generator:
                 cleaned = self._clean_response(response)
                 if cleaned:
                     return self._clip(cleaned, limit=self.config.max_thinking_words)
-            except DifyChatError:
+            except LLMClientError:
                 pass
         if allow_fallback:
             return self._fallback_analysis(event, latest_message, memory_hints, speaker_notes)
@@ -155,7 +156,7 @@ class Generator:
                 cleaned = self._clean_response(response)
                 if cleaned:
                     return cleaned
-            except DifyChatError:
+            except LLMClientError:
                 pass
         if allow_fallback:
             return self._fallback_reply(
@@ -186,7 +187,7 @@ class Generator:
                 summary, tags = self._parse_summary_payload(response)
                 if summary:
                     return summary, tags
-            except DifyChatError:
+            except LLMClientError:
                 pass
         return self._fallback_summary(history_lines)
 
@@ -223,7 +224,46 @@ class Generator:
                 parsed = self._parse_knowledge_payload(response, max_entries=max_entries)
                 if parsed["entries"] or parsed["profile_summary"]:
                     return parsed
-            except DifyChatError:
+            except LLMClientError:
+                pass
+        if allow_fallback:
+            return self._fallback_extract_knowledge(cleaned_message, max_entries=max_entries)
+        return {"entries": [], "profile_summary": ""}
+
+    async def aextract_knowledge(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        latest_message: str,
+        conversation_view: str,
+        address: str = "",
+        max_entries: int = 2,
+        allow_fallback: bool = True,
+    ) -> dict[str, Any]:
+        cleaned_message = " ".join(str(latest_message or "").split())
+        if not cleaned_message:
+            return {"entries": [], "profile_summary": ""}
+        if self.llm_ready:
+            prompt = self._build_knowledge_query(
+                event,
+                session,
+                assistant_name=assistant_name,
+                latest_message=cleaned_message,
+                conversation_view=conversation_view,
+                address=address,
+                max_entries=max_entries,
+            )
+            try:
+                response = await self._dify_client.ainvoke(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose="knowledge"),
+                )
+                parsed = self._parse_knowledge_payload(response, max_entries=max_entries)
+                if parsed["entries"] or parsed["profile_summary"]:
+                    return parsed
+            except LLMClientError:
                 pass
         if allow_fallback:
             return self._fallback_extract_knowledge(cleaned_message, max_entries=max_entries)
@@ -236,7 +276,7 @@ class Generator:
         if self.image_ready:
             try:
                 return GeneratedImage(prompt=cleaned, image_ref=self._image_client.generate(cleaned))
-            except XAIImageError as exc:
+            except ImageClientError as exc:
                 raise ValueError(str(exc)) from exc
         return GeneratedImage(prompt=cleaned, image_ref=f"generated://{cleaned}")
 
@@ -273,7 +313,7 @@ class Generator:
                 cleaned = self._clean_response(response)
                 if cleaned:
                     return cleaned
-            except DifyChatError:
+            except LLMClientError:
                 pass
         return f"{address}要的图片生成好了~是一个“{self._clip(prompt)}”呢。"
 
@@ -312,7 +352,7 @@ class Generator:
                 cleaned = self._clean_response(response)
                 if cleaned:
                     return cleaned
-            except DifyChatError:
+            except LLMClientError:
                 pass
         if allow_fallback:
             return self._fallback_onboarding_reply(

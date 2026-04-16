@@ -339,6 +339,34 @@ class HttpApiTests(unittest.TestCase):
             imported = api.import_skill_pack(bundle, overwrite=True)
             self.assertEqual(imported["imported_count"], 1)
 
+    def test_non_admin_user_panel_omits_directory_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            api = HttpApi(service)
+            assert api.auth is not None
+            auth = api.auth
+            admin = auth.bootstrap_admin("admin", "password123")
+            with auth._lock:
+                auth._users["viewer"] = auth._build_user_record("viewer", password="password123", role="user")
+                auth._save_locked()
+
+            service.state_store.save_member(
+                {
+                    "group_id": "612475113",
+                    "user_id": "783190298",
+                    "qq_nickname": "tester",
+                    "preferred_name": "luna",
+                }
+            )
+
+            admin_panel = api.get_user_panel(admin["username"])
+            viewer_panel = api.get_user_panel("viewer")
+
+            self.assertIn("members", admin_panel)
+            self.assertEqual(viewer_panel["current_user"]["username"], "viewer")
+            self.assertEqual(viewer_panel["users"], [viewer_panel["current_user"]])
+            self.assertNotIn("members", viewer_panel)
+
     def test_character_preview_endpoint_returns_reply_and_transcript(self) -> None:
         detail = self.api.preview_character_panel(
             {

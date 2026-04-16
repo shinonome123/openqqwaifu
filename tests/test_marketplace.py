@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import sys
@@ -14,20 +15,7 @@ if str(SRC) not in sys.path:
 
 from waifu_standalone.cells.marketplace import MarketplaceClient
 from waifu_standalone.config import MarketplaceConfig, MarketplaceSourceConfig
-
-
-class _FakeResponse:
-    def __init__(self, payload: bytes):
-        self._payload = payload
-
-    def read(self) -> bytes:
-        return self._payload
-
-    def __enter__(self) -> "_FakeResponse":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        return None
+from waifu_standalone.http_transport import HttpResponse
 
 
 class MarketplaceClientTests(unittest.TestCase):
@@ -49,10 +37,16 @@ class MarketplaceClientTests(unittest.TestCase):
     def test_fetch_skill_markdown_accepts_github_tree_url(self) -> None:
         client = self._client()
 
-        def fake_urlopen(request, timeout=0):
-            return _FakeResponse(b"---\nid: demo\n---\nbody\n")
+        def fake_request(method, url, **kwargs):
+            self.assertEqual(method, "GET")
+            return HttpResponse(
+                status_code=200,
+                text="---\nid: demo\n---\nbody\n",
+                content=b"---\nid: demo\n---\nbody\n",
+                headers={},
+            )
 
-        with patch("waifu_standalone.cells.marketplace.urlopen", side_effect=fake_urlopen):
+        with patch.object(client._transport, "request", side_effect=fake_request):
             result = client.fetch_skill_markdown(
                 "skillsmp",
                 "https://github.com/example/demo/tree/main/skills/demo",
@@ -64,15 +58,21 @@ class MarketplaceClientTests(unittest.TestCase):
     def test_fetch_skill_markdown_accepts_github_repo_root_url(self) -> None:
         client = self._client()
 
-        def fake_urlopen(request, timeout=0):
-            url = request.full_url
+        def fake_request(method, url, **kwargs):
+            self.assertEqual(method, "GET")
             if url == "https://api.github.com/repos/example/demo":
-                return _FakeResponse(json.dumps({"default_branch": "main"}).encode("utf-8"))
+                payload = json.dumps({"default_branch": "main"})
+                return HttpResponse(status_code=200, text=payload, content=payload.encode("utf-8"), headers={})
             if url == "https://raw.githubusercontent.com/example/demo/main/SKILL.md":
-                return _FakeResponse(b"---\nid: demo-root\n---\nbody\n")
+                return HttpResponse(
+                    status_code=200,
+                    text="---\nid: demo-root\n---\nbody\n",
+                    content=b"---\nid: demo-root\n---\nbody\n",
+                    headers={},
+                )
             raise AssertionError(url)
 
-        with patch("waifu_standalone.cells.marketplace.urlopen", side_effect=fake_urlopen):
+        with patch.object(client._transport, "request", side_effect=fake_request):
             result = client.fetch_skill_markdown(
                 "skillsmp",
                 "https://github.com/example/demo",
@@ -84,10 +84,16 @@ class MarketplaceClientTests(unittest.TestCase):
     def test_fetch_skill_markdown_accepts_github_blob_url(self) -> None:
         client = self._client()
 
-        def fake_urlopen(request, timeout=0):
-            return _FakeResponse(b"---\nid: blob-demo\n---\nbody\n")
+        def fake_request(method, url, **kwargs):
+            self.assertEqual(method, "GET")
+            return HttpResponse(
+                status_code=200,
+                text="---\nid: blob-demo\n---\nbody\n",
+                content=b"---\nid: blob-demo\n---\nbody\n",
+                headers={},
+            )
 
-        with patch("waifu_standalone.cells.marketplace.urlopen", side_effect=fake_urlopen):
+        with patch.object(client._transport, "request", side_effect=fake_request):
             result = client.fetch_skill_markdown(
                 "skillsmp",
                 "https://github.com/example/demo/blob/main/skills/demo/SKILL.md",
@@ -95,6 +101,36 @@ class MarketplaceClientTests(unittest.TestCase):
 
         self.assertEqual(result["raw_url"], "https://raw.githubusercontent.com/example/demo/main/skills/demo/SKILL.md")
         self.assertIn("id: blob-demo", result["markdown"])
+
+    def test_async_search_uses_async_transport(self) -> None:
+        client = self._client()
+
+        async def fake_request(method, url, **kwargs):
+            self.assertEqual(method, "GET")
+            payload = json.dumps(
+                {
+                    "data": {
+                        "skills": [
+                            {
+                                "id": "demo",
+                                "name": "Demo Skill",
+                                "author": "tester",
+                                "description": "demo",
+                                "githubUrl": "https://github.com/example/demo",
+                                "skillUrl": "https://example.com/skill",
+                            }
+                        ]
+                    }
+                }
+            )
+            return HttpResponse(status_code=200, text=payload, content=payload.encode("utf-8"), headers={})
+
+        with patch.object(client._async_transport, "request", side_effect=fake_request):
+            result = asyncio.run(client.asearch("demo"))
+
+        self.assertTrue(result["enabled"])
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["id"], "demo")
 
 
 if __name__ == "__main__":
