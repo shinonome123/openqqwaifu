@@ -73,7 +73,11 @@ def main() -> None:
     outbound_mode = (
         "capture(dry-run)"
         if isinstance(outbound, CapturingOutboundPort)
-        else f"onebot-http->{config.qq_sidecar.outbound_base_url}"
+        else (
+            f"reverse-ws<-{config.qq_sidecar.reverse_ws_url}"
+            if str(config.qq_sidecar.gateway_mode or "http").strip().lower() == "reverse_ws"
+            else f"onebot-http->{config.qq_sidecar.outbound_base_url}"
+        )
     )
     logger.info(
         "%s listening on http://%s:%s [outbound=%s]",

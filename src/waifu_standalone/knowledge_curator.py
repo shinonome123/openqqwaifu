@@ -287,40 +287,25 @@ class KnowledgeCurator:
             user_id=event.sender_id,
             character_id=current_character,
         )
-        members = svc.state_store.list_members(limit=240, character_id=current_character)
-        scoped = [
-            item
-            for item in members
-            if str(item.get("group_id", "") or "").strip() == current_group
-        ]
-        active_key = (current_group, event.sender_id)
-        scoped.sort(
-            key=lambda item: (
-                (str(item.get("group_id", "") or "").strip(), str(item.get("user_id", "") or "").strip()) != active_key,
-                -(int(item.get("last_seen_at") or 0)),
-                -(int(item.get("updated_at") or 0)),
-            )
-        )
-        for member in scoped[:4]:
-            qq_name = str(member.get("qq_nickname", "") or "").strip() or event.sender_name
-            preferred_name = str(member.get("preferred_name", "") or "").strip()
-            profile_summary = str(member.get("profile_summary", "") or "").strip()
-            onboarding_status = str(member.get("onboarding_status", "") or "").strip()
-            affinity_score = float(member.get("affinity_score") or 0.0)
-            bond_stage = svc.value_game.bond_stage(affinity_score)
-            if str(member.get("user_id", "") or "").strip() == event.sender_id:
-                if preferred_name:
-                    notes.append(f"{qq_name} prefers to be called {preferred_name}.")
-                else:
-                    notes.append(f"The current speaker is {qq_name}.")
-                notes.append(f"Bond stage with {qq_name}: {bond_stage} ({affinity_score:.2f}).")
-            elif preferred_name:
-                notes.append(f"{qq_name} is usually addressed as {preferred_name}.")
-            profile_summary = svc.persona.sanitize_profile_summary(profile_summary)
-            if profile_summary:
-                notes.append(f"Profile summary for {qq_name}: {profile_summary}")
-            if onboarding_status and onboarding_status not in {"", "ready"}:
-                notes.append(f"{qq_name} is still in onboarding status: {onboarding_status}.")
+        member = self._member_record(event) or {}
+        if not member:
+            return notes
+        qq_name = str(member.get("qq_nickname", "") or "").strip() or event.sender_name
+        preferred_name = str(member.get("preferred_name", "") or "").strip()
+        profile_summary = str(member.get("profile_summary", "") or "").strip()
+        onboarding_status = str(member.get("onboarding_status", "") or "").strip()
+        affinity_score = float(member.get("affinity_score") or 0.0)
+        bond_stage = svc.value_game.bond_stage(affinity_score)
+        if preferred_name:
+            notes.append(f"{qq_name} prefers to be called {preferred_name}.")
+        else:
+            notes.append(f"The current speaker is {qq_name}.")
+        notes.append(f"Bond stage with {qq_name}: {bond_stage} ({affinity_score:.2f}).")
+        profile_summary = svc.persona.sanitize_profile_summary(profile_summary)
+        if profile_summary:
+            notes.append(f"Profile summary for {qq_name}: {profile_summary}")
+        if onboarding_status and onboarding_status not in {"", "ready"}:
+            notes.append(f"{qq_name} is still in onboarding status: {onboarding_status}.")
         return notes
 
     async def _adirectory_member_notes(self, event: InboundEvent) -> list[str]:

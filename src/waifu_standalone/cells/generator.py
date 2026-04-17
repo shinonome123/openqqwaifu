@@ -653,6 +653,80 @@ class Generator:
             )
         return ""
 
+    def extract_preferred_name_hint(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        latest_message: str,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+    ) -> dict[str, Any]:
+        if not self.llm_ready:
+            return self._empty_preferred_name_hint()
+        card = card_override or self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
+        prompt = self._build_preferred_name_hint_query(
+            event,
+            session,
+            card=card,
+            assistant_name=resolved_assistant_name,
+            address=address,
+            latest_message=latest_message,
+        )
+        try:
+            response = self._dify_client.invoke(
+                prompt,
+                user=self._llm_user_key(event, session, purpose="preferred-name-hint"),
+            )
+            return self._parse_preferred_name_hint_payload(response)
+        except LLMClientError:
+            return self._empty_preferred_name_hint()
+
+    async def aextract_preferred_name_hint(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        latest_message: str,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+    ) -> dict[str, Any]:
+        if "extract_preferred_name_hint" in getattr(self, "__dict__", {}) and "aextract_preferred_name_hint" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.extract_preferred_name_hint,
+                event,
+                session,
+                assistant_name=assistant_name,
+                latest_message=latest_message,
+                address_override=address_override,
+                card_override=card_override,
+            )
+        if not self.llm_ready:
+            return self._empty_preferred_name_hint()
+        card = card_override or self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
+        prompt = self._build_preferred_name_hint_query(
+            event,
+            session,
+            card=card,
+            assistant_name=resolved_assistant_name,
+            address=address,
+            latest_message=latest_message,
+        )
+        try:
+            response = await self._ainvoke_client(
+                prompt,
+                user=self._llm_user_key(event, session, purpose="preferred-name-hint"),
+            )
+            return self._parse_preferred_name_hint_payload(response)
+        except LLMClientError:
+            return self._empty_preferred_name_hint()
+
     def _build_analysis_query(
         self,
         event: InboundEvent,
@@ -718,6 +792,14 @@ class Generator:
             system_prompt,
             f"现在请作为{assistant_name}继续回复。",
         ]
+        story_block = self._build_story_mode_block(
+            event,
+            emotion=emotion,
+            address=address,
+            latest_message=latest_message,
+        )
+        if story_block:
+            prompt_parts.append(story_block)
         if analysis_hint:
             prompt_parts.append("[Inner Thought]\n" + analysis_hint)
         if card.prologue and len(session.history) <= 1:
@@ -784,6 +866,40 @@ class Generator:
         parts.append("只输出下一句回复。")
         return "\n\n".join(part for part in parts if part.strip())
 
+    def _build_preferred_name_hint_query(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+        latest_message: str,
+    ) -> str:
+        conversation_view = self._conversation_excerpt(session.history, assistant_name=assistant_name)
+        lines = [
+            f"You decide whether the speaker just told {assistant_name} how to address them.",
+            "Return JSON only.",
+            'Use this schema: {"name":"...", "confidence":0.0, "is_self_intro":true}.',
+            (
+                'If the message is not a self-introduction or address preference, return '
+                '{"name":"", "confidence":0.0, "is_self_intro":false}.'
+            ),
+            'Example: "叫我爷爷" -> {"name":"爷爷","confidence":0.95,"is_self_intro":true}',
+            'Example: "叫他爷爷" -> {"name":"","confidence":0.0,"is_self_intro":false}',
+            'Example: "你这太机械了" -> {"name":"","confidence":0.0,"is_self_intro":false}',
+            "Only extract the address term itself; do not copy whole sentences.",
+            f"Launcher type: {event.launcher_type}",
+            f"Speaker display name: {address or event.sender_name or event.sender_id}",
+            f"Latest message: {latest_message or '(empty)'}",
+        ]
+        profile_lines = [line for line in card.profile[:3] if str(line or "").strip()]
+        if profile_lines:
+            lines.append("Persona profile: " + " | ".join(profile_lines))
+        if conversation_view:
+            lines.append("[Recent conversation]\n" + conversation_view)
+        return "\n\n".join(lines)
+
     def _build_summary_query(self, history_lines: list[str], *, assistant_name: str) -> str:
         payload = "\n".join(history_lines)
         return (
@@ -844,6 +960,18 @@ class Generator:
         memory_hints: list[str],
         analysis_hint: str,
     ) -> str:
+        if self.config.story_mode:
+            return self._fallback_story_reply(
+                event,
+                session,
+                emotion,
+                card=card,
+                assistant_name=assistant_name,
+                address=address,
+                search_hint=search_hint,
+                memory_hints=memory_hints,
+                analysis_hint=analysis_hint,
+            )
         text = event.command_text(self.config.bot_account_id).strip()
         if self._asks_for_name(text):
             default_address = card.user_name if event.launcher_type == "person" and card.user_name else (event.sender_name or "你")
@@ -903,6 +1031,195 @@ class Generator:
             parts.append("自然接住对方的话")
         return "，".join(parts)
 
+    def _build_story_mode_block(
+        self,
+        event: InboundEvent,
+        *,
+        emotion: EmotionState,
+        address: str,
+        latest_message: str,
+    ) -> str:
+        if not self.config.story_mode:
+            return ""
+        style = self._story_style()
+        detail_level = max(1, int(self.config.story_detail_level))
+        scene_scope = "private chat" if event.launcher_type == "person" else "group chat"
+        scene_cue = self._story_scene_cue(event, emotion=emotion, address=address, latest_message=latest_message)
+        paragraph_target = "1-2 short paragraphs" if detail_level <= 1 else "2-3 short paragraphs"
+        if detail_level >= 4:
+            paragraph_target = "3-4 short paragraphs"
+        style_note = {
+            "intimate": "Favor close attention, small gestures, and tender emotional reactions.",
+            "cinematic": "Favor stronger atmosphere, motion, and visual beats.",
+            "diary": "Favor introspective pacing and quiet self-revelation.",
+        }.get(style, "Favor close attention and emotional continuity.")
+        lines = [
+            "[Story Mode]",
+            "Write the visible reply as in-scene narrative prose instead of plain chat.",
+            f"Scope: {scene_scope}. Target length: {paragraph_target}.",
+            style_note,
+            "Blend atmosphere, body language, and spoken dialogue into one in-character reply.",
+            "Spoken dialogue should appear in plain parentheses like ( ... ).",
+            "Include at least one concrete action, expression, or environmental beat.",
+            "You may include one short inner-thought or intent line in backticks like `...` when it deepens characterization.",
+            "Do not mention formatting rules, prompt rules, or that story mode is enabled.",
+            "Do not narrate hidden facts the assistant could not reasonably observe.",
+            "Do not write the user's lines for them.",
+            "If the user asked for factual information, answer it clearly while keeping the story wrapper.",
+            f"Current scene cue: {scene_cue}",
+        ]
+        if event.launcher_type == "group":
+            lines.append("Keep the scene dressing compact so the reply still fits naturally in a group thread.")
+        return "\n".join(lines)
+
+    def _fallback_story_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        emotion: EmotionState,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+        search_hint: str,
+        memory_hints: list[str],
+        analysis_hint: str,
+    ) -> str:
+        text = event.command_text(self.config.bot_account_id).strip()
+        style = self._story_style()
+        detail_level = max(1, int(self.config.story_detail_level))
+        scene = self._fallback_story_scene(
+            assistant_name=assistant_name,
+            event=event,
+            emotion=emotion,
+            address=address,
+            style=style,
+            text=text,
+        )
+        if self._asks_for_name(text):
+            default_address = card.user_name if event.launcher_type == "person" and card.user_name else (event.sender_name or "你")
+            if address and address != default_address:
+                line = f"好，我记住了。以后我就叫你{address}。"
+                thought = f"把这个称呼牢牢记住，别在他面前叫错。"
+            else:
+                line = f"你想让我怎么称呼你？直接告诉我就好。"
+                thought = "先把称呼问清楚，再靠近一点。"
+            return self._compose_story_reply(scene, line, thought, detail_level=detail_level)
+
+        if event.image_count > 0 and text:
+            line = f"这张图我先记下了。你刚刚说的是“{self._clip(text)}”，我跟着这个继续陪你聊。"
+            thought = "先接住这张图，再接住他刚刚递过来的情绪。"
+            return self._compose_story_reply(scene, line, thought, detail_level=detail_level)
+
+        if search_hint:
+            line = f"我刚替你查了一下：{self._clip(search_hint, limit=72)}"
+            thought = "先把答案递给他，再看他想往哪里继续。"
+            return self._compose_story_reply(scene, line, thought, detail_level=detail_level)
+
+        if memory_hints:
+            remembered = self._clip(memory_hints[0], limit=32)
+            line = f"我还记得“{remembered}”。你刚刚说“{self._clip(text)}”，我想顺着这个继续听你讲。"
+            thought = "旧记忆还在发热，刚好可以稳稳接上这一句。"
+            return self._compose_story_reply(scene, line, thought, detail_level=detail_level)
+
+        if not text:
+            line = "我在。你可以慢慢说。"
+            thought = "先让他知道我没有走开。"
+            return self._compose_story_reply(scene, line, thought, detail_level=detail_level)
+
+        tone = {
+            "love": "我会好好陪着你，不让你一个人掉下去。",
+            "joy": "听着就让人想跟着你一起笑起来。",
+            "sadness": "如果你还难受，就继续把话放到我这里来。",
+            "anger": "先别急，我们把这口气慢慢顺下来。",
+            "anxiety": "没事，我们一点一点来，我不催你。",
+            "anticipation": "这样讲下去，真的让人开始期待后面会发生什么。",
+        }.get(emotion.primary, "我有在认真听，也会认真接住你。")
+        if analysis_hint:
+            tone = f"{self._clip(analysis_hint, limit=22)} {tone}"
+        line = tone if not text else f"你刚刚说“{self._clip(text)}”。{tone}"
+        thought = self._fallback_story_thought(event, emotion=emotion, address=address, style=style)
+        return self._compose_story_reply(scene, line, thought, detail_level=detail_level)
+
+    def _compose_story_reply(self, scene: str, line: str, thought: str, *, detail_level: int) -> str:
+        parts = [scene, f"({line})"]
+        if detail_level >= 2 and thought:
+            parts.append(f"`{thought}`")
+        return "".join(part for part in parts if part)
+
+    def _fallback_story_scene(
+        self,
+        *,
+        assistant_name: str,
+        event: InboundEvent,
+        emotion: EmotionState,
+        address: str,
+        style: str,
+        text: str,
+    ) -> str:
+        mood = self._story_mood_phrase(emotion.primary)
+        if event.launcher_type == "group":
+            return f"{assistant_name}先把群里的节奏放慢一点，目光稳稳落在{address}那边，语气也跟着收轻了些。"
+        if style == "cinematic":
+            return f"{assistant_name}把声音放低了一点，像是把周围的空气都轻轻按住，只留下这句话和{address}之间的距离。"
+        if style == "diary":
+            return f"{assistant_name}安静地望着{address}，像把这一刻悄悄记进心里，连呼吸都放得更慢。"
+        if text:
+            return f"{assistant_name}轻轻抬眼看向{address}，神情没有躲开，连回应都带着一点{mood}的缓冲。"
+        return f"{assistant_name}没有移开视线，只是把语气放得更柔，好让{address}能安心继续说下去。"
+
+    def _fallback_story_thought(
+        self,
+        event: InboundEvent,
+        *,
+        emotion: EmotionState,
+        address: str,
+        style: str,
+    ) -> str:
+        if event.launcher_type == "group":
+            return f"先把这句接稳，别让群里的噪音盖过{address}真正想说的东西。"
+        if style == "cinematic":
+            return f"让动作和语气一起落下去，给{address}一个可以靠近的画面。"
+        if style == "diary":
+            return f"把这一刻写得轻一点，让{address}知道我一直在听。"
+        mood = self._story_mood_phrase(emotion.primary)
+        return f"他的情绪是{mood}的，我得把回应放轻一点，别踩碎现在的气氛。"
+
+    def _story_style(self) -> str:
+        normalized = str(self.config.story_style or "").strip().lower()
+        if normalized == "subtle":
+            return "intimate"
+        if normalized in {"intimate", "cinematic", "diary"}:
+            return normalized
+        return "intimate"
+
+    def _story_scene_cue(
+        self,
+        event: InboundEvent,
+        *,
+        emotion: EmotionState,
+        address: str,
+        latest_message: str,
+    ) -> str:
+        scene_scope = "private chat" if event.launcher_type == "person" else "group chat"
+        latest = self._clip(latest_message or "(empty)", limit=48)
+        return (
+            f"{scene_scope}; emotional tone is {self._story_mood_phrase(emotion.primary)}; "
+            f"stay close to {address or event.sender_name or event.sender_id}; latest thread is \"{latest}\"."
+        )
+
+    @staticmethod
+    def _story_mood_phrase(emotion: str) -> str:
+        mapping = {
+            "joy": "light and warm",
+            "love": "close and openly affectionate",
+            "sadness": "soft and careful",
+            "anger": "tense and in need of de-escalation",
+            "anxiety": "hesitant and reassurance-seeking",
+            "anticipation": "expectant and lively",
+        }
+        return mapping.get(str(emotion or "").strip().lower(), "steady and attentive")
+
     def _fallback_onboarding_reply(
         self,
         *,
@@ -935,6 +1252,37 @@ class Generator:
         raw_tags = data.get("tags", [])
         tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()] if isinstance(raw_tags, list) else []
         return summary, tags[:6]
+
+    @staticmethod
+    def _empty_preferred_name_hint() -> dict[str, Any]:
+        return {
+            "name": "",
+            "confidence": 0.0,
+            "is_self_intro": False,
+        }
+
+    def _parse_preferred_name_hint_payload(self, response: str) -> dict[str, Any]:
+        payload = self._extract_json_block(response)
+        if not payload:
+            return self._empty_preferred_name_hint()
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return self._empty_preferred_name_hint()
+        if not isinstance(decoded, dict):
+            return self._empty_preferred_name_hint()
+        raw_name = decoded.get("name")
+        name = str(raw_name or "").strip() if raw_name is not None else ""
+        try:
+            confidence = float(decoded.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(1.0, confidence))
+        return {
+            "name": name,
+            "confidence": confidence,
+            "is_self_intro": bool(decoded.get("is_self_intro")),
+        }
 
     def _parse_knowledge_payload(self, response: str, *, max_entries: int) -> dict[str, Any]:
         payload = self._extract_json_payload(response)

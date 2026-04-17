@@ -24,6 +24,7 @@ class NapCatLoginBridge:
     webui_token: str = ""
     timeout: float = 10.0
     _credential: str = field(default="", init=False, repr=False)
+    _resolved_auth_base: str = field(default="", init=False, repr=False)
     _resolved_api_base: str = field(default="", init=False, repr=False)
     _last_status: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _last_status_at: float = field(default=0.0, init=False, repr=False)
@@ -143,6 +144,7 @@ class NapCatLoginBridge:
 
     def reset_auth(self) -> None:
         self._credential = ""
+        self._resolved_auth_base = ""
         self._resolved_api_base = ""
         self._last_status = {}
         self._last_status_at = 0.0
@@ -236,11 +238,11 @@ class NapCatLoginBridge:
         normalized_base, effective_token = normalize_webui_settings(self.base_url, self.webui_token)
         if not effective_token:
             raise NapCatLoginError("NapCat WebUI token is not configured")
-        if self._credential and self._resolved_api_base and not force:
+        if self._credential and (self._resolved_auth_base or self._resolved_api_base) and not force:
             return
         last_error = ""
         self._credential = ""
-        for api_base in self._candidate_api_bases():
+        for api_base in self._candidate_auth_bases():
             try:
                 result = self._post_json(
                     api_base,
@@ -251,11 +253,24 @@ class NapCatLoginBridge:
                 if not credential:
                     raise NapCatLoginError("NapCat WebUI did not return a credential")
                 self._credential = credential
+                self._resolved_auth_base = api_base
                 self._resolved_api_base = api_base
                 return
             except NapCatLoginError as exc:
                 last_error = str(exc)
         raise NapCatLoginError(last_error or "NapCat WebUI login failed")
+
+    def _candidate_auth_bases(self) -> list[str]:
+        candidates = []
+        seen: set[str] = set()
+        preferred = str(self._resolved_auth_base or self._resolved_api_base or "").strip()
+        for item in [preferred, *self._candidate_api_bases()]:
+            normalized = str(item or "").rstrip("/")
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(normalized)
+        return candidates
 
     def _candidate_api_bases(self) -> list[str]:
         base, _ = normalize_webui_settings(self.base_url, self.webui_token)

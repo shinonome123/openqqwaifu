@@ -1032,6 +1032,7 @@ class WaifuServiceTests(unittest.TestCase):
     def test_group_onboarding_does_not_store_freeform_complaint_as_name(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
+        service.generator.generate_reply = lambda *args, **kwargs: "normal-reply"  # type: ignore[method-assign]
 
         first = service.handle_event(
             InboundEvent(
@@ -1061,7 +1062,7 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         assert second is not None
-        self.assertIn("称呼", second.text)
+        self.assertEqual(second.text, "normal-reply")
         member = service.state_store.get_member(group_id="612475113", user_id="783190298")
         self.assertIsNotNone(member)
         assert member is not None
@@ -1072,6 +1073,7 @@ class WaifuServiceTests(unittest.TestCase):
     def test_group_onboarding_does_not_store_greeting_as_name(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
+        service.generator.generate_reply = lambda *args, **kwargs: "normal-reply"  # type: ignore[method-assign]
 
         first = service.handle_event(
             InboundEvent(
@@ -1101,13 +1103,226 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         assert second is not None
-        self.assertIn("称呼", second.text)
+        self.assertEqual(second.text, "normal-reply")
         member = service.state_store.get_member(group_id="612475113", user_id="783190298")
         self.assertIsNotNone(member)
         assert member is not None
         self.assertEqual(member["preferred_name"], "")
         self.assertEqual(member["onboarding_status"], "pending_name")
         self.assertEqual(len(outbound.sent), 2)
+
+    def test_group_onboarding_accepts_explicit_call_me_phrase(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+
+        service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+        )
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="叫我爷爷")],
+            )
+        )
+
+        self.assertIsNotNone(second)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "爷爷")
+        self.assertEqual(member["onboarding_status"], "ready")
+        self.assertEqual(len(outbound.sent), 2)
+
+    def test_group_onboarding_rejects_feedback_sentence_as_name(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+        service.generator.generate_reply = lambda *args, **kwargs: "normal-reply"  # type: ignore[method-assign]
+
+        service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+        )
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="你这太机械了")],
+            )
+        )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second.text, "normal-reply")
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "")
+        self.assertEqual(member["onboarding_status"], "pending_name")
+        self.assertEqual(len(outbound.sent), 2)
+
+    def test_group_onboarding_rejects_third_party_call_phrase(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+        service.generator.generate_reply = lambda *args, **kwargs: "normal-reply"  # type: ignore[method-assign]
+
+        service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+        )
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="叫他爷爷")],
+            )
+        )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second.text, "normal-reply")
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "")
+        self.assertEqual(member["onboarding_status"], "pending_name")
+        self.assertEqual(len(outbound.sent), 2)
+
+    def test_group_onboarding_accepts_llm_name_hint(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+
+        service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+        )
+        service.generator.extract_preferred_name_hint = (  # type: ignore[method-assign]
+            lambda *args, **kwargs: {"name": "爸爸", "confidence": 0.92, "is_self_intro": True}
+        )
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="以后就这么叫吧")],
+            )
+        )
+
+        self.assertIsNotNone(second)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "爸爸")
+        self.assertEqual(member["onboarding_status"], "ready")
+        self.assertEqual(len(outbound.sent), 2)
+
+    def test_group_address_command_works_without_mention(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="/叫我 爸爸")],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "爸爸")
+        self.assertEqual(member["onboarding_status"], "ready")
+        self.assertEqual(len(outbound.sent), 1)
+
+    def test_group_reply_does_not_leak_other_members_name_into_speaker_notes(self) -> None:
+        config = AppConfig(group_reply_requires_mention=False)
+        service, _ = build_default_service(config)
+        service.state_store.save_member(
+            {
+                "group_id": "612475113",
+                "user_id": "783190298",
+                "qq_nickname": "tester",
+                "preferred_name": "爸爸",
+                "onboarding_status": "ready",
+            }
+        )
+        service.state_store.save_member(
+            {
+                "group_id": "612475113",
+                "user_id": "999999999",
+                "qq_nickname": "other",
+                "preferred_name": "爷爷",
+                "profile_summary": "你这太机械了",
+                "onboarding_status": "ready",
+            }
+        )
+        captured: dict[str, object] = {}
+
+        def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+            captured["speaker_notes"] = list(kwargs.get("speaker_notes", []))
+            return "ok"
+
+        service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="hello there")],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        notes = [str(item) for item in captured.get("speaker_notes", [])]
+        self.assertTrue(any("爸爸" in item for item in notes))
+        self.assertFalse(any("爷爷" in item for item in notes))
+        self.assertFalse(any("你这太机械了" in item for item in notes))
 
     def test_preference_message_writes_back_member_knowledge(self) -> None:
         config = AppConfig(group_reply_requires_mention=False, knowledge_auto_extract=True)
@@ -1597,6 +1812,41 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(embedding["base_url"], "https://api.example.com/v1")
         self.assertEqual(embedding["model"], "text-embedding-3-small")
         self.assertEqual(embedding["timeout_seconds"], 22.0)
+
+    def test_dashboard_snapshot_exposes_story_mode(self) -> None:
+        service, _ = build_default_service(AppConfig(story_mode=True))
+
+        snapshot = service.dashboard_snapshot()
+
+        self.assertTrue(snapshot["story_mode"])
+        self.assertTrue(snapshot["narrator_mode"])
+
+    def test_story_mode_fallback_reply_uses_visible_story_format(self) -> None:
+        service, outbound = build_default_service(
+            AppConfig(
+                story_mode=True,
+                story_style="cinematic",
+                story_detail_level=3,
+                group_reply_requires_mention=False,
+            )
+        )
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="我今天好累")],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("(", result.text)
+        self.assertIn(")", result.text)
+        self.assertIn("`", result.text)
+        self.assertEqual(len(outbound.sent), 1)
 
     def test_runtime_service_uses_capture_outbound_when_sidecar_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

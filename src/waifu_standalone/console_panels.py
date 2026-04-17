@@ -77,7 +77,8 @@ class ConsolePanels:
             "thinking_mode": svc.config.thinking_mode,
             "summarization_mode": svc.config.summarization_mode,
             "event_mode": svc.config.event_mode,
-            "narrator_mode": svc.config.narrator_mode,
+            "story_mode": svc.config.story_mode,
+            "narrator_mode": svc.config.story_mode,
             "value_game_mode": svc.config.value_game_mode,
             "memory_graph_mode": svc.config.memory_graph_mode,
             "proactive_mode": svc.config.proactive_mode,
@@ -447,9 +448,12 @@ class ConsolePanels:
             "knowledge_auto_extract_limit": svc.config.knowledge_auto_extract_limit,
             "event_mode": svc.config.event_mode,
             "event_buffer_limit": svc.config.event_buffer_limit,
-            "narrator_mode": svc.config.narrator_mode,
-            "narrator_style": svc.config.narrator_style,
-            "narrator_detail_level": svc.config.narrator_detail_level,
+            "story_mode": svc.config.story_mode,
+            "story_style": svc.config.story_style,
+            "story_detail_level": svc.config.story_detail_level,
+            "narrator_mode": svc.config.story_mode,
+            "narrator_style": svc.config.story_style,
+            "narrator_detail_level": svc.config.story_detail_level,
             "value_game_mode": svc.config.value_game_mode,
             "value_game_reply_bonus": svc.config.value_game_reply_bonus,
             "memory_graph_mode": svc.config.memory_graph_mode,
@@ -485,9 +489,15 @@ class ConsolePanels:
         )
         svc.config.event_mode = bool(payload.get("event_mode", svc.config.event_mode))
         svc.config.event_buffer_limit = _safe_int(payload, "event_buffer_limit", svc.config.event_buffer_limit)
-        svc.config.narrator_mode = bool(payload.get("narrator_mode", svc.config.narrator_mode))
-        svc.config.narrator_style = str(payload.get("narrator_style", svc.config.narrator_style) or svc.config.narrator_style)
-        svc.config.narrator_detail_level = _safe_int(payload, "narrator_detail_level", svc.config.narrator_detail_level)
+        svc.config.story_mode = bool(payload.get("story_mode", payload.get("narrator_mode", svc.config.story_mode)))
+        svc.config.story_style = str(
+            payload.get("story_style", payload.get("narrator_style", svc.config.story_style)) or svc.config.story_style
+        )
+        svc.config.story_detail_level = _safe_int(
+            payload,
+            "story_detail_level",
+            _safe_int(payload, "narrator_detail_level", svc.config.story_detail_level),
+        )
         svc.config.value_game_mode = bool(payload.get("value_game_mode", svc.config.value_game_mode))
         svc.config.value_game_reply_bonus = _safe_float(payload, "value_game_reply_bonus", svc.config.value_game_reply_bonus)
         svc.config.memory_graph_mode = bool(payload.get("memory_graph_mode", svc.config.memory_graph_mode))

@@ -51,8 +51,14 @@ class ReplyGate:
         if event.launcher_type != "group":
             return True
         bot_account_id = str(service.config.bot_account_id or "").strip()
+        latest_message = (
+            event.command_text(service.config.bot_account_id).strip()
+            or event.to_memory_text()
+        )
         if bot_account_id and event.has_bot_mention(bot_account_id):
             self.refresh_follow_up_window(event)
+            return True
+        if service.onboarding.looks_like_address_command(latest_message):
             return True
         if not service.config.group_reply_requires_mention:
             return True

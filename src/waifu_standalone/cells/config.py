@@ -61,9 +61,9 @@ class ConfigManager:
             knowledge_auto_extract_limit=int(raw.get("knowledge_auto_extract_limit", 2)),
             event_mode=bool(raw.get("event_mode", True)),
             event_buffer_limit=int(raw.get("event_buffer_limit", 120)),
-            narrator_mode=bool(raw.get("narrator_mode", True)),
-            narrator_style=str(raw.get("narrator_style", "subtle")),
-            narrator_detail_level=int(raw.get("narrator_detail_level", 2)),
+            story_mode=bool(raw.get("story_mode", raw.get("narrator_mode", False))),
+            story_style=_coerce_story_style(raw.get("story_style", raw.get("narrator_style", "intimate"))),
+            story_detail_level=int(raw.get("story_detail_level", raw.get("narrator_detail_level", 2))),
             value_game_mode=bool(raw.get("value_game_mode", True)),
             value_game_reply_bonus=float(raw.get("value_game_reply_bonus", 0.08)),
             memory_graph_mode=bool(raw.get("memory_graph_mode", True)),
@@ -146,6 +146,15 @@ def _load_plugins(raw_value: object) -> PluginsConfig:
         enabled=bool(raw_value.get("enabled", True)),
         disabled_names=_load_str_list(raw_value.get("disabled_names"), []),
     )
+
+
+def _coerce_story_style(raw_value: object) -> str:
+    normalized = str(raw_value or "").strip().lower()
+    if normalized == "subtle":
+        return "intimate"
+    if normalized in {"intimate", "cinematic", "diary"}:
+        return normalized
+    return "intimate"
 
 
 def serialize_app_config(config: AppConfig) -> dict[str, object]:
@@ -320,20 +329,41 @@ def _provision_napcat_onebot_network(config: AppConfig, config_dirs: list[Path])
         raw["network"] = network
     http_clients = _ensure_list(network, "httpClients")
     http_servers = _ensure_list(network, "httpServers")
+    websocket_clients = _ensure_list(network, "websocketClients")
 
     qq_sidecar = config.qq_sidecar
     inbound_port = int(qq_sidecar.inbound_port or 8080)
     webhook_url = _desired_napcat_webhook_url(qq_sidecar, inbound_port=inbound_port)
+    reverse_ws_url = _desired_napcat_reverse_ws_url(qq_sidecar, inbound_port=inbound_port)
+    gateway_mode = str(qq_sidecar.gateway_mode or "http").strip().lower()
 
     changed = False
-    http_clients, clients_changed = _ensure_managed_http_client(
-        http_clients,
-        webhook_url,
-        qq_sidecar.access_token,
-    )
-    if clients_changed:
-        network["httpClients"] = http_clients
-        changed = True
+    if gateway_mode == "reverse_ws":
+        http_clients, clients_changed = _remove_managed_http_client(http_clients)
+        if clients_changed:
+            network["httpClients"] = http_clients
+            changed = True
+        websocket_clients, ws_clients_changed = _ensure_managed_websocket_client(
+            websocket_clients,
+            reverse_ws_url,
+            qq_sidecar.reverse_ws_access_token or qq_sidecar.access_token,
+        )
+        if ws_clients_changed:
+            network["websocketClients"] = websocket_clients
+            changed = True
+    else:
+        websocket_clients, ws_clients_changed = _remove_managed_websocket_client(websocket_clients)
+        if ws_clients_changed:
+            network["websocketClients"] = websocket_clients
+            changed = True
+        http_clients, clients_changed = _ensure_managed_http_client(
+            http_clients,
+            webhook_url,
+            qq_sidecar.access_token,
+        )
+        if clients_changed:
+            network["httpClients"] = http_clients
+            changed = True
 
     existing_server = _first_enabled_http_server(http_servers)
     managed_server = _find_named_http_server(http_servers, "openqqwaifu-actions")
@@ -441,6 +471,20 @@ def _default_http_client_entry(webhook_url: str, token: str) -> dict:
     }
 
 
+def _default_websocket_client_entry(reverse_ws_url: str, token: str) -> dict:
+    return {
+        "name": "openqqwaifu-reverse-ws",
+        "enable": True,
+        "url": reverse_ws_url,
+        "messagePostFormat": "array",
+        "reportSelfMessage": False,
+        "reconnectInterval": 5000,
+        "token": str(token or ""),
+        "debug": False,
+        "heartInterval": 30000,
+    }
+
+
 def _default_http_server_entry(port: int, token: str) -> dict:
     return {
         "name": "openqqwaifu-actions",
@@ -498,6 +542,22 @@ def _ensure_managed_http_client(entries: list, webhook_url: str, token: str) -> 
     return next_entries, changed
 
 
+def _remove_managed_http_client(entries: list) -> tuple[list, bool]:
+    next_entries: list = []
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            changed = True
+            continue
+        name = str(entry.get("name") or "").strip()
+        url = str(entry.get("url") or "").rstrip("/")
+        if name == "openqqwaifu-webhook" or _looks_like_openqqwaifu_webhook(url):
+            changed = True
+            continue
+        next_entries.append(entry)
+    return next_entries, changed
+
+
 def _ensure_managed_http_server(entries: list, token: str) -> tuple[list, dict | None, bool]:
     next_entries: list = []
     managed_entry: dict | None = None
@@ -522,12 +582,73 @@ def _ensure_managed_http_server(entries: list, token: str) -> tuple[list, dict |
     return next_entries, managed_entry, changed
 
 
+def _ensure_managed_websocket_client(entries: list, reverse_ws_url: str, token: str) -> tuple[list, bool]:
+    desired = _default_websocket_client_entry(reverse_ws_url, token)
+    managed_entry: dict | None = None
+    next_entries: list = []
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            changed = True
+            continue
+        name = str(entry.get("name") or "").strip()
+        url = str(entry.get("url") or "").rstrip("/")
+        if name == "openqqwaifu-reverse-ws" or _looks_like_openqqwaifu_reverse_ws(url):
+            if managed_entry is None:
+                managed_entry = dict(entry)
+            else:
+                changed = True
+            continue
+        next_entries.append(entry)
+    if managed_entry is None:
+        managed_entry = desired
+        changed = True
+    else:
+        for key, value in desired.items():
+            if managed_entry.get(key) != value:
+                managed_entry[key] = value
+                changed = True
+    next_entries.append(managed_entry)
+    return next_entries, changed
+
+
+def _remove_managed_websocket_client(entries: list) -> tuple[list, bool]:
+    next_entries: list = []
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            changed = True
+            continue
+        name = str(entry.get("name") or "").strip()
+        url = str(entry.get("url") or "").rstrip("/")
+        if name == "openqqwaifu-reverse-ws" or _looks_like_openqqwaifu_reverse_ws(url):
+            changed = True
+            continue
+        next_entries.append(entry)
+    return next_entries, changed
+
+
 def _desired_napcat_webhook_url(qq_sidecar: QQSidecarConfig, *, inbound_port: int) -> str:
     callback_base_url = _env_str("OPENQQWAIFU_QQ_SIDECAR_CALLBACK_BASE_URL")
     if not callback_base_url:
         callback_host = _desired_napcat_callback_host(qq_sidecar)
         callback_base_url = f"http://{callback_host}:{inbound_port}"
     return f"{callback_base_url.rstrip('/')}/onebot/events"
+
+
+def _desired_napcat_reverse_ws_url(qq_sidecar: QQSidecarConfig, *, inbound_port: int) -> str:
+    configured = str(qq_sidecar.reverse_ws_url or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    callback_base_url = _env_str("OPENQQWAIFU_QQ_SIDECAR_CALLBACK_BASE_URL")
+    if callback_base_url:
+        parsed = urlsplit(callback_base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        netloc = parsed.netloc or f"{parsed.hostname}:{parsed.port}" if parsed.hostname else ""
+        base = urlunsplit((scheme, netloc, "", "", "")).rstrip("/")
+        return f"{base}/onebot/v11/ws"
+    callback_host = _desired_napcat_callback_host(qq_sidecar)
+    return f"ws://{callback_host}:{inbound_port}/onebot/v11/ws"
 
 
 def _desired_napcat_callback_host(qq_sidecar: QQSidecarConfig) -> str:
@@ -578,6 +699,15 @@ def _looks_like_openqqwaifu_webhook(url: str) -> bool:
     parsed = urlsplit(str(url or "").strip())
     path = str(parsed.path or "").rstrip("/")
     if path != "/onebot/events":
+        return False
+    host = str(parsed.hostname or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "host.docker.internal", "openqqwaifu"}
+
+
+def _looks_like_openqqwaifu_reverse_ws(url: str) -> bool:
+    parsed = urlsplit(str(url or "").strip())
+    path = str(parsed.path or "").rstrip("/")
+    if path != "/onebot/v11/ws":
         return False
     host = str(parsed.hostname or "").strip().lower()
     return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "host.docker.internal", "openqqwaifu"}

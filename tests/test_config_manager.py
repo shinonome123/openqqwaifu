@@ -18,6 +18,29 @@ from waifu_standalone.config import AppConfig, QQSidecarConfig
 
 
 class ConfigManagerTests(unittest.TestCase):
+    def test_legacy_narrator_keys_load_into_story_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "narrator_mode": True,
+                        "narrator_style": "subtle",
+                        "narrator_detail_level": 4,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=False):
+                config = ConfigManager(config_path).load()
+
+        self.assertTrue(config.story_mode)
+        self.assertEqual(config.story_style, "intimate")
+        self.assertEqual(config.story_detail_level, 4)
+
     def test_autodiscovers_napcat_webui_token_from_sibling_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -198,6 +221,62 @@ class ConfigManagerTests(unittest.TestCase):
         self.assertEqual(len(raw["network"]["httpServers"]), 1)
         self.assertEqual(config.qq_sidecar.outbound_base_url, "http://127.0.0.1:5700")
         self.assertEqual(config.qq_sidecar.access_token, "user-token")
+
+    def test_autodiscovery_provisions_reverse_ws_client_and_removes_http_webhook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "data").mkdir(parents=True, exist_ok=True)
+            (root / "napcat" / "config").mkdir(parents=True, exist_ok=True)
+            onebot_path = root / "napcat" / "config" / "onebot11_99.json"
+            onebot_path.write_text(
+                json.dumps(
+                    {
+                        "network": {
+                            "httpServers": [],
+                            "httpClients": [
+                                {
+                                    "name": "openqqwaifu-webhook",
+                                    "enable": True,
+                                    "url": "http://openqqwaifu:8080/onebot/events",
+                                }
+                            ],
+                            "websocketServers": [],
+                            "websocketClients": [],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path = root / "data" / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "qq_sidecar": {
+                            "gateway_mode": "reverse_ws",
+                            "inbound_host": "0.0.0.0",
+                            "inbound_port": 8080,
+                            "reverse_ws_url": "ws://openqqwaifu:8080/onebot/v11/ws",
+                            "outbound_base_url": "",
+                            "access_token": "",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=False):
+                config = ConfigManager(config_path).load()
+
+            raw = json.loads(onebot_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(raw["network"]["httpClients"], [])
+        self.assertEqual(len(raw["network"]["websocketClients"]), 1)
+        self.assertEqual(
+            raw["network"]["websocketClients"][0]["url"],
+            "ws://openqqwaifu:8080/onebot/v11/ws",
+        )
+        self.assertTrue(raw["network"]["websocketClients"][0]["enable"])
+        self.assertEqual(config.qq_sidecar.gateway_mode, "reverse_ws")
 
     def test_autodiscovery_uses_localhost_for_host_runtime_webhook(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
