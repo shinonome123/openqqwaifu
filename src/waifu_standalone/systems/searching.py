@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -115,6 +116,9 @@ class SearchDecider:
         return self._finalize_query(query, results, reason=reason)
 
     async def asearch_query(self, query: str, *, reason: str = "manual") -> SearchContext:
+        search_state = getattr(self, "__dict__", {})
+        if "search_query" in search_state and "asearch_query" not in search_state:
+            return await asyncio.to_thread(self.search_query, query, reason=reason)
         query = self._normalize_query(query)
         if not query:
             return SearchContext()

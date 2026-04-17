@@ -1394,6 +1394,52 @@
   font-size: 11px;
 }
 
+.observability-grid {
+  display: grid;
+  grid-template-columns: 0.95fr 1.05fr;
+  gap: 16px;
+}
+
+.observability-log-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.observability-log-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.observability-log-body {
+  min-width: 0;
+}
+
+.observability-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.observability-log-message {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-strong);
+}
+
 @media (max-width: 900px) {
   .event-row {
     grid-template-columns: 14px 1fr;
@@ -1407,6 +1453,9 @@
   .event-text {
     grid-column: 2;
     white-space: normal;
+  }
+  .observability-grid {
+    grid-template-columns: 1fr;
   }
 }
 

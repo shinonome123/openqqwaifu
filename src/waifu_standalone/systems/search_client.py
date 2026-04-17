@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..config import AppConfig
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport
+from ..observability import TransportMetricsScope
 
 
 @dataclass(slots=True)
@@ -47,8 +48,15 @@ class DuckDuckGoSearchClient:
 
     def __init__(self, config: AppConfig):
         self.config = config
-        self._transport = SyncHttpTransport(timeout_seconds=self.config.search_timeout_seconds)
-        self._async_transport = AsyncHttpTransport(timeout_seconds=self.config.search_timeout_seconds)
+        scope = TransportMetricsScope(kind="search", target="duckduckgo")
+        self._transport = SyncHttpTransport(
+            timeout_seconds=self.config.search_timeout_seconds,
+            metrics_scope=scope,
+        )
+        self._async_transport = AsyncHttpTransport(
+            timeout_seconds=self.config.search_timeout_seconds,
+            metrics_scope=scope,
+        )
 
     def fetch(self, query: str) -> list[SearchResult]:
         results = self._duckduckgo_instant_answer(query)

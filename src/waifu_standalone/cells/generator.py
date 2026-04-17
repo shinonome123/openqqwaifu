@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -61,6 +62,15 @@ class Generator:
         ]
         return ":".join(part.replace(":", "_") for part in parts)
 
+    async def _ainvoke_client(self, query: str, *, user: str) -> str:
+        client_state = getattr(self._dify_client, "__dict__", {})
+        if "invoke" in client_state and "ainvoke" not in client_state:
+            return await asyncio.to_thread(self._dify_client.invoke, query, user=user)
+        ainvoke = getattr(self._dify_client, "ainvoke", None)
+        if callable(ainvoke):
+            return await ainvoke(query, user=user)
+        return await asyncio.to_thread(self._dify_client.invoke, query, user=user)
+
     def generate_analysis(
         self,
         event: InboundEvent,
@@ -93,6 +103,64 @@ class Generator:
             )
             try:
                 response = self._dify_client.invoke(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose="analysis"),
+                )
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return self._clip(cleaned, limit=self.config.max_thinking_words)
+            except LLMClientError:
+                pass
+        if allow_fallback:
+            return self._fallback_analysis(event, latest_message, memory_hints, speaker_notes)
+        return ""
+
+    async def agenerate_analysis(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        conversation_view: str,
+        memory_hints: list[str],
+        speaker_notes: list[str],
+        active_skills: list[SkillSpec] | None = None,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+        allow_fallback: bool = True,
+    ) -> str:
+        if "generate_analysis" in getattr(self, "__dict__", {}) and "agenerate_analysis" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.generate_analysis,
+                event,
+                session,
+                assistant_name=assistant_name,
+                conversation_view=conversation_view,
+                memory_hints=memory_hints,
+                speaker_notes=speaker_notes,
+                active_skills=active_skills,
+                address_override=address_override,
+                card_override=card_override,
+                allow_fallback=allow_fallback,
+            )
+        card = card_override or self._cards.load(event.launcher_type, session)
+        latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
+        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
+        active_skills = active_skills or []
+        if self.llm_ready:
+            prompt = self._build_analysis_query(
+                event,
+                card=card,
+                assistant_name=assistant_name,
+                address=address,
+                conversation_view=conversation_view,
+                memory_hints=memory_hints,
+                speaker_notes=speaker_notes,
+                latest_message=latest_message,
+                active_skills=active_skills,
+            )
+            try:
+                response = await self._ainvoke_client(
                     prompt,
                     user=self._llm_user_key(event, session, purpose="analysis"),
                 )
@@ -172,6 +240,91 @@ class Generator:
             )
         return ""
 
+    async def agenerate_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        emotion: EmotionState,
+        *,
+        assistant_name: str,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+        search_hint: str = "",
+        search_context: str = "",
+        conversation_view: str = "",
+        memory_hints: list[str] | None = None,
+        speaker_notes: list[str] | None = None,
+        analysis_hint: str = "",
+        active_skills: list[SkillSpec] | None = None,
+        allow_fallback: bool = True,
+    ) -> str:
+        if "generate_reply" in getattr(self, "__dict__", {}) and "agenerate_reply" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.generate_reply,
+                event,
+                session,
+                emotion,
+                assistant_name=assistant_name,
+                address_override=address_override,
+                card_override=card_override,
+                search_hint=search_hint,
+                search_context=search_context,
+                conversation_view=conversation_view,
+                memory_hints=memory_hints,
+                speaker_notes=speaker_notes,
+                analysis_hint=analysis_hint,
+                active_skills=active_skills,
+                allow_fallback=allow_fallback,
+            )
+        card = card_override or self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
+        latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
+        memory_hints = memory_hints or []
+        speaker_notes = speaker_notes or []
+        active_skills = active_skills or []
+
+        if self.llm_ready:
+            prompt = self._build_chat_query(
+                event,
+                session,
+                emotion,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=address,
+                search_hint=search_hint,
+                search_context=search_context,
+                conversation_view=conversation_view,
+                memory_hints=memory_hints,
+                speaker_notes=speaker_notes,
+                analysis_hint=analysis_hint,
+                latest_message=latest_message,
+                active_skills=active_skills,
+            )
+            try:
+                response = await self._ainvoke_client(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose="chat"),
+                )
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return cleaned
+            except LLMClientError:
+                pass
+        if allow_fallback:
+            return self._fallback_reply(
+                event,
+                session,
+                emotion,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=address,
+                search_hint=search_hint,
+                memory_hints=memory_hints,
+                analysis_hint=analysis_hint,
+            )
+        return ""
+
     def summarize_history(
         self,
         history_lines: list[str],
@@ -184,6 +337,27 @@ class Generator:
             prompt = self._build_summary_query(history_lines, assistant_name=assistant_name)
             try:
                 response = self._dify_client.invoke(prompt, user="summary")
+                summary, tags = self._parse_summary_payload(response)
+                if summary:
+                    return summary, tags
+            except LLMClientError:
+                pass
+        return self._fallback_summary(history_lines)
+
+    async def asummarize_history(
+        self,
+        history_lines: list[str],
+        *,
+        assistant_name: str,
+    ) -> tuple[str, list[str]]:
+        if "summarize_history" in getattr(self, "__dict__", {}) and "asummarize_history" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(self.summarize_history, history_lines, assistant_name=assistant_name)
+        if not history_lines:
+            return "", []
+        if self.llm_ready:
+            prompt = self._build_summary_query(history_lines, assistant_name=assistant_name)
+            try:
+                response = await self._ainvoke_client(prompt, user="summary")
                 summary, tags = self._parse_summary_payload(response)
                 if summary:
                     return summary, tags
@@ -256,7 +430,7 @@ class Generator:
                 max_entries=max_entries,
             )
             try:
-                response = await self._dify_client.ainvoke(
+                response = await self._ainvoke_client(
                     prompt,
                     user=self._llm_user_key(event, session, purpose="knowledge"),
                 )
@@ -276,6 +450,22 @@ class Generator:
         if self.image_ready:
             try:
                 return GeneratedImage(prompt=cleaned, image_ref=self._image_client.generate(cleaned))
+            except ImageClientError as exc:
+                raise ValueError(str(exc)) from exc
+        return GeneratedImage(prompt=cleaned, image_ref=f"generated://{cleaned}")
+
+    async def agenerate_image(self, prompt: str) -> GeneratedImage:
+        if "generate_image" in getattr(self, "__dict__", {}) and "agenerate_image" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(self.generate_image, prompt)
+        cleaned = str(prompt or "").strip()
+        if not cleaned:
+            raise ValueError("image prompt is empty")
+        if self.image_ready:
+            try:
+                return GeneratedImage(
+                    prompt=cleaned,
+                    image_ref=await self._image_client.agenerate(cleaned),
+                )
             except ImageClientError as exc:
                 raise ValueError(str(exc)) from exc
         return GeneratedImage(prompt=cleaned, image_ref=f"generated://{cleaned}")
@@ -317,6 +507,50 @@ class Generator:
                 pass
         return f"{address}要的图片生成好了~是一个“{self._clip(prompt)}”呢。"
 
+    async def agenerate_image_caption(
+        self,
+        prompt: str,
+        *,
+        launcher_type: str = "person",
+        session: SessionMemory | None = None,
+        address: str = "你",
+        assistant_name: str = "",
+        active_skills: list[SkillSpec] | None = None,
+    ) -> str:
+        if "generate_image_caption" in getattr(self, "__dict__", {}) and "agenerate_image_caption" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.generate_image_caption,
+                prompt,
+                launcher_type=launcher_type,
+                session=session,
+                address=address,
+                assistant_name=assistant_name,
+                active_skills=active_skills,
+            )
+        card = None
+        if session is not None:
+            card = self._cards.load(launcher_type, session)
+        resolved_assistant_name = assistant_name or (card.assistant_name if card else "") or self.config.assistant_name
+        active_skills = active_skills or []
+        if self.llm_ready:
+            request = (
+                f"你是{resolved_assistant_name}。图片已经生成成功。\n"
+                f"用户称呼：{address}\n"
+                f"用户请求：{prompt}\n"
+                "请只用一句自然中文回复，告诉对方图片已经好了，并带一点角色语气。"
+            )
+            skill_block = self._format_skill_block(active_skills)
+            if skill_block:
+                request = request + "\n\n" + skill_block
+            try:
+                response = await self._ainvoke_client(request, user="image-caption")
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return cleaned
+            except LLMClientError:
+                pass
+        return f"{address}要的图片生成好了~是一个“{self._clip(prompt)}”呢。"
+
     def generate_onboarding_reply(
         self,
         event: InboundEvent,
@@ -346,6 +580,63 @@ class Generator:
             )
             try:
                 response = self._dify_client.invoke(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose=f"onboarding-{stage}"),
+                )
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return cleaned
+            except LLMClientError:
+                pass
+        if allow_fallback:
+            return self._fallback_onboarding_reply(
+                stage=stage,
+                address=base_address,
+                candidate_name=candidate_name,
+            )
+        return ""
+
+    async def agenerate_onboarding_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        stage: str,
+        candidate_name: str = "",
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+        allow_fallback: bool = True,
+    ) -> str:
+        if "generate_onboarding_reply" in getattr(self, "__dict__", {}) and "agenerate_onboarding_reply" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.generate_onboarding_reply,
+                event,
+                session,
+                assistant_name=assistant_name,
+                stage=stage,
+                candidate_name=candidate_name,
+                address_override=address_override,
+                card_override=card_override,
+                allow_fallback=allow_fallback,
+            )
+        card = card_override or self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        base_address = str(address_override or "").strip() or self._resolve_address(event, session, card)
+        latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
+        if self.llm_ready:
+            prompt = self._build_onboarding_query(
+                event,
+                session,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=base_address,
+                latest_message=latest_message,
+                stage=stage,
+                candidate_name=candidate_name,
+            )
+            try:
+                response = await self._ainvoke_client(
                     prompt,
                     user=self._llm_user_key(event, session, purpose=f"onboarding-{stage}"),
                 )

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import sys
 import tempfile
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import patch
 
@@ -79,6 +81,22 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["reply"]["launcher_id"], "612475113")
 
+    def test_message_payload_is_accepted_async(self) -> None:
+        payload = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 612475113,
+            "user_id": 783190298,
+            "sender": {"user_id": 783190298, "nickname": "tester"},
+            "message": [{"type": "text", "data": {"text": "hello"}}],
+        }
+
+        status, body = asyncio.run(self.api.handle_json_async(payload))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["reply"]["launcher_id"], "612475113")
+
     def test_string_message_payload_is_accepted(self) -> None:
         payload = {
             "message_type": "group",
@@ -115,10 +133,34 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["reason"], "bot_joined_group")
         self.assertEqual(len(calls), 1)
 
+    def test_notice_payload_prefers_async_service_handler(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        async def fake_handle_notice_async(service, payload):  # type: ignore[no-untyped-def]
+            calls.append(dict(payload))
+            return {"status": "ok", "reason": "async_notice"}
+
+        with patch.object(type(self.service), "handle_notice_payload_async", fake_handle_notice_async):
+            status, body = asyncio.run(
+                self.api.handle_json_async({"post_type": "notice", "notice_type": "group_card"})
+            )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(body["reason"], "async_notice")
+        self.assertEqual(len(calls), 1)
+
     def test_delivery_failures_are_mapped_to_502(self) -> None:
         api = HttpApi(_BrokenService())  # type: ignore[arg-type]
 
         status, body = api.handle_json({"message": "hello"})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(body["status"], "delivery_failed")
+
+    def test_async_delivery_failures_fall_back_to_sync_service_handler(self) -> None:
+        api = HttpApi(_BrokenService())  # type: ignore[arg-type]
+
+        status, body = asyncio.run(api.handle_json_async({"message": "hello"}))
 
         self.assertEqual(status, 502)
         self.assertEqual(body["status"], "delivery_failed")
@@ -254,6 +296,45 @@ class HttpApiTests(unittest.TestCase):
         self.assertGreaterEqual(len(behavior["events"]), 2)
         self.assertGreaterEqual(len(proactive["candidates"]), 1)
         self.assertIn("text", draft["draft"])
+
+    def test_prometheus_metrics_include_onebot_counters(self) -> None:
+        status, _ = self.api.handle_json(
+            {
+                "message_type": "group",
+                "group_id": 612475113,
+                "user_id": 783190298,
+                "sender": {"user_id": 783190298, "nickname": "tester"},
+                "message": [{"type": "text", "data": {"text": "hello"}}],
+            }
+        )
+
+        metrics_text = self.api.prometheus_metrics()
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertIn("openqqwaifu_service_up 1", metrics_text)
+        self.assertIn(
+            'openqqwaifu_onebot_events_total{outcome="ok",post_type="message"} 1',
+            metrics_text,
+        )
+        self.assertIn("openqqwaifu_uptime_seconds", metrics_text)
+
+    def test_observability_panel_exposes_upstream_rollups(self) -> None:
+        self.api.metrics.record_upstream_request(
+            kind="sidecar",
+            target="onebot_http",
+            method="POST",
+            url="http://127.0.0.1:3000/send_group_msg",
+            status=200,
+            outcome="ok",
+            duration_seconds=0.05,
+        )
+
+        panel = self.api.observability_panel(log_limit=20, row_limit=20)
+
+        self.assertEqual(panel["upstream"]["total"], 1)
+        self.assertEqual(panel["upstream"]["error_total"], 0)
+        self.assertEqual(panel["upstream"]["targets"][0]["target"], "onebot_http")
+        self.assertEqual(panel["upstream"]["targets"][0]["kind"], "sidecar")
 
     def test_qq_login_api_is_available(self) -> None:
         self.service.napcat_login = _FakeNapCatLoginBridge()

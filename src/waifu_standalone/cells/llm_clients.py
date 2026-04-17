@@ -4,6 +4,7 @@ import json
 from typing import Protocol, runtime_checkable
 
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
+from ..observability import TransportMetricsScope
 
 
 class LLMClientError(RuntimeError):
@@ -40,6 +41,8 @@ class _BaseHTTPClient:
         backend: str,
         timeout_seconds: float = 45.0,
         app_type: str = "chat",
+        metrics_kind: str = "llm",
+        metrics_target: str = "",
     ):
         self.base_url = str(base_url or "").rstrip("/")
         self.api_key = str(api_key or "").strip()
@@ -47,8 +50,12 @@ class _BaseHTTPClient:
         self.backend = str(backend or "").strip().lower()
         self.timeout_seconds = float(timeout_seconds or 45.0)
         self.app_type = str(app_type or "chat").strip() or "chat"
-        self._transport = SyncHttpTransport(timeout_seconds=self.timeout_seconds)
-        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout_seconds)
+        scope = TransportMetricsScope(
+            kind=str(metrics_kind or "llm").strip() or "llm",
+            target=str(metrics_target or self.backend or "unknown").strip() or "unknown",
+        )
+        self._transport = SyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
+        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
 
     def _post_json(self, url: str, payload: dict[str, object], *, headers: dict[str, str]) -> str:
         try:

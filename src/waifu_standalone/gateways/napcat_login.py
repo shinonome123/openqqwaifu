@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..http_transport import SyncHttpTransport, TransportError
+from ..observability import TransportMetricsScope
 
 
 class NapCatLoginError(RuntimeError):
@@ -30,7 +31,10 @@ class NapCatLoginBridge:
     _transport: SyncHttpTransport = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._transport = SyncHttpTransport(timeout_seconds=self.timeout)
+        self._transport = SyncHttpTransport(
+            timeout_seconds=self.timeout,
+            metrics_scope=TransportMetricsScope(kind="sidecar", target="napcat_webui"),
+        )
 
     def configured(self) -> bool:
         base, _ = normalize_webui_settings(self.base_url, self.webui_token)

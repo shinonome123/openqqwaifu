@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
 from ..models import OutboundMessage
+from ..observability import TransportMetricsScope
 
 
 class OneBotActionError(RuntimeError):
@@ -19,8 +20,9 @@ class OneBotActionClient:
     _async_transport: AsyncHttpTransport = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._transport = SyncHttpTransport(timeout_seconds=self.timeout)
-        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout)
+        scope = TransportMetricsScope(kind="sidecar", target="onebot_http")
+        self._transport = SyncHttpTransport(timeout_seconds=self.timeout, metrics_scope=scope)
+        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout, metrics_scope=scope)
 
     def post_action(self, action: str, payload: dict[str, object]) -> dict[str, object]:
         base = self.base_url.rstrip("/")
@@ -76,8 +78,27 @@ class OneBotActionClient:
     def get_group_member_list(self, group_id: int | str) -> dict[str, object]:
         return self.post_action("get_group_member_list", {"group_id": _coerce_target_id(group_id)})
 
+    async def aget_group_member_list(self, group_id: int | str) -> dict[str, object]:
+        return await self.apost_action("get_group_member_list", {"group_id": _coerce_target_id(group_id)})
+
     def get_group_member_info(self, group_id: int | str, user_id: int | str, *, no_cache: bool = False) -> dict[str, object]:
         return self.post_action(
+            "get_group_member_info",
+            {
+                "group_id": _coerce_target_id(group_id),
+                "user_id": _coerce_target_id(user_id),
+                "no_cache": bool(no_cache),
+            },
+        )
+
+    async def aget_group_member_info(
+        self,
+        group_id: int | str,
+        user_id: int | str,
+        *,
+        no_cache: bool = False,
+    ) -> dict[str, object]:
+        return await self.apost_action(
             "get_group_member_info",
             {
                 "group_id": _coerce_target_id(group_id),

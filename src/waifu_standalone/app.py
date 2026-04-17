@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 import time
@@ -42,6 +43,7 @@ from .organs.proactive import ProactivePlanner
 from .organs.thoughts import Thoughts
 from .member_onboarding import MemberOnboarding
 from .outbound_emitter import OutboundEmitter
+from .observability import MetricsRegistry, logging_is_configured, set_active_metrics_registry
 from .persona_guard import PersonaGuard
 from .reply_gate import PENDING_SEARCH_METADATA_KEY, ReplyGate
 from .services import CapturingOutboundPort
@@ -56,6 +58,7 @@ from .systems.value_game import ValueGameEngine
 _MASK_SENTINEL = "..."
 _BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openqqwaifu-bg")
 _ASYNC_RUNTIME = AsyncRuntime()
+_LOGGER = logging.getLogger(__name__)
 
 
 def _mask_key(key: str) -> str:
@@ -104,6 +107,7 @@ def _close_component(component: object) -> None:
 @dataclass(slots=True)
 class WaifuService:
     config: AppConfig
+    metrics: MetricsRegistry
     memory: Memory
     emotions: EmotionSensor
     thoughts: Thoughts
@@ -144,6 +148,7 @@ class WaifuService:
     dispatcher: SkillDispatcher = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        set_active_metrics_registry(self.metrics)
         self.console = ConsolePanels(self)
         self.knowledge = KnowledgeCurator(self)
         self.notice = NoticeDispatcher(self)
@@ -173,7 +178,18 @@ class WaifuService:
         with self._session_lock_for(event):
             return self._handle_event_locked(event)
 
+    async def handle_event_async(self, event: InboundEvent) -> OutboundMessage | None:
+        lock = self._session_lock_for(event)
+        await asyncio.to_thread(lock.acquire)
+        try:
+            return await self._handle_event_async_locked(event)
+        finally:
+            lock.release()
+
     def _handle_event_locked(self, event: InboundEvent) -> OutboundMessage | None:
+        return _ASYNC_RUNTIME.submit(self._handle_event_async_locked(event)).result()
+
+    async def _handle_event_async_locked(self, event: InboundEvent) -> OutboundMessage | None:
         self._ensure_character_scope_bound()
         current_character = self._active_character_id()
         text = event.command_text(self.config.bot_account_id)
@@ -188,16 +204,16 @@ class WaifuService:
         if live_runtime and not self.generator.llm_ready:
             return None
 
-        self.onboarding.remember_directory_member(event)
-        session = self.memory.save_user_event(event, character_id=current_character)
+        await self.onboarding.aremember_directory_member(event)
+        session = await self.memory.asave_user_event(event, character_id=current_character)
         assistant_name = self.generator.resolve_assistant_name(event.launcher_type, session)
-        session = self.persona.sanitize_session_state(session, assistant_name=assistant_name)
-        self.persona.sanitize_member_state(
+        session = await self.persona.asanitize_session_state(session, assistant_name=assistant_name)
+        await self.persona.asanitize_member_state(
             group_id=event.launcher_id if event.launcher_type == "group" else "",
             user_id=event.sender_id,
             character_id=current_character,
         )
-        address = self._resolve_address(event, session)
+        address = await self._resolve_address_async(event, session)
         latest_message = self._latest_message_text(event, text)
         inbound_behavior = self.event_engine.capture_inbound(
             event,
@@ -208,9 +224,9 @@ class WaifuService:
 
         repeat_reply = self.gate.build_repeat_reply(event, session, address=address)
         if repeat_reply is not None:
-            return self.emitter.emit(event, repeat_reply, assistant_name=assistant_name)
+            return await self.emitter.aemit(event, repeat_reply, assistant_name=assistant_name)
 
-        onboarding_reply = self.onboarding.maybe_handle(
+        onboarding_reply = await self.onboarding.amaybe_handle(
             event,
             session,
             latest_message=latest_message,
@@ -221,7 +237,7 @@ class WaifuService:
 
         pending_search_query = self.gate.pending_search_query_for_message(session, latest_message)
         if pending_search_query:
-            return self.dispatcher.handle_search_request(
+            return await self.dispatcher.ahandle_search_request(
                 event,
                 session,
                 query=pending_search_query,
@@ -230,7 +246,7 @@ class WaifuService:
             )
 
         active_skills = self.skills.match(latest_message)
-        self._store_active_skills(session, active_skills)
+        await self._store_active_skills_async(session, active_skills)
 
         dispatch = self.skills.resolve_dispatch(latest_message)
         if dispatch is None:
@@ -239,10 +255,10 @@ class WaifuService:
                 skill, _ = dispatch
                 if all(existing.skill_id != skill.skill_id for existing in active_skills):
                     active_skills = [*active_skills, skill]
-                    self._store_active_skills(session, active_skills)
+                    await self._store_active_skills_async(session, active_skills)
         if dispatch is not None:
             skill, raw_args = dispatch
-            return self.dispatcher.dispatch_skill(
+            return await self.dispatcher.adispatch_skill(
                 event,
                 session,
                 skill=skill,
@@ -254,7 +270,7 @@ class WaifuService:
 
         image_prompt = None if self.skills.has_dispatch_tool("image") else self.dispatcher.extract_image_prompt(text)
         if image_prompt is not None:
-            return self.dispatcher.handle_image_request(
+            return await self.dispatcher.ahandle_image_request(
                 event,
                 session,
                 address=address,
@@ -263,30 +279,30 @@ class WaifuService:
                 active_skills=active_skills,
             )
 
-        search_future = self._start_search_context(event)
         emotion = self.emotions.analyze(event, session)
-        search_context = self._resolve_search_context(event, search_future)
-        self._store_search_context(session, search_context)
-        conversation_view = self.memory.format_dialogue(
+        search_context = await self._build_search_context_async(event)
+        await self._store_search_context_async(session, search_context)
+        conversation_view = await self.memory.aformat_dialogue(
             event.launcher_id,
             event.launcher_type,
             assistant_name=assistant_name,
             limit=self.config.history_window_messages,
             character_id=current_character,
         )
-        recalled_memory_hints = self.state_store.recall_knowledge(
+        recalled_memory_hints = await asyncio.to_thread(
+            self.state_store.recall_knowledge,
             scopes=self.knowledge._knowledge_scopes(event),
             query=latest_message,
             limit=self.config.memory_recall_limit,
             character_id=current_character,
         )
-        knowledge_entries = self.knowledge._session_knowledge_entries(event, latest_message)
+        knowledge_entries = await self.knowledge._asession_knowledge_entries(event, latest_message)
         memory_hints = KnowledgeCurator._merge_memory_hints(
             recalled_memory_hints,
             [str(item.get("summary", "") or "").strip() for item in knowledge_entries],
             limit=self.config.memory_recall_limit,
         )
-        member_record = self.knowledge._member_record(event)
+        member_record = await self.knowledge._amember_record(event)
         behavior_context = self._behavior_context(event)
         graph_snapshot = self.memory_graph.build(
             event=event,
@@ -295,7 +311,7 @@ class WaifuService:
             knowledge_entries=knowledge_entries,
             behavior_events=behavior_context,
         )
-        speaker_notes = self.knowledge._directory_member_notes(event)
+        speaker_notes = await self.knowledge._adirectory_member_notes(event)
         narrator_hint = self.narrator.build_hint(
             event=event,
             latest_message=latest_message,
@@ -309,7 +325,7 @@ class WaifuService:
             text_hint = str(highlight or "").strip()
             if text_hint:
                 speaker_notes.append(text_hint)
-        analysis_hint = self.thoughts.analyze(
+        analysis_hint = await self.thoughts.aanalyze(
             event,
             session,
             assistant_name=assistant_name,
@@ -320,7 +336,7 @@ class WaifuService:
             active_skills=active_skills,
             allow_fallback=not live_runtime,
         )
-        reply_text = self.generator.generate_reply(
+        reply_text = await self.generator.agenerate_reply(
             event,
             session,
             emotion,
@@ -342,7 +358,7 @@ class WaifuService:
             launcher_type=event.launcher_type,
             text=reply_text,
         )
-        emitted = self.emitter.emit(
+        emitted = await self.emitter.aemit(
             event,
             message,
             assistant_name=assistant_name,
@@ -351,9 +367,9 @@ class WaifuService:
             behavior_reason="reply",
             character_id=current_character,
         )
-        self._schedule_knowledge_writeback(
+        await self._schedule_knowledge_writeback_async(
             event,
-            session=self.memory.load(event.launcher_id, event.launcher_type, character_id=current_character),
+            session=await self.memory.aload(event.launcher_id, event.launcher_type, character_id=current_character),
             latest_message=latest_message,
             assistant_name=assistant_name,
             address=address,
@@ -414,6 +430,23 @@ class WaifuService:
             self._background_tasks.add(future)
         future.add_done_callback(lambda completed, name=task_name: self._background_task_done(name, completed))
 
+    def _track_async_task(self, task_name: str, task: asyncio.Task[object]) -> None:
+        proxy: Future[object] = Future()
+        with self._background_lock:
+            self._background_tasks.add(proxy)
+
+        def _finish(completed: asyncio.Task[object], *, name: str = task_name, tracked: Future[object] = proxy) -> None:
+            if completed.cancelled():
+                tracked.cancel()
+            else:
+                try:
+                    tracked.set_result(completed.result())
+                except Exception as exc:
+                    tracked.set_exception(exc)
+            self._background_task_done(name, tracked)
+
+        task.add_done_callback(_finish)
+
     def _start_search_context(self, event: InboundEvent) -> Future[SearchContext] | None:
         if not self.search.should_search(event):
             return None
@@ -436,12 +469,25 @@ class WaifuService:
         except Exception:
             return self.search.build_context(event)
 
+    async def _build_search_context_async(self, event: InboundEvent) -> SearchContext:
+        if not self.search.should_search(event):
+            return SearchContext()
+        search_state = getattr(self.search, "__dict__", {})
+        if "build_context" in search_state and "abuild_context" not in search_state:
+            return await asyncio.to_thread(self.search.build_context, event)
+        try:
+            return await self.search.abuild_context(event)
+        except Exception:
+            return await asyncio.to_thread(self.search.build_context, event)
+
     def _background_task_done(self, task_name: str, future: Future[object]) -> None:
         with self._background_lock:
             self._background_tasks.discard(future)
         try:
             future.result()
         except Exception as exc:
+            if logging_is_configured():
+                _LOGGER.exception("background task failed task=%s", task_name)
             with self._state_lock:
                 self._event_counter += 1
                 self._recent_events.append(
@@ -513,6 +559,39 @@ class WaifuService:
             ),
         )
 
+    async def _schedule_knowledge_writeback_async(
+        self,
+        event: InboundEvent,
+        *,
+        session: SessionMemory,
+        latest_message: str,
+        assistant_name: str,
+        address: str,
+        conversation_view: str,
+    ) -> None:
+        if not self.config.knowledge_auto_extract:
+            return
+        event_copy = deepcopy(event)
+        session_copy = SessionMemory(
+            launcher_id=session.launcher_id,
+            launcher_type=session.launcher_type,
+            character_id=session.character_id,
+            history=list(session.history),
+            preferred_name=session.preferred_name,
+            metadata=deepcopy(session.metadata),
+        )
+        task = asyncio.create_task(
+            self.knowledge._awriteback_knowledge_if_needed(
+                event_copy,
+                session=session_copy,
+                latest_message=latest_message,
+                assistant_name=assistant_name,
+                address=address,
+                conversation_view=conversation_view,
+            )
+        )
+        self._track_async_task("knowledge_writeback", task)
+
     def _archive_if_needed(
         self,
         launcher_id: str,
@@ -540,6 +619,45 @@ class WaifuService:
         if not summary:
             return
         self.state_store.add_knowledge(
+            character_id=self._active_character_id(),
+            scope_type=launcher_type,
+            scope_id=launcher_id,
+            memory_type="summary",
+            summary=summary,
+            tags=[str(tag).strip() for tag in archived.get("tags", []) if str(tag).strip()]
+            if isinstance(archived.get("tags"), list)
+            else [],
+            confidence=0.62,
+        )
+
+    async def _archive_if_needed_async(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        assistant_name: str,
+        character_id: str = "",
+    ) -> None:
+        if not self.config.summarization_mode:
+            return
+        archived = await self.memory.amaybe_archive_history(
+            launcher_id,
+            launcher_type,
+            max_history_lines=self.config.short_term_memory_limit,
+            batch_size=self.config.memory_summary_batch_size,
+            summarizer=lambda history_lines: self.generator.summarize_history(
+                history_lines,
+                assistant_name=assistant_name,
+            ),
+            character_id=str(character_id or self._active_character_id()).strip(),
+        )
+        if archived is None:
+            return
+        summary = str(archived.get("summary", "") or "").strip()
+        if not summary:
+            return
+        await asyncio.to_thread(
+            self.state_store.add_knowledge,
             character_id=self._active_character_id(),
             scope_type=launcher_type,
             scope_id=launcher_id,
@@ -703,6 +821,9 @@ class WaifuService:
 
     def handle_notice_payload(self, payload: dict[str, object]) -> dict[str, object]:
         return self.notice.handle_notice_payload(payload)
+
+    async def handle_notice_payload_async(self, payload: dict[str, object]) -> dict[str, object]:
+        return await self.notice.ahandle_notice_payload(payload)
 
     def sync_group_members(self, group_id: str) -> dict[str, object]:
         return self.notice.sync_group_members(group_id)
@@ -981,6 +1102,7 @@ class WaifuService:
             self._session_locks.clear()
 
     def _refresh_runtime_components(self, *, rebuild_generator: bool = False, rebuild_outbound: bool = False) -> None:
+        set_active_metrics_registry(self.metrics)
         if rebuild_generator:
             self.generator = Generator(self.config)
             self.cards = self.generator._cards
@@ -1034,6 +1156,9 @@ class WaifuService:
             session.metadata.pop("active_skills", None)
         self.memory.store.save(session)
 
+    async def _store_active_skills_async(self, session: SessionMemory, active_skills: list[SkillSpec]) -> None:
+        await asyncio.to_thread(self._store_active_skills, session, active_skills)
+
     def _store_search_context(self, session: SessionMemory, search_context: SearchContext) -> None:
         if search_context.query:
             session.metadata["last_search"] = search_context.as_dict()
@@ -1045,6 +1170,9 @@ class WaifuService:
             session.metadata.pop("last_search", None)
             session.metadata.pop(PENDING_SEARCH_METADATA_KEY, None)
         self.memory.store.save(session)
+
+    async def _store_search_context_async(self, session: SessionMemory, search_context: SearchContext) -> None:
+        await asyncio.to_thread(self._store_search_context, session, search_context)
 
     def _resolve_address(self, event: InboundEvent, session: SessionMemory) -> str:
         member = self.state_store.get_member(
@@ -1060,6 +1188,9 @@ class WaifuService:
             if user_name:
                 return user_name
         return event.sender_name or "你"
+
+    async def _resolve_address_async(self, event: InboundEvent, session: SessionMemory) -> str:
+        return await asyncio.to_thread(self._resolve_address, event, session)
 
     def _outbound_mode_label(self) -> str:
         if not self.config.qq_sidecar.outbound_base_url:
@@ -1241,11 +1372,14 @@ class WaifuService:
 
 def build_default_service(config: AppConfig | None = None) -> tuple[WaifuService, CapturingOutboundPort]:
     app_config = config or AppConfig()
+    metrics = MetricsRegistry(service_name=str(app_config.service_name or "openqqwaifu"))
+    set_active_metrics_registry(metrics)
     initial_character = _initial_character_id(app_config)
     memory_builder = lambda character_id: InMemoryStore(scoped_character_id=character_id)
     state_builder = lambda character_id: InMemoryRuntimeStateStore(embedder=_build_embedding_client(app_config))
     return _build_service(
         app_config,
+        metrics,
         memory_builder(initial_character),
         state_builder(initial_character),
         CapturingOutboundPort(),
@@ -1259,6 +1393,8 @@ def build_file_service(
     store_root: str | Path | None = None,
 ) -> tuple[WaifuService, CapturingOutboundPort]:
     app_config = config or AppConfig()
+    metrics = MetricsRegistry(service_name=str(app_config.service_name or "openqqwaifu"))
+    set_active_metrics_registry(metrics)
     session_root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
     state_root = Path(app_config.data_root) / "state" / "characters"
     initial_character = _initial_character_id(app_config)
@@ -1272,6 +1408,7 @@ def build_file_service(
     )
     return _build_service(
         app_config,
+        metrics,
         memory_builder(initial_character),
         state_builder(initial_character),
         CapturingOutboundPort(),
@@ -1285,6 +1422,8 @@ def build_runtime_service(
     store_root: str | Path | None = None,
 ) -> tuple[WaifuService, OutboundPort]:
     app_config = config or AppConfig()
+    metrics = MetricsRegistry(service_name=str(app_config.service_name or "openqqwaifu"))
+    set_active_metrics_registry(metrics)
     session_root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
     outbound = _build_runtime_outbound(app_config)
     state_root = Path(app_config.data_root) / "state" / "characters"
@@ -1299,6 +1438,7 @@ def build_runtime_service(
     )
     return _build_service(
         app_config,
+        metrics,
         memory_builder(initial_character),
         state_builder(initial_character),
         outbound,
@@ -1337,6 +1477,7 @@ def _initial_character_id(app_config: AppConfig) -> str:
 
 def _build_service(
     app_config: AppConfig,
+    metrics: MetricsRegistry,
     store: Any,
     state_store: Any,
     outbound: OutboundPort,
@@ -1344,6 +1485,7 @@ def _build_service(
     memory_store_builder: Callable[[str], Any] | None = None,
     state_store_builder: Callable[[str], Any] | None = None,
 ) -> tuple[WaifuService, OutboundPort]:
+    set_active_metrics_registry(metrics)
     generator = Generator(
         app_config,
         llm_client=build_llm_client(app_config),
@@ -1354,6 +1496,7 @@ def _build_service(
     tools = ToolRegistry()
     service = WaifuService(
         config=app_config,
+        metrics=metrics,
         memory=Memory(store),
         emotions=EmotionSensor(),
         thoughts=Thoughts(app_config, generator),
@@ -1386,23 +1529,27 @@ def _build_service(
         name="图片生成",
         description="调用图像生成能力并返回图文消息。",
         handler=service.dispatcher.run_image_tool,
+        async_handler=service.dispatcher.arun_image_tool,
     )
     tools.register(
         "search",
         name="联网搜索",
         description="执行联网检索并把摘要整理成回复。",
         handler=service.dispatcher.run_search_tool,
+        async_handler=service.dispatcher.arun_search_tool,
     )
     tools.register(
         "summary",
         name="会话总结",
         description="总结最近会话并提取重点标签。",
         handler=service.dispatcher.run_summary_tool,
+        async_handler=service.dispatcher.arun_summary_tool,
     )
     tools.register(
         "skill-list",
         name="技能列表",
         description="列出当前所有已启用的技能及其触发方式。",
         handler=service.dispatcher.run_skill_list_tool,
+        async_handler=service.dispatcher.arun_skill_list_tool,
     )
     return service, outbound

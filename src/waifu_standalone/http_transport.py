@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import asyncio
 import threading
+import time
 from typing import Any
 
 import httpx
+
+from .observability import TransportMetricsScope, record_transport_exchange
 
 
 @dataclass(slots=True)
@@ -30,13 +33,21 @@ class TransportError(RuntimeError):
 
 
 class SyncHttpTransport:
-    def __init__(self, *, timeout_seconds: float, max_connections: int = 32, max_keepalive_connections: int = 16):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        max_connections: int = 32,
+        max_keepalive_connections: int = 16,
+        metrics_scope: TransportMetricsScope | None = None,
+    ):
         timeout = httpx.Timeout(timeout_seconds)
         limits = httpx.Limits(
             max_connections=max(1, int(max_connections)),
             max_keepalive_connections=max(1, int(max_keepalive_connections)),
         )
         self._client = httpx.Client(timeout=timeout, limits=limits, follow_redirects=True)
+        self._metrics_scope = metrics_scope
 
     def request(
         self,
@@ -47,6 +58,7 @@ class SyncHttpTransport:
         content: bytes | None = None,
         json_payload: dict[str, Any] | None = None,
     ) -> HttpResponse:
+        started = time.perf_counter()
         try:
             response = self._client.request(
                 method=method,
@@ -56,7 +68,23 @@ class SyncHttpTransport:
                 json=json_payload,
             )
             response.raise_for_status()
+            record_transport_exchange(
+                scope=self._metrics_scope,
+                method=method,
+                url=url,
+                status=response.status_code,
+                outcome="ok",
+                duration_seconds=time.perf_counter() - started,
+            )
         except httpx.HTTPStatusError as exc:
+            record_transport_exchange(
+                scope=self._metrics_scope,
+                method=method,
+                url=url,
+                status=exc.response.status_code,
+                outcome="http_error",
+                duration_seconds=time.perf_counter() - started,
+            )
             body = exc.response.text[:160]
             raise TransportError(
                 f"http {exc.response.status_code}: {body}",
@@ -64,6 +92,14 @@ class SyncHttpTransport:
                 body=body,
             ) from exc
         except httpx.HTTPError as exc:
+            record_transport_exchange(
+                scope=self._metrics_scope,
+                method=method,
+                url=url,
+                status="error",
+                outcome="transport_error",
+                duration_seconds=time.perf_counter() - started,
+            )
             raise TransportError(f"request failed: {exc}") from exc
         return HttpResponse(
             status_code=response.status_code,
@@ -83,13 +119,21 @@ class SyncHttpTransport:
 
 
 class AsyncHttpTransport:
-    def __init__(self, *, timeout_seconds: float, max_connections: int = 32, max_keepalive_connections: int = 16):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        max_connections: int = 32,
+        max_keepalive_connections: int = 16,
+        metrics_scope: TransportMetricsScope | None = None,
+    ):
         timeout = httpx.Timeout(timeout_seconds)
         limits = httpx.Limits(
             max_connections=max(1, int(max_connections)),
             max_keepalive_connections=max(1, int(max_keepalive_connections)),
         )
         self._client = httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=True)
+        self._metrics_scope = metrics_scope
 
     async def request(
         self,
@@ -100,6 +144,7 @@ class AsyncHttpTransport:
         content: bytes | None = None,
         json_payload: dict[str, Any] | None = None,
     ) -> HttpResponse:
+        started = time.perf_counter()
         try:
             response = await self._client.request(
                 method=method,
@@ -109,7 +154,23 @@ class AsyncHttpTransport:
                 json=json_payload,
             )
             response.raise_for_status()
+            record_transport_exchange(
+                scope=self._metrics_scope,
+                method=method,
+                url=url,
+                status=response.status_code,
+                outcome="ok",
+                duration_seconds=time.perf_counter() - started,
+            )
         except httpx.HTTPStatusError as exc:
+            record_transport_exchange(
+                scope=self._metrics_scope,
+                method=method,
+                url=url,
+                status=exc.response.status_code,
+                outcome="http_error",
+                duration_seconds=time.perf_counter() - started,
+            )
             body = exc.response.text[:160]
             raise TransportError(
                 f"http {exc.response.status_code}: {body}",
@@ -117,6 +178,14 @@ class AsyncHttpTransport:
                 body=body,
             ) from exc
         except httpx.HTTPError as exc:
+            record_transport_exchange(
+                scope=self._metrics_scope,
+                method=method,
+                url=url,
+                status="error",
+                outcome="transport_error",
+                duration_seconds=time.perf_counter() - started,
+            )
             raise TransportError(f"request failed: {exc}") from exc
         return HttpResponse(
             status_code=response.status_code,

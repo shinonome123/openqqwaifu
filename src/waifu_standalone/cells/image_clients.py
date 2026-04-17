@@ -6,6 +6,7 @@ from typing import Protocol, runtime_checkable
 
 from ..config import AppConfig
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
+from ..observability import TransportMetricsScope
 
 
 class ImageClientError(RuntimeError):
@@ -67,8 +68,9 @@ class XAIImageClient:
         self.response_format = str(response_format or "b64_json").strip()
         self.aspect_ratio = str(aspect_ratio or "").strip()
         self.resolution = str(resolution or "").strip()
-        self._transport = SyncHttpTransport(timeout_seconds=self.timeout_seconds)
-        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout_seconds)
+        scope = TransportMetricsScope(kind="image", target="xai")
+        self._transport = SyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
+        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
 
     @property
     def enabled(self) -> bool:

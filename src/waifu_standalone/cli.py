@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from .app import build_default_service, build_runtime_service
@@ -11,6 +12,7 @@ from .gateways.onebot_actions import OneBotActionClient
 from .http_api import HttpApi, run_server
 from .memory import FileMemoryStore
 from .migration import WaifuDataImporter
+from .observability import configure_logging
 from .services import CapturingOutboundPort
 
 
@@ -63,6 +65,8 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
+    configure_logging(service_name=config.service_name)
+    logger = logging.getLogger(__name__)
     service, outbound = build_runtime_service(config, store_root=args.store_root)
     api = HttpApi(service)
     server = run_server(api, config.qq_sidecar.inbound_host, config.qq_sidecar.inbound_port)
@@ -71,17 +75,20 @@ def main() -> None:
         if isinstance(outbound, CapturingOutboundPort)
         else f"onebot-http->{config.qq_sidecar.outbound_base_url}"
     )
-    print(
-        f"{config.service_name} listening on "
-        f"http://{config.qq_sidecar.inbound_host}:{config.qq_sidecar.inbound_port} "
-        f"[outbound={outbound_mode}]"
+    logger.info(
+        "%s listening on http://%s:%s [outbound=%s]",
+        config.service_name,
+        config.qq_sidecar.inbound_host,
+        config.qq_sidecar.inbound_port,
+        outbound_mode,
     )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        logger.info("shutdown requested by keyboard interrupt")
     finally:
         server.server_close()
+        logger.info("server stopped")
 
 
 def _load_config(path: str | None) -> AppConfig:
