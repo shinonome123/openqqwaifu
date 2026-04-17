@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .schema_migrations import run_migrations
+
 
 def _now() -> int:
     return int(time.time())
@@ -962,80 +964,12 @@ class SqliteRuntimeStateStore:
             connection.close()
 
     def _init_schema(self) -> None:
-        with self._lock, self._session() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS members (
-                    group_id TEXT NOT NULL DEFAULT '',
-                    user_id TEXT NOT NULL,
-                    qq_nickname TEXT NOT NULL DEFAULT '',
-                    group_card TEXT NOT NULL DEFAULT '',
-                    preferred_name TEXT NOT NULL DEFAULT '',
-                    onboarding_status TEXT NOT NULL DEFAULT 'new',
-                    profile_summary TEXT NOT NULL DEFAULT '',
-                    membership_status TEXT NOT NULL DEFAULT 'active',
-                    affinity_score REAL NOT NULL DEFAULT 0,
-                    notes_count INTEGER NOT NULL DEFAULT 0,
-                    last_seen_at INTEGER NOT NULL DEFAULT 0,
-                    last_sync_at INTEGER NOT NULL DEFAULT 0,
-                    last_addressed_at INTEGER NOT NULL DEFAULT 0,
-                    created_at INTEGER NOT NULL DEFAULT 0,
-                    updated_at INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (group_id, user_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS member_persona_state (
-                    character_id TEXT NOT NULL DEFAULT '',
-                    group_id TEXT NOT NULL DEFAULT '',
-                    user_id TEXT NOT NULL,
-                    profile_summary TEXT NOT NULL DEFAULT '',
-                    affinity_score REAL NOT NULL DEFAULT 0,
-                    notes_count INTEGER NOT NULL DEFAULT 0,
-                    last_addressed_at INTEGER NOT NULL DEFAULT 0,
-                    created_at INTEGER NOT NULL DEFAULT 0,
-                    updated_at INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (character_id, group_id, user_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS knowledge_entries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    character_id TEXT NOT NULL DEFAULT '',
-                    scope_type TEXT NOT NULL,
-                    scope_id TEXT NOT NULL DEFAULT '',
-                    memory_type TEXT NOT NULL DEFAULT 'fact',
-                    summary TEXT NOT NULL,
-                    tags_json TEXT NOT NULL DEFAULT '[]',
-                    source_message_ids_json TEXT NOT NULL DEFAULT '[]',
-                    embedding_json TEXT NOT NULL DEFAULT '',
-                    confidence REAL NOT NULL DEFAULT 0.5,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    created_at INTEGER NOT NULL DEFAULT 0,
-                    updated_at INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_members_seen
-                ON members (last_seen_at DESC, updated_at DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_member_persona_updated
-                ON member_persona_state (character_id, updated_at DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_knowledge_scope
-                ON knowledge_entries (character_id, scope_type, scope_id, updated_at DESC);
-                """
-            )
-            self._ensure_column(connection, "knowledge_entries", "embedding_json", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "knowledge_entries", "character_id", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "members", "affinity_score", "REAL NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "members", "membership_status", "TEXT NOT NULL DEFAULT 'active'")
-            self._ensure_column(connection, "members", "last_sync_at", "INTEGER NOT NULL DEFAULT 0")
-
-    @staticmethod
-    def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
-        columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-        existing = {str(row["name"]) for row in columns}
-        if column_name in existing:
-            return
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+        with self._lock:
+            connection = self._connect()
+            try:
+                run_migrations(connection)
+            finally:
+                connection.close()
 
     def record_member_seen(
         self,

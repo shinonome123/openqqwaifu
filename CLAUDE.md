@@ -60,6 +60,7 @@ docker compose -f compose.napcat.yml up -d
 | `services.py` | Service interfaces and outbound ports (including `CapturingOutboundPort` for dry-run mode) |
 | `contracts.py` | Shared interface/contract types |
 | `migration.py` | Legacy waifu data import via `WaifuDataImporter` |
+| `schema_migrations.py` | Schema-version driven sqlite migrations for `state_store.py` runtime storage |
 | `console_panels.py` | Web console panel rendering (dashboard, session list, session detail) — delegated from `WaifuService.console` |
 | `knowledge_curator.py` | Auto-extracted knowledge writeback, scope resolution, directory notes — delegated from `WaifuService.knowledge` |
 | `notice_dispatcher.py` | OneBot notice payload routing (group increase/decrease/card) — delegated from `WaifuService.notice` |
