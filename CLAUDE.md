@@ -64,6 +64,7 @@ docker compose -f compose.napcat.yml up -d
 | `contracts.py` | Shared interface/contract types |
 | `migration.py` | Legacy waifu data import via `WaifuDataImporter` |
 | `schema_migrations.py` | Schema-version driven sqlite migrations for `state_store.py` runtime storage |
+| `plugin_api.py` | Tool-plugin discovery via Python entry points (`openqqwaifu.tools`) with a minimal `PluginContext` |
 | `gateways/onebot_ws.py` | OneBot v11 reverse-WebSocket gateway -- inbound events and outbound actions share a single NapCat-initiated WS connection. Enabled via `qq_sidecar.gateway_mode = "reverse_ws"` |
 | `console_panels.py` | Web console panel rendering (dashboard, session list, session detail) — delegated from `WaifuService.console` |
 | `knowledge_curator.py` | Auto-extracted knowledge writeback, scope resolution, directory notes — delegated from `WaifuService.knowledge` |

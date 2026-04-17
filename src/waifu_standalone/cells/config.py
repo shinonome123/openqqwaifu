@@ -13,6 +13,7 @@ from ..config import (
     LLMConfig,
     MarketplaceConfig,
     MarketplaceSourceConfig,
+    PluginsConfig,
     QQSidecarConfig,
 )
 
@@ -39,6 +40,7 @@ class ConfigManager:
         image_generation = ImageGenerationConfig(**raw.get("image_generation", {}))
         embedding = EmbeddingConfig(**raw.get("embedding", {}))
         marketplace = _load_marketplace(raw.get("marketplace"))
+        plugins = _load_plugins(raw.get("plugins"))
         config = AppConfig(
             service_name=str(raw.get("service_name", "waifu-standalone")),
             config_path=str(self.path.resolve()),
@@ -87,6 +89,7 @@ class ConfigManager:
             image_generation=image_generation,
             embedding=embedding,
             marketplace=marketplace,
+            plugins=plugins,
             qq_sidecar=qq_sidecar,
         )
         config = _apply_env_overrides(config, config_path=self.path)
@@ -136,6 +139,15 @@ def _load_marketplace(raw_value: object) -> MarketplaceConfig:
     )
 
 
+def _load_plugins(raw_value: object) -> PluginsConfig:
+    if not isinstance(raw_value, dict):
+        return PluginsConfig()
+    return PluginsConfig(
+        enabled=bool(raw_value.get("enabled", True)),
+        disabled_names=_load_str_list(raw_value.get("disabled_names"), []),
+    )
+
+
 def serialize_app_config(config: AppConfig) -> dict[str, object]:
     payload = asdict(config)
     payload.pop("config_path", None)
@@ -149,6 +161,12 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
         if not root.is_absolute() and config_path is not None:
             root = (config_path.parent / root).resolve()
         config.data_root = str(root)
+
+    plugins = config.plugins
+    plugins.enabled = _env_bool("OPENQQWAIFU_PLUGINS_ENABLED", plugins.enabled)
+    disabled_names = os.getenv("OPENQQWAIFU_PLUGINS_DISABLED_NAMES")
+    if disabled_names is not None:
+        plugins.disabled_names = _load_str_list(disabled_names, [])
 
     qq_sidecar = config.qq_sidecar
     qq_sidecar.gateway_mode = _env_str(

@@ -46,6 +46,7 @@ from .member_onboarding import MemberOnboarding
 from .outbound_emitter import OutboundEmitter
 from .observability import MetricsRegistry, logging_is_configured, set_active_metrics_registry
 from .persona_guard import PersonaGuard
+from .plugin_api import PluginContext, load_tool_plugins
 from .reply_gate import PENDING_SEARCH_METADATA_KEY, ReplyGate
 from .services import CapturingOutboundPort
 from .skill_dispatcher import SkillDispatcher
@@ -1516,6 +1517,16 @@ def _build_service(
     cards = generator._cards
     skills = SkillRegistry(app_config)
     tools = ToolRegistry()
+    if app_config.plugins.enabled:
+        load_tool_plugins(
+            PluginContext(
+                app_config=app_config,
+                tool_registry=tools,
+                logger=logging.getLogger("waifu.plugins"),
+                metrics=metrics,
+            ),
+            disabled=set(app_config.plugins.disabled_names),
+        )
     service = WaifuService(
         config=app_config,
         metrics=metrics,

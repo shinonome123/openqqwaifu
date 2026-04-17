@@ -4,6 +4,12 @@ from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
+class PluginsConfig:
+    enabled: bool = True
+    disabled_names: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class QQSidecarConfig:
     mode: str = "onebot-http"
     gateway_mode: str = "http"
@@ -130,4 +136,5 @@ class AppConfig:
     image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     marketplace: MarketplaceConfig = field(default_factory=MarketplaceConfig)
+    plugins: PluginsConfig = field(default_factory=PluginsConfig)
     qq_sidecar: QQSidecarConfig = field(default_factory=QQSidecarConfig)
