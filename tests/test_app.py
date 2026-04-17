@@ -165,7 +165,7 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(len(self.outbound.sent), 1)
 
     def test_extract_image_prompt_accepts_fullwidth_colon(self) -> None:
-        prompt = self.service._extract_image_prompt("生图：生成一个晴朗的天空")
+        prompt = self.service.dispatcher.extract_image_prompt("生图：生成一个晴朗的天空")
 
         self.assertEqual(prompt, "生成一个晴朗的天空")
 
@@ -251,7 +251,7 @@ class WaifuServiceTests(unittest.TestCase):
                 }
             )
 
-            service._repair_character_isolation_state("aurora")
+            service.migrator.repair_character_isolation("aurora")
 
             repaired = service.memory.load("612475113", "group", character_id="aurora")
             member = service.state_store.get_member(
@@ -1398,14 +1398,14 @@ class WaifuServiceTests(unittest.TestCase):
                 ],
             )
 
-            service._refresh_follow_up_window(event)
-            self.assertTrue(service._is_follow_up_window_active("612475113"))
+            service.gate.refresh_follow_up_window(event)
+            self.assertTrue(service.gate.is_follow_up_window_active("612475113"))
 
             service.activate_character("aurora", reset_sessions=False)
-            self.assertFalse(service._is_follow_up_window_active("612475113"))
+            self.assertFalse(service.gate.is_follow_up_window_active("612475113"))
 
             service.activate_character("default", reset_sessions=False)
-            self.assertTrue(service._is_follow_up_window_active("612475113"))
+            self.assertTrue(service.gate.is_follow_up_window_active("612475113"))
 
     def test_preview_character_panel_uses_unsaved_editor_fields(self) -> None:
         preview = self.service.preview_character_panel(
@@ -1510,7 +1510,7 @@ class WaifuServiceTests(unittest.TestCase):
         }
         self.service.memory.store.save(group_session)
 
-        self.service._migrate_legacy_session_state()
+        self.service.migrator.migrate_session_state()
 
         migrated_person = self.service.memory.load("783190298", "person")
         migrated_group = self.service.memory.load("612475113", "group")

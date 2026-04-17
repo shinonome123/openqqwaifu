@@ -63,10 +63,8 @@ class ConsolePanels:
         with svc._state_lock:
             recent_outbound = [svc._message_to_dict(message) for message in svc._recent_outbound[-12:][::-1]]
             recent_behavior_events = [dict(item) for item in svc._recent_behavior_events[-12:][::-1]]
-            active_launchers = sorted(
-                launcher_id
-                for (character_id, launcher_id), until in svc._group_follow_up_until.items()
-                if character_id == current_character and until > time.monotonic()
+            active_launchers = svc.gate.active_launcher_ids_locked(
+                current_character, now_monotonic=time.monotonic()
             )
         return {
             "service_name": svc.config.service_name,

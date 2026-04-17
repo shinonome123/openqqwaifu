@@ -60,6 +60,15 @@ docker compose -f compose.napcat.yml up -d
 | `services.py` | Service interfaces and outbound ports (including `CapturingOutboundPort` for dry-run mode) |
 | `contracts.py` | Shared interface/contract types |
 | `migration.py` | Legacy waifu data import via `WaifuDataImporter` |
+| `console_panels.py` | Web console panel rendering (dashboard, session list, session detail) — delegated from `WaifuService.console` |
+| `knowledge_curator.py` | Auto-extracted knowledge writeback, scope resolution, directory notes — delegated from `WaifuService.knowledge` |
+| `notice_dispatcher.py` | OneBot notice payload routing (group increase/decrease/card) — delegated from `WaifuService.notice` |
+| `reply_gate.py` | Reply gating, group follow-up window, pending-search confirmation, repeat detection — delegated from `WaifuService.gate` |
+| `skill_dispatcher.py` | Skill/tool dispatch for image, search, summary and skill-list commands — delegated from `WaifuService.dispatcher` |
+| `outbound_emitter.py` | Outbound message send with optional delay and persistence hooks — delegated from `WaifuService.emitter` |
+| `member_onboarding.py` | New-member preferred-name flow (ask → confirm → save to directory) — delegated from `WaifuService.onboarding` |
+| `legacy_migrator.py` | One-time migration from legacy session metadata to current state_store schema, and character-isolation repair — delegated from `WaifuService.migrator` |
+| `persona_guard.py` | Assistant-alias bookkeeping and member-profile sanitization (prevents cross-character persona leakage) — delegated from `WaifuService.persona` |
 
 ### Subsystem Directories
 
