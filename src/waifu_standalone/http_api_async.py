@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
+import time
 from http import HTTPStatus
 from typing import Any
 from urllib.parse import unquote
@@ -25,6 +27,10 @@ from .http_api import (
     _validate_launcher_type,
     _validate_route_segment,
 )
+from .observability import logging_is_configured, record_http_exchange
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _cache_headers() -> dict[str, str]:
@@ -53,6 +59,16 @@ def _json_response(
 
 def _bytes_response(status: int, body: bytes, content_type: str) -> web.Response:
     payload = bytes(body)
+    headers = {
+        "Content-Type": content_type,
+        "Content-Length": str(len(payload)),
+        **_cache_headers(),
+    }
+    return web.Response(status=int(status), body=payload, headers=headers)
+
+
+def _text_response(status: int, body: str, content_type: str) -> web.Response:
+    payload = str(body or "").encode("utf-8")
     headers = {
         "Content-Type": content_type,
         "Content-Length": str(len(payload)),
@@ -121,7 +137,7 @@ async def _read_json_body(
         )
     except (UnicodeDecodeError, json.JSONDecodeError):
         preview = raw[:200].decode("utf-8", errors="replace")
-        print(f"bad request body preview: {preview!r}")
+        _LOGGER.warning("bad request body preview=%r", preview)
         return None, _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})
 
     if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):
@@ -153,6 +169,7 @@ class _AioHttpDispatcher:
             "/api/portraits": self._get_portrait,
             "/api/console": self._get_console,
             "/api/runtime": self._get_runtime,
+            "/api/panels/observability": self._get_observability_panel,
             "/api/events/recent": self._get_recent_events,
             "/api/events/behavior": self._get_behavior_events,
             "/api/panels/character": self._get_character_panel,
@@ -251,6 +268,12 @@ class _AioHttpDispatcher:
             return _static_file_response(filename, content_type)
         if request.path == "/healthz":
             return _json_response(HTTPStatus.OK, {"status": "ok"})
+        if request.path == "/metrics":
+            return _text_response(
+                HTTPStatus.OK,
+                self.api.prometheus_metrics(),
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
         if request.path == "/api/auth/state":
             return _json_response(HTTPStatus.OK, self.api.auth_state(self._session_token(request)))
         return None
@@ -411,6 +434,14 @@ class _AioHttpDispatcher:
 
     async def _get_runtime(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         return _json_response(HTTPStatus.OK, self.api.runtime_stats())
+
+    async def _get_observability_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        log_limit = _coerce_limit(request.query.get("log_limit", "120"))
+        row_limit = _coerce_limit(request.query.get("row_limit", "60"))
+        return _json_response(
+            HTTPStatus.OK,
+            self.api.observability_panel(log_limit=log_limit, row_limit=row_limit),
+        )
 
     async def _get_recent_events(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         limit = _coerce_limit(request.query.get("limit", "50"))
@@ -790,7 +821,49 @@ class _AioHttpDispatcher:
 
 def _build_application(api: HttpApi) -> web.Application:
     dispatcher = _AioHttpDispatcher(api)
-    app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
+
+    @web.middleware
+    async def _observability_middleware(request: web.Request, handler: web.Handler) -> web.StreamResponse:
+        started = time.perf_counter()
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            record_http_exchange(
+                api.metrics,
+                method=request.method,
+                path=request.path,
+                status_code=exc.status,
+                duration_seconds=time.perf_counter() - started,
+                remote_addr=str(request.remote or ""),
+            )
+            raise
+        except Exception:
+            if logging_is_configured():
+                _LOGGER.exception(
+                    "unhandled http request failure method=%s path=%s",
+                    request.method,
+                    request.path,
+                )
+            record_http_exchange(
+                api.metrics,
+                method=request.method,
+                path=request.path,
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                duration_seconds=time.perf_counter() - started,
+                remote_addr=str(request.remote or ""),
+            )
+            raise
+        record_http_exchange(
+            api.metrics,
+            method=request.method,
+            path=request.path,
+            status_code=response.status,
+            duration_seconds=time.perf_counter() - started,
+            remote_addr=str(request.remote or ""),
+        )
+        return response
+
+    app = web.Application(client_max_size=_MAX_REQUEST_BYTES, middlewares=[_observability_middleware])
     app.router.add_route("GET", "/", dispatcher.handle_get)
     app.router.add_route("GET", "/{tail:.*}", dispatcher.handle_get)
     app.router.add_route("POST", "/{tail:.*}", dispatcher.handle_post)
@@ -875,8 +948,15 @@ class AsyncCompatServer:
     async def _cleanup(self) -> None:
         if self._runner is not None:
             await self._runner.cleanup()
-            await asyncio.sleep(0.05)
             self._runner = None
+        loop = asyncio.get_running_loop()
+        current = asyncio.current_task(loop=loop)
+        pending = [task for task in asyncio.all_tasks(loop=loop) if task is not current and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.sleep(0)
         self._site = None
 
     def _close_resources(self) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 import time
@@ -42,6 +43,7 @@ from .organs.proactive import ProactivePlanner
 from .organs.thoughts import Thoughts
 from .member_onboarding import MemberOnboarding
 from .outbound_emitter import OutboundEmitter
+from .observability import MetricsRegistry, logging_is_configured, set_active_metrics_registry
 from .persona_guard import PersonaGuard
 from .reply_gate import PENDING_SEARCH_METADATA_KEY, ReplyGate
 from .services import CapturingOutboundPort
@@ -56,6 +58,7 @@ from .systems.value_game import ValueGameEngine
 _MASK_SENTINEL = "..."
 _BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openqqwaifu-bg")
 _ASYNC_RUNTIME = AsyncRuntime()
+_LOGGER = logging.getLogger(__name__)
 
 
 def _mask_key(key: str) -> str:
@@ -104,6 +107,7 @@ def _close_component(component: object) -> None:
 @dataclass(slots=True)
 class WaifuService:
     config: AppConfig
+    metrics: MetricsRegistry
     memory: Memory
     emotions: EmotionSensor
     thoughts: Thoughts
@@ -144,6 +148,7 @@ class WaifuService:
     dispatcher: SkillDispatcher = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        set_active_metrics_registry(self.metrics)
         self.console = ConsolePanels(self)
         self.knowledge = KnowledgeCurator(self)
         self.notice = NoticeDispatcher(self)
@@ -442,6 +447,8 @@ class WaifuService:
         try:
             future.result()
         except Exception as exc:
+            if logging_is_configured():
+                _LOGGER.exception("background task failed task=%s", task_name)
             with self._state_lock:
                 self._event_counter += 1
                 self._recent_events.append(
@@ -981,6 +988,7 @@ class WaifuService:
             self._session_locks.clear()
 
     def _refresh_runtime_components(self, *, rebuild_generator: bool = False, rebuild_outbound: bool = False) -> None:
+        set_active_metrics_registry(self.metrics)
         if rebuild_generator:
             self.generator = Generator(self.config)
             self.cards = self.generator._cards
@@ -1241,11 +1249,14 @@ class WaifuService:
 
 def build_default_service(config: AppConfig | None = None) -> tuple[WaifuService, CapturingOutboundPort]:
     app_config = config or AppConfig()
+    metrics = MetricsRegistry(service_name=str(app_config.service_name or "openqqwaifu"))
+    set_active_metrics_registry(metrics)
     initial_character = _initial_character_id(app_config)
     memory_builder = lambda character_id: InMemoryStore(scoped_character_id=character_id)
     state_builder = lambda character_id: InMemoryRuntimeStateStore(embedder=_build_embedding_client(app_config))
     return _build_service(
         app_config,
+        metrics,
         memory_builder(initial_character),
         state_builder(initial_character),
         CapturingOutboundPort(),
@@ -1259,6 +1270,8 @@ def build_file_service(
     store_root: str | Path | None = None,
 ) -> tuple[WaifuService, CapturingOutboundPort]:
     app_config = config or AppConfig()
+    metrics = MetricsRegistry(service_name=str(app_config.service_name or "openqqwaifu"))
+    set_active_metrics_registry(metrics)
     session_root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
     state_root = Path(app_config.data_root) / "state" / "characters"
     initial_character = _initial_character_id(app_config)
@@ -1272,6 +1285,7 @@ def build_file_service(
     )
     return _build_service(
         app_config,
+        metrics,
         memory_builder(initial_character),
         state_builder(initial_character),
         CapturingOutboundPort(),
@@ -1285,6 +1299,8 @@ def build_runtime_service(
     store_root: str | Path | None = None,
 ) -> tuple[WaifuService, OutboundPort]:
     app_config = config or AppConfig()
+    metrics = MetricsRegistry(service_name=str(app_config.service_name or "openqqwaifu"))
+    set_active_metrics_registry(metrics)
     session_root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
     outbound = _build_runtime_outbound(app_config)
     state_root = Path(app_config.data_root) / "state" / "characters"
@@ -1299,6 +1315,7 @@ def build_runtime_service(
     )
     return _build_service(
         app_config,
+        metrics,
         memory_builder(initial_character),
         state_builder(initial_character),
         outbound,
@@ -1337,6 +1354,7 @@ def _initial_character_id(app_config: AppConfig) -> str:
 
 def _build_service(
     app_config: AppConfig,
+    metrics: MetricsRegistry,
     store: Any,
     state_store: Any,
     outbound: OutboundPort,
@@ -1344,6 +1362,7 @@ def _build_service(
     memory_store_builder: Callable[[str], Any] | None = None,
     state_store_builder: Callable[[str], Any] | None = None,
 ) -> tuple[WaifuService, OutboundPort]:
+    set_active_metrics_registry(metrics)
     generator = Generator(
         app_config,
         llm_client=build_llm_client(app_config),
@@ -1354,6 +1373,7 @@ def _build_service(
     tools = ToolRegistry()
     service = WaifuService(
         config=app_config,
+        metrics=metrics,
         memory=Memory(store),
         emotions=EmotionSensor(),
         thoughts=Thoughts(app_config, generator),

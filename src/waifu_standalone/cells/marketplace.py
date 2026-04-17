@@ -8,6 +8,7 @@ from urllib.parse import urlencode, urlparse
 
 from ..config import MarketplaceConfig, MarketplaceSourceConfig
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport
+from ..observability import TransportMetricsScope
 
 
 @dataclass(slots=True)
@@ -43,8 +44,9 @@ class MarketplaceClient:
             (float(source.timeout_seconds or 10.0) for source in self.config.sources),
             default=10.0,
         )
-        self._transport = SyncHttpTransport(timeout_seconds=max_timeout)
-        self._async_transport = AsyncHttpTransport(timeout_seconds=max_timeout)
+        scope = TransportMetricsScope(kind="marketplace", target="skill_source")
+        self._transport = SyncHttpTransport(timeout_seconds=max_timeout, metrics_scope=scope)
+        self._async_transport = AsyncHttpTransport(timeout_seconds=max_timeout, metrics_scope=scope)
 
     def describe(self) -> dict[str, object]:
         return {

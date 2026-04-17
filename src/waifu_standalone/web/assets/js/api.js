@@ -49,6 +49,11 @@ export const api = {
   dashboard: () => request("GET", "/api/dashboard"),
   console: () => request("GET", "/api/console"),
   runtime: () => request("GET", "/api/runtime"),
+  getObservabilityPanel: (logLimit = 120, rowLimit = 60) =>
+    request(
+      "GET",
+      `/api/panels/observability?log_limit=${encodeURIComponent(logLimit)}&row_limit=${encodeURIComponent(rowLimit)}`,
+    ),
   recentEvents: (limit = 50) =>
     request("GET", `/api/events/recent?limit=${encodeURIComponent(limit)}`),
   behaviorEvents: (limit = 80, launcherType = "", launcherId = "") => {

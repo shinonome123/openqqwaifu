@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import patch
 
@@ -254,6 +255,45 @@ class HttpApiTests(unittest.TestCase):
         self.assertGreaterEqual(len(behavior["events"]), 2)
         self.assertGreaterEqual(len(proactive["candidates"]), 1)
         self.assertIn("text", draft["draft"])
+
+    def test_prometheus_metrics_include_onebot_counters(self) -> None:
+        status, _ = self.api.handle_json(
+            {
+                "message_type": "group",
+                "group_id": 612475113,
+                "user_id": 783190298,
+                "sender": {"user_id": 783190298, "nickname": "tester"},
+                "message": [{"type": "text", "data": {"text": "hello"}}],
+            }
+        )
+
+        metrics_text = self.api.prometheus_metrics()
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertIn("openqqwaifu_service_up 1", metrics_text)
+        self.assertIn(
+            'openqqwaifu_onebot_events_total{outcome="ok",post_type="message"} 1',
+            metrics_text,
+        )
+        self.assertIn("openqqwaifu_uptime_seconds", metrics_text)
+
+    def test_observability_panel_exposes_upstream_rollups(self) -> None:
+        self.api.metrics.record_upstream_request(
+            kind="sidecar",
+            target="onebot_http",
+            method="POST",
+            url="http://127.0.0.1:3000/send_group_msg",
+            status=200,
+            outcome="ok",
+            duration_seconds=0.05,
+        )
+
+        panel = self.api.observability_panel(log_limit=20, row_limit=20)
+
+        self.assertEqual(panel["upstream"]["total"], 1)
+        self.assertEqual(panel["upstream"]["error_total"], 0)
+        self.assertEqual(panel["upstream"]["targets"][0]["target"], "onebot_http")
+        self.assertEqual(panel["upstream"]["targets"][0]["kind"], "sidecar")
 
     def test_qq_login_api_is_available(self) -> None:
         self.service.napcat_login = _FakeNapCatLoginBridge()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import logging
 import re
 import time
 import urllib.error
@@ -16,6 +17,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .cells.auth import AuthManager
 from .models import InboundEvent, MessageSegment
+from .observability import MetricsRegistry, logging_is_configured
 
 
 _WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -46,6 +48,8 @@ _NON_ADMIN_GET_PATHS = {
 _NON_ADMIN_POST_PATHS = {
     "/api/auth/change-password",
 }
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class RequestTooLarge(ValueError):
@@ -139,45 +143,87 @@ def _looks_mojibake(text: str) -> bool:
 class HttpApi:
     service: Any
     auth: AuthManager | None = None
+    metrics: MetricsRegistry | None = None
 
     def __post_init__(self) -> None:
         if self.auth is None:
             data_root = getattr(getattr(self.service, "config", None), "data_root", "data")
             self.auth = AuthManager(data_root)
+        if self.metrics is None:
+            service_metrics = getattr(self.service, "metrics", None)
+            if isinstance(service_metrics, MetricsRegistry):
+                self.metrics = service_metrics
+            else:
+                service_name = getattr(getattr(self.service, "config", None), "service_name", "openqqwaifu")
+                self.metrics = MetricsRegistry(service_name=str(service_name or "openqqwaifu"))
 
     def handle_json(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        started = time.perf_counter()
         post_type = payload.get("post_type")
-        if post_type == "notice":
-            try:
-                return HTTPStatus.ACCEPTED, dict(self.service.handle_notice_payload(payload))
-            except Exception as exc:
-                return HTTPStatus.BAD_GATEWAY, {"status": "delivery_failed", "reason": str(exc)}
-        if post_type and post_type != "message":
-            return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
-
-        event = parse_onebot_event(payload)
+        event_type = str(post_type or "message").strip() or "message"
+        outcome = "ignored"
         try:
-            message = self.service.handle_event(event)
-        except Exception as exc:
-            return HTTPStatus.BAD_GATEWAY, {"status": "delivery_failed", "reason": str(exc)}
+            if post_type == "notice":
+                try:
+                    body = dict(self.service.handle_notice_payload(payload))
+                    outcome = str(body.get("status", "ok") or "ok")
+                    return HTTPStatus.ACCEPTED, body
+                except Exception as exc:
+                    outcome = "delivery_failed"
+                    if logging_is_configured():
+                        _LOGGER.exception("failed to handle OneBot notice payload")
+                    return HTTPStatus.BAD_GATEWAY, {"status": "delivery_failed", "reason": str(exc)}
+            if post_type and post_type != "message":
+                outcome = "ignored"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 
-        if message is None:
-            return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "empty event"}
-        return HTTPStatus.OK, {
-            "status": "ok",
-            "reply": {
-                "launcher_id": message.launcher_id,
-                "launcher_type": message.launcher_type,
-                "text": message.text,
-                "images": message.images,
-            },
-        }
+            event = parse_onebot_event(payload)
+            try:
+                message = self.service.handle_event(event)
+            except Exception as exc:
+                outcome = "delivery_failed"
+                if logging_is_configured():
+                    _LOGGER.exception(
+                        "failed to handle inbound event launcher_type=%s launcher_id=%s sender_id=%s",
+                        event.launcher_type,
+                        event.launcher_id,
+                        event.sender_id,
+                    )
+                return HTTPStatus.BAD_GATEWAY, {"status": "delivery_failed", "reason": str(exc)}
+
+            if message is None:
+                outcome = "ignored"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "empty event"}
+            outcome = "ok"
+            return HTTPStatus.OK, {
+                "status": "ok",
+                "reply": {
+                    "launcher_id": message.launcher_id,
+                    "launcher_type": message.launcher_type,
+                    "text": message.text,
+                    "images": message.images,
+                },
+            }
+        finally:
+            if self.metrics is not None:
+                self.metrics.record_onebot_event(
+                    post_type=event_type,
+                    outcome=outcome,
+                    duration_seconds=time.perf_counter() - started,
+                )
+
+    def prometheus_metrics(self) -> str:
+        if self.metrics is None:
+            return ""
+        return self.metrics.render_prometheus(self.service)
 
     def dashboard_snapshot(self) -> dict[str, Any]:
         return dict(self.service.dashboard_snapshot())
 
     def console_panels(self) -> dict[str, Any]:
-        return dict(self.service.get_console_panels())
+        panels = dict(self.service.get_console_panels())
+        panels["observability"] = self.observability_panel()
+        return panels
 
     def recent_events(self, limit: int = 50) -> dict[str, Any]:
         return {"events": list(self.service.recent_events(limit=limit))}
@@ -201,6 +247,18 @@ class HttpApi:
 
     def runtime_stats(self) -> dict[str, Any]:
         return dict(self.service.runtime_stats())
+
+    def observability_panel(self, *, log_limit: int = 120, row_limit: int = 60) -> dict[str, Any]:
+        if self.metrics is None:
+            return {
+                "generated_at": time.time(),
+                "runtime": dict(self.service.runtime_stats()),
+                "logs": [],
+                "http": {"total": 0, "rows": []},
+                "onebot": {"total": 0, "rows": []},
+                "upstream": {"total": 0, "error_total": 0, "rows": [], "targets": []},
+            }
+        return self.metrics.snapshot(self.service, log_limit=log_limit, row_limit=row_limit)
 
     def test_provider(self, payload: dict[str, Any]) -> dict[str, Any]:
         kind = str(payload.get("kind") or "").strip().lower()
@@ -457,6 +515,7 @@ def make_handler(api: HttpApi):
                 "/api/portraits": self._get_portrait,
                 "/api/console": self._get_console,
                 "/api/runtime": self._get_runtime,
+                "/api/panels/observability": self._get_observability_panel,
                 "/api/events/recent": self._get_recent_events,
                 "/api/events/behavior": self._get_behavior_events,
                 "/api/panels/character": self._get_character_panel,
@@ -561,6 +620,7 @@ def make_handler(api: HttpApi):
                 return True
             routes = {
                 "/healthz": self._get_healthz,
+                "/metrics": self._get_metrics,
                 "/api/auth/state": self._get_auth_state,
             }
             handler = routes.get(parsed.path)
@@ -731,6 +791,13 @@ def make_handler(api: HttpApi):
         def _get_healthz(self, parsed) -> None:
             self._write_json(HTTPStatus.OK, {"status": "ok"})
 
+        def _get_metrics(self, parsed) -> None:
+            self._write_text(
+                HTTPStatus.OK,
+                api.prometheus_metrics(),
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
+
         def _get_auth_state(self, parsed) -> None:
             self._write_json(HTTPStatus.OK, api.auth_state(self._session_token()))
 
@@ -759,6 +826,15 @@ def make_handler(api: HttpApi):
 
         def _get_runtime(self, parsed) -> None:
             self._write_json(HTTPStatus.OK, api.runtime_stats())
+
+        def _get_observability_panel(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            log_limit = _coerce_limit(query.get("log_limit", ["120"])[0])
+            row_limit = _coerce_limit(query.get("row_limit", ["60"])[0])
+            self._write_json(
+                HTTPStatus.OK,
+                api.observability_panel(log_limit=log_limit, row_limit=row_limit),
+            )
 
         def _get_recent_events(self, parsed) -> None:
             query = parse_qs(parsed.query, keep_blank_values=False)
@@ -1157,6 +1233,15 @@ def make_handler(api: HttpApi):
             self.end_headers()
             self.wfile.write(payload)
 
+        def _write_text(self, status: int, body: str, content_type: str) -> None:
+            payload = str(body or "").encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.end_headers()
+            self.wfile.write(payload)
+
         def _session_token(self) -> str | None:
             cookies = _parse_cookie_header(self.headers.get("Cookie", ""))
             return cookies.get(_SESSION_COOKIE_NAME)
@@ -1215,7 +1300,7 @@ def make_handler(api: HttpApi):
                 return None
             except (UnicodeDecodeError, json.JSONDecodeError):
                 preview = raw[:200].decode("utf-8", errors="replace")
-                print(f"bad request body preview: {preview!r}")
+                _LOGGER.warning("bad request body preview=%r", preview)
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})
                 return None
             if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], dict):

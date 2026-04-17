@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -177,6 +178,10 @@ class ServerIntegrationTests(unittest.TestCase):
                 self.assertEqual(response.status, HTTPStatus.NO_CONTENT)
                 self.assertEqual(body, b"")
                 self.assertEqual(_ActionCaptureHandler.requests[0][0], "/send_group_msg")
+                with urllib.request.urlopen(f"http://{request_host}:{request_port}/metrics", timeout=5) as response:
+                    metrics_text = response.read().decode("utf-8")
+
+                self.assertIn('openqqwaifu_upstream_requests_total{kind="sidecar",target="onebot_http"', metrics_text)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -195,6 +200,37 @@ class ServerIntegrationTests(unittest.TestCase):
                     body = json.loads(response.read().decode("utf-8"))
 
                 self.assertEqual(body["status"], "ok")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_metrics_endpoint_returns_prometheus_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_runtime_service(AppConfig(data_root=tmpdir))
+            api = HttpApi(service)
+            server = run_server(api, "127.0.0.1", 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                host, port = server.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=5) as response:
+                    self.assertEqual(response.status, HTTPStatus.OK)
+                connection = http.client.HTTPConnection(host, port, timeout=5)
+                connection.request("GET", "/metrics")
+                response = connection.getresponse()
+                body = response.read().decode("utf-8")
+                content_type = response.getheader("Content-Type", "")
+                connection.close()
+                time.sleep(0.05)
+
+                self.assertEqual(response.status, HTTPStatus.OK)
+                self.assertIn("text/plain", content_type)
+                self.assertIn("openqqwaifu_service_up 1", body)
+                self.assertIn(
+                    'openqqwaifu_http_requests_total{method="GET",path="/healthz",status="200"} 1',
+                    body,
+                )
             finally:
                 server.shutdown()
                 server.server_close()
@@ -322,6 +358,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 _, console_body = self._open_json(opener, f"http://{host}:{port}/api/console")
                 self.assertIn("character", console_body)
                 self.assertIn("skills", console_body)
+                self.assertIn("observability", console_body)
 
                 _, character_body = self._open_json(
                     opener,
@@ -343,6 +380,10 @@ class ServerIntegrationTests(unittest.TestCase):
 
                 _, user_body = self._open_json(opener, f"http://{host}:{port}/api/panels/user")
                 self.assertIn("members", user_body)
+
+                _, observability_body = self._open_json(opener, f"http://{host}:{port}/api/panels/observability")
+                self.assertIn("logs", observability_body)
+                self.assertIn("upstream", observability_body)
             finally:
                 server.shutdown()
                 server.server_close()

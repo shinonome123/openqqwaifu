@@ -48,6 +48,8 @@ class DisabledEmbeddingClient(_BaseHTTPClient):
             model=model,
             backend=backend,
             timeout_seconds=timeout_seconds,
+            metrics_kind="embedding",
+            metrics_target=backend or "disabled",
         )
         self.enabled = False
 
@@ -82,6 +84,8 @@ class OpenAIEmbeddingClient(_BaseHTTPClient):
             model=model,
             backend=backend or "openai",
             timeout_seconds=timeout_seconds,
+            metrics_kind="embedding",
+            metrics_target=backend or "openai",
         )
         self.enabled = bool(enabled)
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
 from ..models import OutboundMessage
+from ..observability import TransportMetricsScope
 
 
 class OneBotActionError(RuntimeError):
@@ -19,8 +20,9 @@ class OneBotActionClient:
     _async_transport: AsyncHttpTransport = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._transport = SyncHttpTransport(timeout_seconds=self.timeout)
-        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout)
+        scope = TransportMetricsScope(kind="sidecar", target="onebot_http")
+        self._transport = SyncHttpTransport(timeout_seconds=self.timeout, metrics_scope=scope)
+        self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout, metrics_scope=scope)
 
     def post_action(self, action: str, payload: dict[str, object]) -> dict[str, object]:
         base = self.base_url.rstrip("/")
