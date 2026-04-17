@@ -1152,6 +1152,28 @@ Object.assign(ZH, {
   "observability.table.latency": "平均延迟",
 });
 
+Object.assign(EN, {
+  "page.abilities.desc": "Tune search, thinking, story-mode output, and memory behavior.",
+  "abilities.field.story": "Story mode",
+  "abilities.field.story.hint": "Render visible scene, reaction, dialogue, and optional inner thought in the reply itself.",
+  "abilities.field.storyStyle": "Story style",
+  "abilities.option.story.intimate": "Intimate",
+  "abilities.option.story.cinematic": "Cinematic",
+  "abilities.option.story.diary": "Diary",
+  "abilities.field.storyDetail": "Story detail",
+});
+
+Object.assign(ZH, {
+  "page.abilities.desc": "调整联网搜索、思维链、故事化回复、记忆图谱和主动互动策略。",
+  "abilities.field.story": "故事模式",
+  "abilities.field.story.hint": "让回复直接显示场景描写、人物反应、台词和可选内心独白。",
+  "abilities.field.storyStyle": "故事风格",
+  "abilities.option.story.intimate": "亲近",
+  "abilities.option.story.cinematic": "电影感",
+  "abilities.option.story.diary": "日记式",
+  "abilities.field.storyDetail": "故事细节级别",
+});
+
 function readPrefs() {
   try {
     return JSON.parse(localStorage.getItem(PREFS_KEY) || "{}");

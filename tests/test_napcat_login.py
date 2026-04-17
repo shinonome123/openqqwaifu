@@ -234,6 +234,47 @@ class NapCatLoginBridgeTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:6099/api/QQLogin/RefreshQRcode", calls)
         self.assertEqual(bridge._resolved_api_base, "http://127.0.0.1:6099/api")
 
+    def test_force_auth_reuses_last_successful_auth_base(self) -> None:
+        calls: list[str] = []
+
+        def fake_request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(url)
+            if url == "http://127.0.0.1:6099/api/auth/login":
+                return _json_response({"code": 0, "data": {"Credential": "cred-123"}})
+            if url == "http://127.0.0.1:6099/auth/login":
+                raise AssertionError("root auth endpoint should not be probed once /api succeeded")
+            if url == "http://127.0.0.1:6099/QQLogin/CheckLoginStatus":
+                raise _http_error(404)
+            if url == "http://127.0.0.1:6099/api/QQLogin/CheckLoginStatus":
+                return _json_response(
+                    {
+                        "code": 0,
+                        "data": {
+                            "isLogin": False,
+                            "isOffline": False,
+                            "qrcodeurl": "https://txz.qq.com/p?k=fresh",
+                            "loginError": "",
+                        },
+                    }
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        bridge = NapCatLoginBridge(
+            base_url="http://127.0.0.1:6099",
+            api_prefix="/api",
+            webui_token="secret-token",
+            timeout=5.0,
+        )
+        bridge._resolved_auth_base = "http://127.0.0.1:6099/api"
+        bridge._resolved_api_base = "http://127.0.0.1:6099"
+
+        with patch("waifu_standalone.gateways.napcat_login.SyncHttpTransport.request", side_effect=fake_request):
+            status = bridge.fetch_status(force=True)
+
+        self.assertEqual(status["qrcode_url"], "https://txz.qq.com/p?k=fresh")
+        self.assertEqual(calls[0], "http://127.0.0.1:6099/api/auth/login")
+        self.assertNotIn("http://127.0.0.1:6099/auth/login", calls)
+
     def test_refresh_qrcode_treats_already_logged_in_as_success(self) -> None:
         calls: list[str] = []
 

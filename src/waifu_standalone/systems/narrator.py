@@ -5,6 +5,13 @@ from ..models import EmotionState, InboundEvent
 
 
 class Narrator:
+    """Legacy cue builder kept as a compatibility shim for story mode.
+
+    The visible story-style reply formatting now lives in ``Generator``.
+    This helper remains only so older imports do not crash on removed
+    ``narrator_*`` config fields.
+    """
+
     def __init__(self, config: AppConfig):
         self.config = config
 
@@ -17,11 +24,11 @@ class Narrator:
         emotion: EmotionState,
         memory_graph: dict[str, object] | None = None,
     ) -> str:
-        if not self.config.narrator_mode:
+        if not getattr(self.config, "story_mode", False):
             return ""
         space = "private chat" if event.launcher_type == "person" else "group chat"
         mood = self._mood_phrase(str(getattr(emotion, "primary", "") or "").strip().lower())
-        detail = "concise" if int(self.config.narrator_detail_level) <= 1 else "textured"
+        detail = "concise" if int(getattr(self.config, "story_detail_level", 2)) <= 1 else "textured"
         graph_summary = ""
         if isinstance(memory_graph, dict):
             highlights = memory_graph.get("highlights", [])
@@ -29,10 +36,11 @@ class Narrator:
                 graph_summary = f" Recent context: {highlights[0]}"
         prompt = str(latest_message or "").strip()
         if len(prompt) > 42:
-            prompt = prompt[:41].rstrip() + "…"
+            prompt = prompt[:41].rstrip() + "..."
         return (
-            f"Narrator cue ({self.config.narrator_style}, {detail}): the {space} feels {mood}; "
-            f"anchor the reply to {address} and the latest thread “{prompt}”.{graph_summary}"
+            f"Story cue ({getattr(self.config, 'story_style', 'intimate')}, {detail}): "
+            f"the {space} feels {mood}; anchor the reply to {address} and the latest thread "
+            f"\"{prompt}\".{graph_summary}"
         )
 
     @staticmethod

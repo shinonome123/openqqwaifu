@@ -108,9 +108,9 @@ class AppConfig:
     knowledge_auto_extract_limit: int = 2
     event_mode: bool = True
     event_buffer_limit: int = 120
-    narrator_mode: bool = True
-    narrator_style: str = "subtle"
-    narrator_detail_level: int = 2
+    story_mode: bool = False
+    story_style: str = "intimate"
+    story_detail_level: int = 2
     value_game_mode: bool = True
     value_game_reply_bonus: float = 0.08
     memory_graph_mode: bool = True

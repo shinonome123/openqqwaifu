@@ -53,7 +53,6 @@ from .skill_dispatcher import SkillDispatcher
 from .state_store import InMemoryRuntimeStateStore, SqliteRuntimeStateStore
 from .systems.events import BehaviorEventEngine
 from .systems.emotions import EmotionSensor
-from .systems.narrator import Narrator
 from .systems.searching import SearchContext, SearchDecider
 from .systems.value_game import ValueGameEngine
 
@@ -117,7 +116,6 @@ class WaifuService:
     cards: CardManager
     search: SearchDecider
     event_engine: BehaviorEventEngine
-    narrator: Narrator
     value_game: ValueGameEngine
     memory_graph: MemoryGraphBuilder
     proactive: ProactivePlanner
@@ -201,7 +199,10 @@ class WaifuService:
         if not text and event.image_count == 0:
             return None
         if text and any(text.startswith(prefix) for prefix in self.config.ignore_prefixes):
-            return None
+            if self.onboarding.looks_like_address_command(text):
+                pass
+            else:
+                return None
         if not self.gate.should_reply(event):
             return None
         if live_runtime and not self.generator.llm_ready:
@@ -315,15 +316,6 @@ class WaifuService:
             behavior_events=behavior_context,
         )
         speaker_notes = await self.knowledge._adirectory_member_notes(event)
-        narrator_hint = self.narrator.build_hint(
-            event=event,
-            latest_message=latest_message,
-            address=address,
-            emotion=emotion,
-            memory_graph=graph_snapshot,
-        )
-        if narrator_hint:
-            speaker_notes.append(narrator_hint)
         for highlight in graph_snapshot.get("highlights", [])[:3] if isinstance(graph_snapshot, dict) else []:
             text_hint = str(highlight or "").strip()
             if text_hint:
@@ -1113,7 +1105,6 @@ class WaifuService:
             self.memory.set_character_resolver(self.cards.active_character)
         self.search = SearchDecider(self.config)
         self.event_engine = BehaviorEventEngine(self.config)
-        self.narrator = Narrator(self.config)
         self.value_game = ValueGameEngine(self.config)
         self.memory_graph = MemoryGraphBuilder(self.config)
         self.proactive = ProactivePlanner(self.config)
@@ -1537,7 +1528,6 @@ def _build_service(
         cards=cards,
         search=SearchDecider(app_config),
         event_engine=BehaviorEventEngine(app_config),
-        narrator=Narrator(app_config),
         value_game=ValueGameEngine(app_config),
         memory_graph=MemoryGraphBuilder(app_config),
         proactive=ProactivePlanner(app_config),
