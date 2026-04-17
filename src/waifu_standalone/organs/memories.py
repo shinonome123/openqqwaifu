@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Callable
 
@@ -44,12 +45,18 @@ class Memory:
             session.character_id = resolved_character_id
         return session
 
+    async def aload(self, launcher_id: str, launcher_type: str, *, character_id: str = "") -> SessionMemory:
+        return await asyncio.to_thread(self.load, launcher_id, launcher_type, character_id=character_id)
+
     def save_user_event(self, event: InboundEvent, *, character_id: str = "") -> SessionMemory:
         session = self.load(event.launcher_id, event.launcher_type, character_id=character_id)
         message_text = event.to_memory_text() or "[non-text event]"
         session.history.append(f"{event.sender_name}: {message_text}")
         session.history = session.history[-HISTORY_LIMIT:]
         return self.store.save(session)
+
+    async def asave_user_event(self, event: InboundEvent, *, character_id: str = "") -> SessionMemory:
+        return await asyncio.to_thread(self.save_user_event, event, character_id=character_id)
 
     def save_user_message(
         self,
@@ -77,6 +84,22 @@ class Memory:
         session.history.append(f"assistant: {content}")
         session.history = session.history[-HISTORY_LIMIT:]
         return self.store.save(session)
+
+    async def asave_assistant_message(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        content: str,
+        *,
+        character_id: str = "",
+    ) -> SessionMemory:
+        return await asyncio.to_thread(
+            self.save_assistant_message,
+            launcher_id,
+            launcher_type,
+            content,
+            character_id=character_id,
+        )
 
     def recent_history(
         self,
@@ -106,6 +129,24 @@ class Memory:
                 speaker = assistant_name
             lines.append(f"{speaker}: {content}")
         return "\n".join(lines)
+
+    async def aformat_dialogue(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        assistant_name: str,
+        limit: int = 8,
+        character_id: str = "",
+    ) -> str:
+        return await asyncio.to_thread(
+            self.format_dialogue,
+            launcher_id,
+            launcher_type,
+            assistant_name=assistant_name,
+            limit=limit,
+            character_id=character_id,
+        )
 
     def maybe_archive_history(
         self,
@@ -142,6 +183,26 @@ class Memory:
             "archive_count": archive_count,
             "source": "archived_history",
         }
+
+    async def amaybe_archive_history(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        max_history_lines: int,
+        batch_size: int,
+        summarizer: Callable[[list[str]], tuple[str, list[str]]],
+        character_id: str = "",
+    ) -> dict[str, object] | None:
+        return await asyncio.to_thread(
+            self.maybe_archive_history,
+            launcher_id,
+            launcher_type,
+            max_history_lines=max_history_lines,
+            batch_size=batch_size,
+            summarizer=summarizer,
+            character_id=character_id,
+        )
 
     def extract_preferred_name(self, content: str) -> str:
         raw = str(content or "").strip()

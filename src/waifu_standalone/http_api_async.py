@@ -151,13 +151,16 @@ class _AioHttpDispatcher:
     def __init__(self, api: HttpApi) -> None:
         self.api = api
 
+    async def _call_api_in_thread(self, callback, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return await asyncio.to_thread(callback, *args, **kwargs)
+
     async def handle_get(self, request: web.Request) -> web.Response:
-        if response := self._dispatch_static_get(request):
+        if response := await self._dispatch_static_get(request):
             return response
 
         current_user: dict[str, Any] | None = None
         if request.path.startswith("/api/"):
-            current_user, response = self._require_auth(request)
+            current_user, response = await self._require_auth(request)
             if response is not None:
                 return response
             response = self._authorize_api_request("GET", request.path, current_user)
@@ -206,7 +209,7 @@ class _AioHttpDispatcher:
 
         current_user: dict[str, Any] | None = None
         if request.path.startswith("/api/"):
-            current_user, response = self._require_auth(request)
+            current_user, response = await self._require_auth(request)
             if response is not None:
                 return response
             response = self._authorize_api_request("POST", request.path, current_user)
@@ -247,7 +250,7 @@ class _AioHttpDispatcher:
 
     async def handle_delete(self, request: web.Request) -> web.Response:
         if request.path.startswith("/api/"):
-            _, response = self._require_auth(request)
+            _, response = await self._require_auth(request)
             if response is not None:
                 return response
         response = await self._dispatch_dynamic_delete(request)
@@ -255,7 +258,7 @@ class _AioHttpDispatcher:
             return response
         return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
 
-    def _dispatch_static_get(self, request: web.Request) -> web.Response | None:
+    async def _dispatch_static_get(self, request: web.Request) -> web.Response | None:
         if request.path in _STATIC_FILES:
             filename, content_type = _STATIC_FILES[request.path]
             return _static_file_response(filename, content_type)
@@ -271,11 +274,14 @@ class _AioHttpDispatcher:
         if request.path == "/metrics":
             return _text_response(
                 HTTPStatus.OK,
-                self.api.prometheus_metrics(),
+                await self._call_api_in_thread(self.api.prometheus_metrics),
                 "text/plain; version=0.0.4; charset=utf-8",
             )
         if request.path == "/api/auth/state":
-            return _json_response(HTTPStatus.OK, self.api.auth_state(self._session_token(request)))
+            return _json_response(
+                HTTPStatus.OK,
+                await self._call_api_in_thread(self.api.auth_state, self._session_token(request)),
+            )
         return None
 
     async def _dispatch_static_post(self, request: web.Request) -> web.Response | None:
@@ -298,7 +304,7 @@ class _AioHttpDispatcher:
                 skill_id = _validate_route_segment(skill_id, name="skill_id")
             except ValueError as exc:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-            detail = self.api.get_skill_detail(skill_id)
+            detail = await self._call_api_in_thread(self.api.get_skill_detail, skill_id)
             if detail is None:
                 return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
             return _json_response(HTTPStatus.OK, detail)
@@ -313,7 +319,7 @@ class _AioHttpDispatcher:
                 launcher_id = _validate_route_segment(launcher_id, name="launcher_id")
             except ValueError as exc:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-            detail = self.api.get_session_detail(launcher_type, launcher_id)
+            detail = await self._call_api_in_thread(self.api.get_session_detail, launcher_type, launcher_id)
             if detail is None:
                 return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
             return _json_response(HTTPStatus.OK, detail)
@@ -332,7 +338,11 @@ class _AioHttpDispatcher:
             payload, response = await _read_json_body(request)
             if response is not None:
                 return response
-            detail = self.api.set_skill_enabled(skill_id, bool((payload or {}).get("enabled", True)))
+            detail = await self._call_api_in_thread(
+                self.api.set_skill_enabled,
+                skill_id,
+                bool((payload or {}).get("enabled", True)),
+            )
             if detail is None:
                 return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
             return _json_response(HTTPStatus.OK, {"status": "ok", "skill": detail})
@@ -356,7 +366,7 @@ class _AioHttpDispatcher:
                     {"status": "bad_request", "reason": "markdown is required"},
                 )
             try:
-                detail = self.api.save_skill(skill_id, markdown)
+                detail = await self._call_api_in_thread(self.api.save_skill, skill_id, markdown)
             except ValueError as exc:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
             if detail is None:
@@ -376,7 +386,12 @@ class _AioHttpDispatcher:
             payload, response = await _read_json_body(request)
             if response is not None:
                 return response
-            detail = self.api.save_memory_session(launcher_type, launcher_id, payload or {})
+            detail = await self._call_api_in_thread(
+                self.api.save_memory_session,
+                launcher_type,
+                launcher_id,
+                payload or {},
+            )
             if detail is None:
                 return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
             return _json_response(HTTPStatus.OK, {"status": "ok", "session": detail})
@@ -392,7 +407,7 @@ class _AioHttpDispatcher:
                 skill_id = _validate_route_segment(skill_id, name="skill_id")
             except ValueError as exc:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-            if not self.api.delete_skill(skill_id):
+            if not await self._call_api_in_thread(self.api.delete_skill, skill_id):
                 return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
             return _json_response(HTTPStatus.OK, {"status": "ok", "deleted": skill_id})
 
@@ -408,20 +423,20 @@ class _AioHttpDispatcher:
                     HTTPStatus.BAD_REQUEST,
                     {"status": "bad_request", "reason": "knowledge_id must be an integer"},
                 )
-            if not self.api.delete_knowledge_entry(entry_id):
+            if not await self._call_api_in_thread(self.api.delete_knowledge_entry, entry_id):
                 return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
             return _json_response(HTTPStatus.OK, {"status": "ok", "deleted": entry_id})
         return None
 
     async def _get_dashboard(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.dashboard_snapshot())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.dashboard_snapshot))
 
     async def _get_portrait(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         character = str(request.query.get("character", "") or "").strip()
         if not character:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "character is required"})
         try:
-            asset = self.api.get_character_portrait(character)
+            asset = await self._call_api_in_thread(self.api.get_character_portrait, character)
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         if asset is None:
@@ -430,22 +445,29 @@ class _AioHttpDispatcher:
         return _bytes_response(HTTPStatus.OK, body, content_type)
 
     async def _get_console(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.console_panels())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.console_panels))
 
     async def _get_runtime(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.runtime_stats())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.runtime_stats))
 
     async def _get_observability_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         log_limit = _coerce_limit(request.query.get("log_limit", "120"))
         row_limit = _coerce_limit(request.query.get("row_limit", "60"))
         return _json_response(
             HTTPStatus.OK,
-            self.api.observability_panel(log_limit=log_limit, row_limit=row_limit),
+            await self._call_api_in_thread(
+                self.api.observability_panel,
+                log_limit=log_limit,
+                row_limit=row_limit,
+            ),
         )
 
     async def _get_recent_events(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         limit = _coerce_limit(request.query.get("limit", "50"))
-        return _json_response(HTTPStatus.OK, self.api.recent_events(limit=limit))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.recent_events, limit=limit),
+        )
 
     async def _get_behavior_events(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         limit = _coerce_limit(request.query.get("limit", "80"))
@@ -463,35 +485,52 @@ class _AioHttpDispatcher:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(
             HTTPStatus.OK,
-            self.api.behavior_events(limit=limit, launcher_type=launcher_type, launcher_id=launcher_id),
+            await self._call_api_in_thread(
+                self.api.behavior_events,
+                limit=limit,
+                launcher_type=launcher_type,
+                launcher_id=launcher_id,
+            ),
         )
 
     async def _get_character_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.get_character_panel(request.query.get("character", "")))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.get_character_panel, request.query.get("character", "")),
+        )
 
     async def _get_ai_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.get_ai_panel())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.get_ai_panel))
 
     async def _get_memory_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.get_memory_panel())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.get_memory_panel))
 
     async def _get_abilities_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.get_abilities_panel())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.get_abilities_panel))
 
     async def _get_proactive_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         limit = _coerce_limit(request.query.get("limit", "12"))
-        return _json_response(HTTPStatus.OK, self.api.get_proactive_panel(limit=limit))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.get_proactive_panel, limit=limit),
+        )
 
     async def _get_skills_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.get_skills_panel())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.get_skills_panel))
 
     async def _get_sidecar_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         refresh = str(request.query.get("refresh", "0")).lower() in {"1", "true", "yes"}
-        return _json_response(HTTPStatus.OK, self.api.get_sidecar_panel(refresh=refresh))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.get_sidecar_panel, refresh=refresh),
+        )
 
     async def _get_qq_login_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         refresh = str(request.query.get("refresh", "0")).lower() in {"1", "true", "yes"}
-        return _json_response(HTTPStatus.OK, self.api.get_qq_login_panel(refresh=refresh))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.get_qq_login_panel, refresh=refresh),
+        )
 
     async def _get_qq_login_qrcode_image(
         self,
@@ -499,7 +538,7 @@ class _AioHttpDispatcher:
         current_user: dict[str, Any] | None,
     ) -> web.Response:
         try:
-            asset = self.api.get_qq_login_qrcode_image()
+            asset = await self._call_api_in_thread(self.api.get_qq_login_qrcode_image)
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         if asset is None:
@@ -508,7 +547,7 @@ class _AioHttpDispatcher:
         return _bytes_response(HTTPStatus.OK, body, content_type)
 
     async def _get_other_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.get_other_panel())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.get_other_panel))
 
     async def _get_user_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         if not isinstance(current_user, dict):
@@ -516,7 +555,10 @@ class _AioHttpDispatcher:
                 HTTPStatus.UNAUTHORIZED,
                 {"status": "unauthorized", "reason": "authentication required"},
             )
-        return _json_response(HTTPStatus.OK, self.api.get_user_panel(str(current_user["username"])))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.get_user_panel, str(current_user["username"])),
+        )
 
     async def _get_marketplace_search(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         query = str(request.query.get("q", "") or "")
@@ -527,29 +569,35 @@ class _AioHttpDispatcher:
                 source_id = _validate_route_segment(source_id, name="source_id")
             except ValueError as exc:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-        return _json_response(HTTPStatus.OK, self.api.search_marketplace(query, source_id=source_id, limit=limit))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.search_marketplace, query, source_id=source_id, limit=limit),
+        )
 
     async def _get_skills(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.list_skills())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.list_skills))
 
     async def _get_tools(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.list_tools())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.list_tools))
 
     async def _get_skill_pack_template(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.skill_pack_template())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.skill_pack_template))
 
     async def _get_skill_template(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        return _json_response(HTTPStatus.OK, self.api.new_skill_template())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.new_skill_template))
 
     async def _get_sessions(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         limit = _coerce_limit(request.query.get("limit", "24"))
-        return _json_response(HTTPStatus.OK, {"sessions": self.api.list_sessions(limit=limit)})
+        return _json_response(
+            HTTPStatus.OK,
+            {"sessions": await self._call_api_in_thread(self.api.list_sessions, limit=limit)},
+        )
 
     async def _post_onebot_events(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        status, body = self.api.handle_json(payload or {})
+        status, body = await self.api.handle_json_async(payload or {})
         if status < HTTPStatus.BAD_REQUEST:
             return _no_content_response(HTTPStatus.NO_CONTENT)
         return _json_response(status, body)
@@ -559,7 +607,7 @@ class _AioHttpDispatcher:
         if response is not None:
             return response
         try:
-            body, cookie = self.api.bootstrap_auth(payload or {})
+            body, cookie = await self._call_api_in_thread(self.api.bootstrap_auth, payload or {})
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
@@ -569,7 +617,7 @@ class _AioHttpDispatcher:
         if response is not None:
             return response
         try:
-            body, cookie = self.api.login(payload or {})
+            body, cookie = await self._call_api_in_thread(self.api.login, payload or {})
         except ValueError as exc:
             return _json_response(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
@@ -578,7 +626,7 @@ class _AioHttpDispatcher:
         _, response = await _read_json_body(request, allow_empty=True)
         if response is not None:
             return response
-        body, cookie = self.api.logout(self._session_token(request))
+        body, cookie = await self._call_api_in_thread(self.api.logout, self._session_token(request))
         return _json_response(HTTPStatus.OK, body, headers={"Set-Cookie": cookie})
 
     async def _post_change_password(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
@@ -586,7 +634,11 @@ class _AioHttpDispatcher:
         if response is not None:
             return response
         try:
-            body = self.api.change_password(str((current_user or {}).get("username", "")), payload or {})
+            body = await self._call_api_in_thread(
+                self.api.change_password,
+                str((current_user or {}).get("username", "")),
+                payload or {},
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, body)
@@ -595,14 +647,14 @@ class _AioHttpDispatcher:
         _, response = await _read_json_body(request, allow_empty=True)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.reload_skills())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.reload_skills))
 
     async def _post_test_provider(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
         try:
-            result = self.api.test_provider(payload or {})
+            result = await self._call_api_in_thread(self.api.test_provider, payload or {})
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, result)
@@ -611,20 +663,26 @@ class _AioHttpDispatcher:
         _, response = await _read_json_body(request, allow_empty=True)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.test_sidecar())
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.test_sidecar))
 
     async def _post_character_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.save_character_panel(payload or {}))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.save_character_panel, payload or {}),
+        )
 
     async def _post_character_preview(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
         try:
-            return _json_response(HTTPStatus.OK, self.api.preview_character_panel(payload or {}))
+            return _json_response(
+                HTTPStatus.OK,
+                await self._call_api_in_thread(self.api.preview_character_panel, payload or {}),
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
 
@@ -632,20 +690,26 @@ class _AioHttpDispatcher:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.save_ai_panel(payload or {}))
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.save_ai_panel, payload or {}))
 
     async def _post_abilities_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.save_abilities_panel(payload or {}))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.save_abilities_panel, payload or {}),
+        )
 
     async def _post_proactive_draft(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
         try:
-            return _json_response(HTTPStatus.OK, self.api.generate_proactive_draft(payload or {}))
+            return _json_response(
+                HTTPStatus.OK,
+                await self._call_api_in_thread(self.api.generate_proactive_draft, payload or {}),
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
 
@@ -653,20 +717,29 @@ class _AioHttpDispatcher:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.save_sidecar_panel(payload or {}))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.save_sidecar_panel, payload or {}),
+        )
 
     async def _post_qq_login_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.save_qq_login_panel(payload or {}))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.save_qq_login_panel, payload or {}),
+        )
 
     async def _post_qq_login_refresh(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         _, response = await _read_json_body(request, allow_empty=True)
         if response is not None:
             return response
         try:
-            return _json_response(HTTPStatus.OK, self.api.refresh_qq_login_panel())
+            return _json_response(
+                HTTPStatus.OK,
+                await self._call_api_in_thread(self.api.refresh_qq_login_panel),
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
 
@@ -674,14 +747,17 @@ class _AioHttpDispatcher:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        return _json_response(HTTPStatus.OK, self.api.save_other_panel(payload or {}))
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.save_other_panel, payload or {}),
+        )
 
     async def _post_directory_member_save(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
         try:
-            member = self.api.save_directory_member(payload or {})
+            member = await self._call_api_in_thread(self.api.save_directory_member, payload or {})
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, {"status": "ok", "member": member})
@@ -695,7 +771,7 @@ class _AioHttpDispatcher:
         if response is not None:
             return response
         try:
-            detail = self.api.reset_directory_member_persona(payload or {})
+            detail = await self._call_api_in_thread(self.api.reset_directory_member_persona, payload or {})
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         if detail is None:
@@ -707,7 +783,10 @@ class _AioHttpDispatcher:
         if response is not None:
             return response
         try:
-            body = self.api.sync_group_members(str((payload or {}).get("group_id", "") or ""))
+            body = await self._call_api_in_thread(
+                self.api.sync_group_members,
+                str((payload or {}).get("group_id", "") or ""),
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, body)
@@ -717,7 +796,7 @@ class _AioHttpDispatcher:
         if response is not None:
             return response
         try:
-            entry = self.api.save_knowledge_entry(payload or {})
+            entry = await self._call_api_in_thread(self.api.save_knowledge_entry, payload or {})
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, {"status": "ok", "entry": entry})
@@ -736,7 +815,11 @@ class _AioHttpDispatcher:
             except ValueError as exc:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         try:
-            detail = self.api.import_marketplace_skill(source_id=source_id, github_url=github_url)
+            detail = await self._call_api_in_thread(
+                self.api.import_marketplace_skill,
+                source_id=source_id,
+                github_url=github_url,
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, {"status": "ok", "skill": detail})
@@ -748,7 +831,8 @@ class _AioHttpDispatcher:
         skill_ids = (payload or {}).get("skill_ids", [])
         if not isinstance(skill_ids, list):
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "skill_ids must be a list"})
-        result = self.api.export_skill_pack(
+        result = await self._call_api_in_thread(
+            self.api.export_skill_pack,
             skill_ids=[str(item) for item in skill_ids if str(item).strip()],
             include_builtin=bool((payload or {}).get("include_builtin", False)),
             name=str((payload or {}).get("name", "") or ""),
@@ -766,7 +850,11 @@ class _AioHttpDispatcher:
         if pack_payload is None:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "bundle is required"})
         try:
-            result = self.api.import_skill_pack(pack_payload, overwrite=bool((payload or {}).get("overwrite", True)))
+            result = await self._call_api_in_thread(
+                self.api.import_skill_pack,
+                pack_payload,
+                overwrite=bool((payload or {}).get("overwrite", True)),
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, {"status": "ok", "pack": result})
@@ -780,7 +868,11 @@ class _AioHttpDispatcher:
         if not markdown.strip():
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "markdown is required"})
         try:
-            detail = self.api.install_skill(markdown, filename=str(filename) if filename else None)
+            detail = await self._call_api_in_thread(
+                self.api.install_skill,
+                markdown,
+                filename=str(filename) if filename else None,
+            )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, {"status": "ok", "skill": detail})
@@ -789,8 +881,8 @@ class _AioHttpDispatcher:
         cookies = _parse_cookie_header(request.headers.get("Cookie", ""))
         return cookies.get(_SESSION_COOKIE_NAME)
 
-    def _require_auth(self, request: web.Request) -> tuple[dict[str, Any] | None, web.Response | None]:
-        state = self.api.auth_state(self._session_token(request))
+    async def _require_auth(self, request: web.Request) -> tuple[dict[str, Any] | None, web.Response | None]:
+        state = await self._call_api_in_thread(self.api.auth_state, self._session_token(request))
         user = state.get("user")
         if isinstance(user, dict):
             return user, None

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Awaitable, Callable
 
 from ..models import InboundEvent, OutboundMessage, SessionMemory
 from .skill_registry import SkillSpec
@@ -20,6 +21,7 @@ class ToolInvocation:
 
 
 ToolHandler = Callable[[ToolInvocation], OutboundMessage | None]
+AsyncToolHandler = Callable[[ToolInvocation], Awaitable[OutboundMessage | None]]
 
 
 @dataclass(slots=True)
@@ -28,6 +30,7 @@ class ToolSpec:
     name: str
     description: str
     handler: ToolHandler
+    async_handler: AsyncToolHandler | None = None
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -48,6 +51,7 @@ class ToolRegistry:
         name: str,
         description: str,
         handler: ToolHandler,
+        async_handler: AsyncToolHandler | None = None,
     ) -> ToolSpec:
         normalized = str(tool_id or "").strip().lower()
         if not normalized:
@@ -57,6 +61,7 @@ class ToolRegistry:
             name=str(name or normalized).strip() or normalized,
             description=str(description or "").strip(),
             handler=handler,
+            async_handler=async_handler,
         )
         self._tools[normalized] = spec
         return spec
@@ -72,6 +77,14 @@ class ToolRegistry:
         if spec is None:
             return None
         return spec.handler(invocation)
+
+    async def aexecute(self, tool_id: str, invocation: ToolInvocation) -> OutboundMessage | None:
+        spec = self.get(tool_id)
+        if spec is None:
+            return None
+        if spec.async_handler is not None:
+            return await spec.async_handler(invocation)
+        return await asyncio.to_thread(spec.handler, invocation)
 
     def describe(self) -> dict[str, object]:
         items = [tool.as_dict() for tool in sorted(self._tools.values(), key=lambda item: item.name.lower())]

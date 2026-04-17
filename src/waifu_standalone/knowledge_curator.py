@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from .models import InboundEvent, SessionMemory
@@ -233,6 +234,9 @@ class KnowledgeCurator:
             character_id=svc._active_character_id(),
         )
 
+    async def _amember_record(self, event: InboundEvent) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._member_record, event)
+
     def _session_knowledge_entries(self, event: InboundEvent, query: str) -> list[dict[str, Any]]:
         svc = self.service
         scopes = set(self._knowledge_scopes(event))
@@ -269,6 +273,9 @@ class KnowledgeCurator:
             )
         )
         return [entry for _, entry in scored[: max(1, int(svc.config.memory_graph_limit))]]
+
+    async def _asession_knowledge_entries(self, event: InboundEvent, query: str) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._session_knowledge_entries, event, query)
 
     def _directory_member_notes(self, event: InboundEvent) -> list[str]:
         svc = self.service
@@ -315,6 +322,9 @@ class KnowledgeCurator:
             if onboarding_status and onboarding_status not in {"", "ready"}:
                 notes.append(f"{qq_name} is still in onboarding status: {onboarding_status}.")
         return notes
+
+    async def _adirectory_member_notes(self, event: InboundEvent) -> list[str]:
+        return await asyncio.to_thread(self._directory_member_notes, event)
 
     def _detail_knowledge_entries(self, session: SessionMemory) -> list[dict[str, Any]]:
         svc = self.service

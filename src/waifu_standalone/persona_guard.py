@@ -13,6 +13,7 @@ The class stays thin - it borrows ``cards``, ``config``, ``memory``,
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from .models import InboundEvent, SessionMemory
@@ -162,6 +163,14 @@ class PersonaGuard:
         self._service.memory.store.save(session)
         return session
 
+    async def asanitize_session_state(
+        self,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+    ) -> SessionMemory:
+        return await asyncio.to_thread(self.sanitize_session_state, session, assistant_name=assistant_name)
+
     def sanitize_member_state(
         self,
         *,
@@ -196,6 +205,20 @@ class PersonaGuard:
                 "last_sync_at": int(member.get("last_sync_at", 0) or 0),
                 "last_addressed_at": int(member.get("last_addressed_at", 0) or 0),
             }
+        )
+
+    async def asanitize_member_state(
+        self,
+        *,
+        group_id: str,
+        user_id: str,
+        character_id: str,
+    ) -> dict[str, object] | None:
+        return await asyncio.to_thread(
+            self.sanitize_member_state,
+            group_id=group_id,
+            user_id=user_id,
+            character_id=character_id,
         )
 
     def update_member_profile_summary(

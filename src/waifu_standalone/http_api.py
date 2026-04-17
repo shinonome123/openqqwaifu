@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 import io
 import json
@@ -180,6 +181,69 @@ class HttpApi:
             event = parse_onebot_event(payload)
             try:
                 message = self.service.handle_event(event)
+            except Exception as exc:
+                outcome = "delivery_failed"
+                if logging_is_configured():
+                    _LOGGER.exception(
+                        "failed to handle inbound event launcher_type=%s launcher_id=%s sender_id=%s",
+                        event.launcher_type,
+                        event.launcher_id,
+                        event.sender_id,
+                    )
+                return HTTPStatus.BAD_GATEWAY, {"status": "delivery_failed", "reason": str(exc)}
+
+            if message is None:
+                outcome = "ignored"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "empty event"}
+            outcome = "ok"
+            return HTTPStatus.OK, {
+                "status": "ok",
+                "reply": {
+                    "launcher_id": message.launcher_id,
+                    "launcher_type": message.launcher_type,
+                    "text": message.text,
+                    "images": message.images,
+                },
+            }
+        finally:
+            if self.metrics is not None:
+                self.metrics.record_onebot_event(
+                    post_type=event_type,
+                    outcome=outcome,
+                    duration_seconds=time.perf_counter() - started,
+                )
+
+    async def handle_json_async(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        started = time.perf_counter()
+        post_type = payload.get("post_type")
+        event_type = str(post_type or "message").strip() or "message"
+        outcome = "ignored"
+        try:
+            if post_type == "notice":
+                try:
+                    handle_notice_async = getattr(self.service, "handle_notice_payload_async", None)
+                    if callable(handle_notice_async):
+                        body = dict(await handle_notice_async(payload))
+                    else:
+                        body = dict(await asyncio.to_thread(self.service.handle_notice_payload, payload))
+                    outcome = str(body.get("status", "ok") or "ok")
+                    return HTTPStatus.ACCEPTED, body
+                except Exception as exc:
+                    outcome = "delivery_failed"
+                    if logging_is_configured():
+                        _LOGGER.exception("failed to handle OneBot notice payload")
+                    return HTTPStatus.BAD_GATEWAY, {"status": "delivery_failed", "reason": str(exc)}
+            if post_type and post_type != "message":
+                outcome = "ignored"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
+
+            event = parse_onebot_event(payload)
+            try:
+                handle_event_async = getattr(self.service, "handle_event_async", None)
+                if callable(handle_event_async):
+                    message = await handle_event_async(event)
+                else:
+                    message = await asyncio.to_thread(self.service.handle_event, event)
             except Exception as exc:
                 outcome = "delivery_failed"
                 if logging_is_configured():

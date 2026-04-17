@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import sys
@@ -80,6 +81,22 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["reply"]["launcher_id"], "612475113")
 
+    def test_message_payload_is_accepted_async(self) -> None:
+        payload = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 612475113,
+            "user_id": 783190298,
+            "sender": {"user_id": 783190298, "nickname": "tester"},
+            "message": [{"type": "text", "data": {"text": "hello"}}],
+        }
+
+        status, body = asyncio.run(self.api.handle_json_async(payload))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["reply"]["launcher_id"], "612475113")
+
     def test_string_message_payload_is_accepted(self) -> None:
         payload = {
             "message_type": "group",
@@ -116,10 +133,34 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["reason"], "bot_joined_group")
         self.assertEqual(len(calls), 1)
 
+    def test_notice_payload_prefers_async_service_handler(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        async def fake_handle_notice_async(service, payload):  # type: ignore[no-untyped-def]
+            calls.append(dict(payload))
+            return {"status": "ok", "reason": "async_notice"}
+
+        with patch.object(type(self.service), "handle_notice_payload_async", fake_handle_notice_async):
+            status, body = asyncio.run(
+                self.api.handle_json_async({"post_type": "notice", "notice_type": "group_card"})
+            )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(body["reason"], "async_notice")
+        self.assertEqual(len(calls), 1)
+
     def test_delivery_failures_are_mapped_to_502(self) -> None:
         api = HttpApi(_BrokenService())  # type: ignore[arg-type]
 
         status, body = api.handle_json({"message": "hello"})
+
+        self.assertEqual(status, 502)
+        self.assertEqual(body["status"], "delivery_failed")
+
+    def test_async_delivery_failures_fall_back_to_sync_service_handler(self) -> None:
+        api = HttpApi(_BrokenService())  # type: ignore[arg-type]
+
+        status, body = asyncio.run(api.handle_json_async({"message": "hello"}))
 
         self.assertEqual(status, 502)
         self.assertEqual(body["status"], "delivery_failed")

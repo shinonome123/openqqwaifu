@@ -76,6 +76,58 @@ class OutboundEmitter:
         self._service.gate.refresh_follow_up_window(event)
         return message
 
+    async def aemit(
+        self,
+        event: InboundEvent,
+        message: OutboundMessage,
+        *,
+        assistant_name: str,
+        emotion: EmotionState | None = None,
+        search_used: bool = False,
+        behavior_reason: str = "",
+        character_id: str = "",
+    ) -> OutboundMessage:
+        resolved_character_id = str(character_id or self._service._active_character_id()).strip()
+        delay = self.delay_seconds(event)
+        await self.adispatch(message, delay_seconds=delay)
+        self._service._record_outbound(message)
+        await self._service.memory.asave_assistant_message(
+            event.launcher_id,
+            event.launcher_type,
+            message.text,
+            character_id=resolved_character_id,
+        )
+        await asyncio.to_thread(
+            self._service.state_store.mark_member_addressed,
+            group_id=event.launcher_id if event.launcher_type == "group" else "",
+            user_id=event.sender_id,
+            character_id=resolved_character_id,
+        )
+        await self._service._archive_if_needed_async(
+            event.launcher_id,
+            event.launcher_type,
+            assistant_name=assistant_name,
+            character_id=resolved_character_id,
+        )
+        self._service._record_behavior_event(
+            self._service.event_engine.capture_outbound(
+                event=event,
+                message=message,
+                reason=behavior_reason or "reply",
+                character_id=resolved_character_id,
+            )
+        )
+        await asyncio.to_thread(
+            self._service.value_game.apply,
+            state_store=self._service.state_store,
+            event=event,
+            emotion=emotion or EmotionState(),
+            reply_text=message.text,
+            search_used=search_used,
+        )
+        self._service.gate.refresh_follow_up_window(event)
+        return message
+
     def delay_seconds(self, event: InboundEvent) -> float:
         if event.launcher_type != "group":
             return 0.0
@@ -100,6 +152,24 @@ class OutboundEmitter:
             self._service.outbound.send(message)
 
         self._service._submit_background_task("delayed_outbound_send", delayed_send)
+
+    async def adispatch(self, message: OutboundMessage, *, delay_seconds: float) -> None:
+        if delay_seconds <= 0:
+            send_async = getattr(self._service.outbound, "send_async", None)
+            if callable(send_async):
+                await send_async(message)
+                return
+            await asyncio.to_thread(self._service.outbound.send, message)
+            return
+        send_async = getattr(self._service.outbound, "send_async", None)
+        if callable(send_async):
+            task = asyncio.create_task(self.adelayed_send(message, delay_seconds=delay_seconds))
+        else:
+            async def delayed_send_sync() -> None:
+                await asyncio.sleep(delay_seconds)
+                await asyncio.to_thread(self._service.outbound.send, message)
+            task = asyncio.create_task(delayed_send_sync())
+        self._service._track_async_task("delayed_outbound_send", task)
 
     async def adelayed_send(self, message: OutboundMessage, *, delay_seconds: float) -> None:
         if delay_seconds > 0:

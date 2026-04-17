@@ -7,6 +7,7 @@ hand-off when they reply.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,9 @@ class MemberOnboarding:
             user_id=event.sender_id,
             qq_nickname=event.sender_name,
         )
+
+    async def aremember_directory_member(self, event: InboundEvent) -> None:
+        await asyncio.to_thread(self.remember_directory_member, event)
 
     def maybe_handle(
         self,
@@ -152,6 +156,144 @@ class MemberOnboarding:
                 text=reply_text,
             )
             return self._service.emitter.emit(event, message, assistant_name=assistant_name)
+        return None
+
+    async def amaybe_handle(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+    ) -> OutboundMessage | None:
+        allow_fallback = not self._service._requires_live_llm()
+        if event.launcher_type == "person":
+            member = await asyncio.to_thread(
+                self._service.state_store.get_member,
+                group_id="",
+                user_id=event.sender_id,
+            ) or {}
+            preferred_name = str(member.get("preferred_name", "") or "").strip()
+            if preferred_name:
+                return None
+            candidate = self._service.memory.extract_preferred_name(latest_message)
+            if not candidate:
+                return None
+            reply_text = await self._service.generator.agenerate_onboarding_reply(
+                event,
+                session,
+                assistant_name=assistant_name,
+                stage="confirm_name",
+                candidate_name=candidate,
+                address_override=candidate,
+                allow_fallback=allow_fallback,
+            )
+            if not reply_text:
+                return None
+            await asyncio.to_thread(
+                self._service.state_store.save_member,
+                {
+                    "group_id": "",
+                    "user_id": event.sender_id,
+                    "qq_nickname": event.sender_name,
+                    "preferred_name": candidate,
+                    "onboarding_status": "ready",
+                },
+            )
+            message = OutboundMessage(
+                launcher_id=event.launcher_id,
+                launcher_type=event.launcher_type,
+                text=reply_text,
+            )
+            return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
+        if event.launcher_type != "group":
+            return None
+        member = await asyncio.to_thread(
+            self._service.state_store.get_member,
+            group_id=event.launcher_id,
+            user_id=event.sender_id,
+        )
+        if member is None:
+            return None
+
+        preferred_name = str(member.get("preferred_name", "") or "").strip()
+        if preferred_name:
+            return None
+
+        onboarding_status = str(member.get("onboarding_status", "") or "").strip() or "new"
+        if onboarding_status == "pending_name":
+            candidate = self.extract_preferred_name(latest_message)
+            if candidate:
+                reply_text = await self._service.generator.agenerate_onboarding_reply(
+                    event,
+                    session,
+                    assistant_name=assistant_name,
+                    stage="confirm_name",
+                    candidate_name=candidate,
+                    address_override=candidate,
+                    allow_fallback=allow_fallback,
+                )
+                if not reply_text:
+                    return None
+                await asyncio.to_thread(
+                    self._service.state_store.save_member,
+                    {
+                        "group_id": event.launcher_id,
+                        "user_id": event.sender_id,
+                        "qq_nickname": event.sender_name,
+                        "preferred_name": candidate,
+                        "onboarding_status": "ready",
+                    },
+                )
+                message = OutboundMessage(
+                    launcher_id=event.launcher_id,
+                    launcher_type=event.launcher_type,
+                    text=reply_text,
+                )
+                return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
+            if self.should_retry_prompt(event):
+                reply_text = await self._service.generator.agenerate_onboarding_reply(
+                    event,
+                    session,
+                    assistant_name=assistant_name,
+                    stage="retry_name",
+                    allow_fallback=allow_fallback,
+                )
+                if reply_text:
+                    message = OutboundMessage(
+                        launcher_id=event.launcher_id,
+                        launcher_type=event.launcher_type,
+                        text=reply_text,
+                    )
+                    return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
+
+        bot_account_id = str(self._service.config.bot_account_id or "").strip()
+        if bot_account_id and event.has_bot_mention(bot_account_id):
+            await asyncio.to_thread(
+                self._service.state_store.save_member,
+                {
+                    "group_id": event.launcher_id,
+                    "user_id": event.sender_id,
+                    "qq_nickname": event.sender_name,
+                    "group_card": str(member.get("group_card", "") or ""),
+                    "onboarding_status": "pending_name",
+                },
+            )
+            reply_text = await self._service.generator.agenerate_onboarding_reply(
+                event,
+                session,
+                assistant_name=assistant_name,
+                stage="ask_name",
+                allow_fallback=allow_fallback,
+            )
+            if not reply_text:
+                return None
+            message = OutboundMessage(
+                launcher_id=event.launcher_id,
+                launcher_type=event.launcher_type,
+                text=reply_text,
+            )
+            return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
         return None
 
     def extract_preferred_name(self, text: str) -> str:
