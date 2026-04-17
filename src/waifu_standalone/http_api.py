@@ -157,6 +157,11 @@ class HttpApi:
             else:
                 service_name = getattr(getattr(self.service, "config", None), "service_name", "openqqwaifu")
                 self.metrics = MetricsRegistry(service_name=str(service_name or "openqqwaifu"))
+        gateway = getattr(self.service, "reverse_ws_gateway", None)
+        if gateway is not None:
+            set_handler = getattr(gateway, "set_event_handler", None)
+            if callable(set_handler):
+                set_handler(self._handle_reverse_ws_payload)
 
     def handle_json(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         started = time.perf_counter()
@@ -275,6 +280,15 @@ class HttpApi:
                     outcome=outcome,
                     duration_seconds=time.perf_counter() - started,
                 )
+
+    async def _handle_reverse_ws_payload(self, payload: dict[str, Any]) -> None:
+        status, body = await self.handle_json_async(payload)
+        if status >= HTTPStatus.BAD_REQUEST and logging_is_configured():
+            _LOGGER.warning(
+                "reverse-WS payload failed status=%s reason=%s",
+                status,
+                str(body.get("reason", "")),
+            )
 
     def prometheus_metrics(self) -> str:
         if self.metrics is None:

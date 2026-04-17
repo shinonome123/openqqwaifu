@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
 from ..models import OutboundMessage
@@ -9,6 +10,31 @@ from ..observability import TransportMetricsScope
 
 class OneBotActionError(RuntimeError):
     pass
+
+
+def ensure_onebot_action_result(result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("status") not in {None, "ok"} or result.get("retcode") not in {None, 0}:
+        raise OneBotActionError("onebot action failed")
+    return result
+
+
+def build_onebot_action(message: OutboundMessage) -> tuple[str, dict[str, object]]:
+    action = "send_group_msg" if message.launcher_type == "group" else "send_private_msg"
+    target_key = "group_id" if message.launcher_type == "group" else "user_id"
+    payload: dict[str, object] = {
+        target_key: _coerce_target_id(message.launcher_id),
+        "message": build_onebot_message_segments(message),
+    }
+    return action, payload
+
+
+def build_onebot_message_segments(message: OutboundMessage) -> list[dict[str, object]]:
+    segments: list[dict[str, object]] = []
+    if message.text:
+        segments.append({"type": "text", "data": {"text": message.text}})
+    for image in message.images:
+        segments.append({"type": "image", "data": {"file": image}})
+    return segments
 
 
 @dataclass(slots=True)
@@ -37,9 +63,7 @@ class OneBotActionClient:
         except TransportError as exc:
             raise OneBotActionError(str(exc)) from exc
         result = json.loads(raw) if raw else {"status": "ok"}
-        if result.get("status") not in {None, "ok"} or result.get("retcode") not in {None, 0}:
-            raise OneBotActionError("onebot action failed")
-        return result
+        return ensure_onebot_action_result(result)
 
     async def apost_action(self, action: str, payload: dict[str, object]) -> dict[str, object]:
         base = self.base_url.rstrip("/")
@@ -56,9 +80,7 @@ class OneBotActionClient:
         except TransportError as exc:
             raise OneBotActionError(str(exc)) from exc
         result = json.loads(raw) if raw else {"status": "ok"}
-        if result.get("status") not in {None, "ok"} or result.get("retcode") not in {None, 0}:
-            raise OneBotActionError("onebot action failed")
-        return result
+        return ensure_onebot_action_result(result)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json; charset=utf-8"}
@@ -117,29 +139,12 @@ class OneBotHttpOutboundPort:
         self.client = client
 
     def send(self, message: OutboundMessage) -> None:
-        action, payload = self._build_action(message)
+        action, payload = build_onebot_action(message)
         self.client.post_action(action, payload)
 
     async def send_async(self, message: OutboundMessage) -> None:
-        action, payload = self._build_action(message)
+        action, payload = build_onebot_action(message)
         await self.client.apost_action(action, payload)
-
-    def _build_action(self, message: OutboundMessage) -> tuple[str, dict[str, object]]:
-        action = "send_group_msg" if message.launcher_type == "group" else "send_private_msg"
-        target_key = "group_id" if message.launcher_type == "group" else "user_id"
-        payload: dict[str, object] = {
-            target_key: self._coerce_target_id(message.launcher_id),
-            "message": self._build_message_segments(message),
-        }
-        return action, payload
-
-    def _build_message_segments(self, message: OutboundMessage) -> list[dict[str, object]]:
-        segments: list[dict[str, object]] = []
-        if message.text:
-            segments.append({"type": "text", "data": {"text": message.text}})
-        for image in message.images:
-            segments.append({"type": "image", "data": {"file": image}})
-        return segments
 
     def _coerce_target_id(self, launcher_id: str) -> int | str:
         return _coerce_target_id(launcher_id)

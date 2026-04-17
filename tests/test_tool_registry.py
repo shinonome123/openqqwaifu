@@ -52,6 +52,44 @@ def _build_invocation() -> ToolInvocation:
 
 
 class ToolRegistryTests(unittest.TestCase):
+    def test_duplicate_registration_warns_and_keeps_first_tool(self) -> None:
+        registry = ToolRegistry()
+
+        def first_handler(invocation: ToolInvocation) -> OutboundMessage | None:
+            return OutboundMessage(
+                launcher_id=invocation.event.launcher_id,
+                launcher_type=invocation.event.launcher_type,
+                text="first",
+            )
+
+        def second_handler(invocation: ToolInvocation) -> OutboundMessage | None:
+            return OutboundMessage(
+                launcher_id=invocation.event.launcher_id,
+                launcher_type=invocation.event.launcher_type,
+                text="second",
+            )
+
+        registry.register(
+            "demo-tool",
+            name="Demo",
+            description="",
+            handler=first_handler,
+        )
+        with self.assertLogs("waifu_standalone.cells.tool_registry", level="WARNING") as captured:
+            registry.register(
+                "demo-tool",
+                name="Demo Again",
+                description="duplicate",
+                handler=second_handler,
+            )
+
+        result = registry.execute("demo-tool", _build_invocation())
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.text, "first")
+        self.assertIn("already registered", captured.output[0])
+
     def test_aexecute_prefers_async_handler(self) -> None:
         registry = ToolRegistry()
         calls: list[str] = []

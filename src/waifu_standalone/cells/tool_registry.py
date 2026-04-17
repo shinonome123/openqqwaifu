@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from ..models import InboundEvent, OutboundMessage, SessionMemory
 from .skill_registry import SkillSpec
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -56,6 +59,10 @@ class ToolRegistry:
         normalized = str(tool_id or "").strip().lower()
         if not normalized:
             raise ValueError("tool_id is required")
+        existing = self._tools.get(normalized)
+        if existing is not None:
+            _LOGGER.warning("tool %s is already registered; skipping duplicate registration", normalized)
+            return existing
         spec = ToolSpec(
             tool_id=normalized,
             name=str(name or normalized).strip() or normalized,
