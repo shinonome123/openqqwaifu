@@ -833,11 +833,12 @@ class WaifuServiceTests(unittest.TestCase):
 
     def test_group_response_delay_does_not_block_request_thread_for_real_outbound(self) -> None:
         outbound = _DelayedCaptureOutbound()
+        delay_seconds = 0.5
         service, _ = build_default_service(
             AppConfig(
                 bot_account_id="3518944354",
                 group_reply_requires_mention=False,
-                group_response_delay_seconds=0.2,
+                group_response_delay_seconds=delay_seconds,
             )
         )
         service.outbound = outbound
@@ -855,7 +856,7 @@ class WaifuServiceTests(unittest.TestCase):
         elapsed = time.monotonic() - started
 
         self.assertIsNotNone(result)
-        self.assertLess(elapsed, 0.15)
+        self.assertLess(elapsed, delay_seconds * 0.5)
         self.assertEqual(len(outbound.sent), 0)
 
         service.flush_background_tasks(timeout=2.0)
