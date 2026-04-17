@@ -42,9 +42,9 @@ class KnowledgeCurator:
             return
         member = self._member_record(event) or {}
         if str(member.get("onboarding_status", "") or "").strip() == "pending_name":
-            if svc._extract_directory_preferred_name(cleaned_message):
+            if svc.onboarding.extract_preferred_name(cleaned_message):
                 return
-        if svc._extract_image_prompt(cleaned_message):
+        if svc.dispatcher.extract_image_prompt(cleaned_message):
             return
         extracted = svc.generator.extract_knowledge(
             event,
@@ -66,7 +66,7 @@ class KnowledgeCurator:
             if saved:
                 saved_entries.append(saved)
         if saved_entries or profile_summary:
-            svc._update_member_profile_summary(
+            svc.persona.update_member_profile_summary(
                 event,
                 extra_summary=profile_summary,
             )
@@ -91,9 +91,9 @@ class KnowledgeCurator:
             return
         member = self._member_record(event) or {}
         if str(member.get("onboarding_status", "") or "").strip() == "pending_name":
-            if svc._extract_directory_preferred_name(cleaned_message):
+            if svc.onboarding.extract_preferred_name(cleaned_message):
                 return
-        if svc._extract_image_prompt(cleaned_message):
+        if svc.dispatcher.extract_image_prompt(cleaned_message):
             return
         extracted = await svc.generator.aextract_knowledge(
             event,
@@ -115,7 +115,7 @@ class KnowledgeCurator:
             if saved:
                 saved_entries.append(saved)
         if saved_entries or profile_summary:
-            svc._update_member_profile_summary(
+            svc.persona.update_member_profile_summary(
                 event,
                 extra_summary=profile_summary,
             )
@@ -275,7 +275,7 @@ class KnowledgeCurator:
         notes: list[str] = []
         current_group = event.launcher_id if event.launcher_type == "group" else ""
         current_character = svc._active_character_id()
-        svc._sanitize_member_persona_state(
+        svc.persona.sanitize_member_state(
             group_id=current_group,
             user_id=event.sender_id,
             character_id=current_character,
@@ -309,7 +309,7 @@ class KnowledgeCurator:
                 notes.append(f"Bond stage with {qq_name}: {bond_stage} ({affinity_score:.2f}).")
             elif preferred_name:
                 notes.append(f"{qq_name} is usually addressed as {preferred_name}.")
-            profile_summary = svc._sanitize_profile_summary_text(profile_summary)
+            profile_summary = svc.persona.sanitize_profile_summary(profile_summary)
             if profile_summary:
                 notes.append(f"Profile summary for {qq_name}: {profile_summary}")
             if onboarding_status and onboarding_status not in {"", "ready"}:
