@@ -151,6 +151,10 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
         config.data_root = str(root)
 
     qq_sidecar = config.qq_sidecar
+    qq_sidecar.gateway_mode = _env_str(
+        "OPENQQWAIFU_QQ_SIDECAR_GATEWAY_MODE",
+        qq_sidecar.gateway_mode,
+    )
     qq_sidecar.outbound_base_url = _env_str(
         "OPENQQWAIFU_QQ_SIDECAR_OUTBOUND_BASE_URL",
         qq_sidecar.outbound_base_url,
@@ -178,6 +182,14 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     qq_sidecar.reverse_ws_url = _env_str(
         "OPENQQWAIFU_QQ_SIDECAR_REVERSE_WS_URL",
         qq_sidecar.reverse_ws_url,
+    )
+    qq_sidecar.reverse_ws_access_token = _env_str(
+        "OPENQQWAIFU_QQ_SIDECAR_REVERSE_WS_ACCESS_TOKEN",
+        qq_sidecar.reverse_ws_access_token,
+    )
+    qq_sidecar.reverse_ws_send_timeout_seconds = _env_float(
+        "OPENQQWAIFU_QQ_SIDECAR_REVERSE_WS_SEND_TIMEOUT_SECONDS",
+        qq_sidecar.reverse_ws_send_timeout_seconds,
     )
     qq_sidecar.dry_run = _env_bool(
         "OPENQQWAIFU_QQ_SIDECAR_DRY_RUN",

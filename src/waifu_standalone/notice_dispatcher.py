@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .gateways.onebot_actions import OneBotActionClient
+from .gateways.onebot_ws import OneBotWsActionClient
 
 if TYPE_CHECKING:
     from .app import WaifuService
@@ -138,8 +139,13 @@ class NoticeDispatcher:
             "members": synced[:20],
         }
 
-    def _sidecar_action_client(self) -> OneBotActionClient:
+    def _sidecar_action_client(self) -> OneBotActionClient | OneBotWsActionClient:
         svc = self.service
+        if (
+            str(svc.config.qq_sidecar.gateway_mode or "http").strip().lower() == "reverse_ws"
+            and svc.reverse_ws_gateway is not None
+        ):
+            return OneBotWsActionClient(svc.reverse_ws_gateway)
         if not svc.config.qq_sidecar.outbound_base_url:
             raise ValueError("sidecar is not available")
         return OneBotActionClient(

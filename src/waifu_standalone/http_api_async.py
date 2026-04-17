@@ -913,6 +913,7 @@ class _AioHttpDispatcher:
 
 def _build_application(api: HttpApi) -> web.Application:
     dispatcher = _AioHttpDispatcher(api)
+    reverse_ws_gateway = getattr(api.service, "reverse_ws_gateway", None)
 
     @web.middleware
     async def _observability_middleware(request: web.Request, handler: web.Handler) -> web.StreamResponse:
@@ -956,6 +957,8 @@ def _build_application(api: HttpApi) -> web.Application:
         return response
 
     app = web.Application(client_max_size=_MAX_REQUEST_BYTES, middlewares=[_observability_middleware])
+    if reverse_ws_gateway is not None:
+        app.router.add_get("/onebot/v11/ws", reverse_ws_gateway.handle)
     app.router.add_route("GET", "/", dispatcher.handle_get)
     app.router.add_route("GET", "/{tail:.*}", dispatcher.handle_get)
     app.router.add_route("POST", "/{tail:.*}", dispatcher.handle_post)

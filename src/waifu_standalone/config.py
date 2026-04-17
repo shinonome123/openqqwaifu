@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 @dataclass(slots=True)
 class QQSidecarConfig:
     mode: str = "onebot-http"
+    gateway_mode: str = "http"
     adapter_name: str = "napcat"
     inbound_host: str = "127.0.0.1"
     inbound_port: int = 8080
@@ -17,6 +18,8 @@ class QQSidecarConfig:
     webui_timeout_seconds: float = 10.0
     webui_token: str = ""
     reverse_ws_url: str = "ws://127.0.0.1:3001/onebot/v11/ws"
+    reverse_ws_access_token: str = ""
+    reverse_ws_send_timeout_seconds: float = 15.0
     dry_run: bool = False
 
 

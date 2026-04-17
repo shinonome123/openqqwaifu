@@ -28,6 +28,9 @@ python run_cli.py dump-config data/config.json
 # Start the server (local)
 python run_cli.py serve --config data/config.json
 
+# Start the server in OneBot reverse-WS mode (NapCat connects back to /onebot/v11/ws)
+OPENQQWAIFU_QQ_SIDECAR_GATEWAY_MODE=reverse_ws python run_cli.py serve --config examples/config.napcat.local.json
+
 # Check NapCat sidecar connectivity
 python run_cli.py check-sidecar --config data/config.json
 
@@ -61,6 +64,7 @@ docker compose -f compose.napcat.yml up -d
 | `contracts.py` | Shared interface/contract types |
 | `migration.py` | Legacy waifu data import via `WaifuDataImporter` |
 | `schema_migrations.py` | Schema-version driven sqlite migrations for `state_store.py` runtime storage |
+| `gateways/onebot_ws.py` | OneBot v11 reverse-WebSocket gateway -- inbound events and outbound actions share a single NapCat-initiated WS connection. Enabled via `qq_sidecar.gateway_mode = "reverse_ws"` |
 | `console_panels.py` | Web console panel rendering (dashboard, session list, session detail) — delegated from `WaifuService.console` |
 | `knowledge_curator.py` | Auto-extracted knowledge writeback, scope resolution, directory notes — delegated from `WaifuService.knowledge` |
 | `notice_dispatcher.py` | OneBot notice payload routing (group increase/decrease/card) — delegated from `WaifuService.notice` |
@@ -76,7 +80,7 @@ docker compose -f compose.napcat.yml up -d
 - **`cells/`** - Provider integrations and registries: `dify_service.py` (LLM backend), `xai_image_service.py` (image generation), `embedding_service.py`, `skill_registry.py`, `skill_pack.py`, `tool_registry.py`, `marketplace.py`, `auth.py`, `config.py` (ConfigManager with env-var overlay)
 - **`organs/`** - Higher-level cognition: `memories.py` (memory recall/summary), `thoughts.py` (thinking mode), `memory_graph.py` (graph-based memory), `proactive.py` (proactive messaging)
 - **`systems/`** - Functional subsystems: `emotions.py`, `searching.py`, `events.py` (event buffering), `narrator.py` (narrator mode), `value_game.py` (affinity scoring)
-- **`gateways/`** - External protocol adapters: `onebot_http.py`, `onebot_actions.py` (OneBot action client), `napcat_login.py` (NapCat WebUI bridge for QQ login)
+- **`gateways/`** - External protocol adapters: `onebot_http.py`, `onebot_actions.py` (OneBot action client), `onebot_ws.py` (reverse-WS inbound/event + outbound/action bridge), `napcat_login.py` (NapCat WebUI bridge for QQ login)
 - **`web/`** - Static frontend: `dashboard.html` + JS/CSS assets with pages for overview, AI config, character editing, events, members, memory, sidecar status, skills, QQ login, abilities, advanced settings
 - **`templates/`** - YAML character templates (`default_group.yaml`, `default_person.yaml`)
 - **`builtin_skills/`** - Markdown skill definitions (concise-answer, image-command, search-command, etc.)

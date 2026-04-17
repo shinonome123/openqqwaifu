@@ -33,6 +33,7 @@ from .gateways.napcat_login import (
     qrcode_payload_to_image_source,
 )
 from .gateways.onebot_actions import OneBotActionClient, OneBotHttpOutboundPort
+from .gateways.onebot_ws import OneBotWsGateway, OneBotWsOutboundPort
 from .http_transport import AsyncRuntime
 from .memory import FileMemoryStore, InMemoryStore
 from .models import EmotionState, InboundEvent, MessageSegment, OutboundMessage, SessionMemory
@@ -124,6 +125,7 @@ class WaifuService:
     tools: ToolRegistry
     state_store: Any
     outbound: OutboundPort
+    reverse_ws_gateway: OneBotWsGateway | None = None
     napcat_login: NapCatLoginBridge | None = None
     _recent_outbound: list[OutboundMessage] = field(default_factory=list)
     _recent_events: list[dict[str, Any]] = field(default_factory=list)
@@ -1124,7 +1126,10 @@ class WaifuService:
         if hasattr(self.state_store, "refresh_knowledge_embeddings"):
             self.state_store.refresh_knowledge_embeddings()
         if rebuild_outbound:
-            self.outbound = _build_runtime_outbound(self.config)
+            self.outbound, self.reverse_ws_gateway = _build_runtime_outbound(
+                self.config,
+                existing_gateway=self.reverse_ws_gateway,
+            )
 
     @staticmethod
     def _coerce_list(value: object) -> list[str]:
@@ -1425,7 +1430,7 @@ def build_runtime_service(
     metrics = MetricsRegistry(service_name=str(app_config.service_name or "openqqwaifu"))
     set_active_metrics_registry(metrics)
     session_root = Path(store_root) if store_root else Path(app_config.data_root) / "sessions"
-    outbound = _build_runtime_outbound(app_config)
+    outbound, reverse_ws_gateway = _build_runtime_outbound(app_config)
     state_root = Path(app_config.data_root) / "state" / "characters"
     initial_character = _initial_character_id(app_config)
     memory_builder = lambda character_id: FileMemoryStore(
@@ -1442,20 +1447,36 @@ def build_runtime_service(
         memory_builder(initial_character),
         state_builder(initial_character),
         outbound,
+        reverse_ws_gateway=reverse_ws_gateway,
         memory_store_builder=memory_builder,
         state_store_builder=state_builder,
     )
 
 
-def _build_runtime_outbound(app_config: AppConfig) -> OutboundPort:
+def _build_runtime_outbound(
+    app_config: AppConfig,
+    *,
+    existing_gateway: OneBotWsGateway | None = None,
+) -> tuple[OutboundPort, OneBotWsGateway | None]:
+    gateway_mode = str(app_config.qq_sidecar.gateway_mode or "http").strip().lower()
+    if gateway_mode == "reverse_ws":
+        gateway = existing_gateway or OneBotWsGateway(
+            access_token=app_config.qq_sidecar.reverse_ws_access_token or app_config.qq_sidecar.access_token,
+            send_timeout_seconds=app_config.qq_sidecar.reverse_ws_send_timeout_seconds,
+        )
+        gateway.configure(
+            access_token=app_config.qq_sidecar.reverse_ws_access_token or app_config.qq_sidecar.access_token,
+            send_timeout_seconds=app_config.qq_sidecar.reverse_ws_send_timeout_seconds,
+        )
+        return OneBotWsOutboundPort(gateway), gateway
     if not app_config.qq_sidecar.outbound_base_url:
-        return CapturingOutboundPort()
+        return CapturingOutboundPort(), None
     client = OneBotActionClient(
         base_url=app_config.qq_sidecar.outbound_base_url,
         timeout=app_config.qq_sidecar.outbound_timeout_seconds,
         access_token=app_config.qq_sidecar.access_token,
     )
-    return OneBotHttpOutboundPort(client)
+    return OneBotHttpOutboundPort(client), None
 
 
 def _build_embedding_client(app_config: AppConfig) -> EmbeddingClient:
@@ -1482,6 +1503,7 @@ def _build_service(
     state_store: Any,
     outbound: OutboundPort,
     *,
+    reverse_ws_gateway: OneBotWsGateway | None = None,
     memory_store_builder: Callable[[str], Any] | None = None,
     state_store_builder: Callable[[str], Any] | None = None,
 ) -> tuple[WaifuService, OutboundPort]:
@@ -1513,6 +1535,7 @@ def _build_service(
         tools=tools,
         state_store=state_store,
         outbound=outbound,
+        reverse_ws_gateway=reverse_ws_gateway,
         napcat_login=_build_napcat_login_bridge(app_config),
         _memory_store_builder=memory_store_builder,
         _state_store_builder=state_store_builder,
