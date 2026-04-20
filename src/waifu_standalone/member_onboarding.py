@@ -1,8 +1,12 @@
-"""Member onboarding: ask for name, confirm it, save to directory.
+"""Member onboarding and naming flows.
 
-Extracted from :mod:`waifu_standalone.app`. Handles the flow where a new
-group member (or DM) is asked for a preferred name, and the confirmation
-hand-off when they reply.
+This module handles:
+
+- Explicit self-naming: ``叫我 xx`` / ``call me xx``
+- Explicit assistant naming: ``以后就叫你 xx``
+- Rejection of third-party naming attempts
+- Clarification replies for naming-related questions
+- A single soft follow-up after the first normal reply
 """
 
 from __future__ import annotations
@@ -22,9 +26,24 @@ class MemberOnboarding:
     _BARE_ALIAS_CJK_RE = re.compile("^[\u4e00-\u9fff]{1,4}$")
     _ADDRESS_COMMAND_PATTERNS = (
         re.compile(
-            "^(?:/|!|\uFF01)?(?:\u53EB\u6211|\u558A\u6211|\u5C31\u53EB\u6211|\u8BF7\u53EB\u6211|\u4F60\u5C31\u53EB\u6211|\u79F0\u547C\u6211|\u79F0\u547C)\s*[:\uFF1A]?\s*(\S{1,12})$"
+            "^(?:/|!|\uFF01)?(?:\u53EB\u6211|\u558A\u6211|\u5C31\u53EB\u6211|\u8BF7\u53EB\u6211|\u4F60\u5C31\u53EB\u6211|\u79F0\u547C\u6211|\u79F0\u547C)\\s*[:\uFF1A]?\\s*(\\S{1,12})$"
         ),
-        re.compile("^(?:/|!|\uFF01)?call\s+me\s+([A-Za-z0-9_]{1,12})$", flags=re.IGNORECASE),
+        re.compile("^(?:/|!|\uFF01)?call\\s+me\\s+([A-Za-z0-9_]{1,12})$", flags=re.IGNORECASE),
+    )
+    _ASSISTANT_ALIAS_COMMAND_PATTERNS = (
+        re.compile(
+            "^(?:/|!|\uFF01)?(?:\u4EE5\u540E\u5C31\u53EB\u4F60|\u6211\u4EE5\u540E\u53EB\u4F60|\u90A3\u6211\u5C31\u53EB\u4F60|\u90A3\u5C31\u53EB\u4F60|\u4EE5\u540E\u53EB\u4F60|\u5C31\u53EB\u4F60)\\s*[:\uFF1A]?\\s*(\\S{1,12})$"
+        ),
+        re.compile(
+            "^(?:/|!|\uFF01)?(?:i(?:'|’)ll\\s+call\\s+you|i\\s+will\\s+call\\s+you|call\\s+you)\\s+([A-Za-z0-9_]{1,12})$",
+            flags=re.IGNORECASE,
+        ),
+    )
+    _THIRD_PARTY_NAMING_PATTERNS = (
+        re.compile("^(?:/|!|\uFF01)?(?:\u53EB|\u558A|\u79F0\u547C)(?:\u4ED6|\u5979|ta|TA|\u5B83)\\S{0,12}$"),
+        re.compile(
+            "^(?:/|!|\uFF01)?(?:\u4EE5\u540E)?(?:\u4F60|\u90A3\u4F60)(?:\u4EE5\u540E)?(?:\u5C31)?(?:\u53EB|\u558A|\u79F0\u547C)(?:\u4ED6|\u5979|ta|TA|\u5B83)\\S{0,12}$"
+        ),
     )
     _BARE_ALIAS_BLOCKED_EXACT = {
         "hello",
@@ -66,17 +85,9 @@ class MemberOnboarding:
     _BARE_ALIAS_FORBIDDEN_CHARS = set(
         "\u6211\u4F60\u4ED6\u5979\u5B83\u4EEC\u8FD9\u90A3\u54EA\u53EB\u662F\u7684\u4E86\u5417\u5462\u5427\u554A"
     )
-    _NAME_RETRY_HINTS = (
-        "\u53EB\u6211",
-        "\u600E\u4E48\u53EB",
-        "\u600E\u4E48\u79F0\u547C",
-        "\u79F0\u547C",
-        "\u6211\u53EB",
-        "\u6211\u662F",
-        "call me",
-        "my name",
-    )
     _NAME_HINT_MIN_CONFIDENCE = 0.85
+    _PASSIVE_CAPTURE_STATUSES = {"asked_once", "pending_name"}
+    _TRAILING_PARTICLES = set("\u4E86\u5462\u5440\u554A\u54E6\u5427\u561B\u5566")
 
     def __init__(self, service: "WaifuService") -> None:
         self._service = service
@@ -99,116 +110,14 @@ class MemberOnboarding:
         latest_message: str,
         assistant_name: str,
     ) -> OutboundMessage | None:
-        allow_fallback = not self._service._requires_live_llm()
-        command_candidate = self.extract_command_preferred_name(latest_message)
-        if event.launcher_type == "person":
-            member = self._service.state_store.get_member(group_id="", user_id=event.sender_id) or {}
-            if command_candidate:
-                return self._confirm_preferred_name(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    candidate=command_candidate,
-                    member=member,
-                    allow_fallback=allow_fallback,
-                )
-            preferred_name = str(member.get("preferred_name", "") or "").strip()
-            if preferred_name:
-                return None
-            candidate = self.extract_explicit_preferred_name(latest_message)
-            if not candidate:
-                return None
-            return self._confirm_preferred_name(
-                event,
-                session,
-                assistant_name=assistant_name,
-                candidate=candidate,
-                member=member,
-                allow_fallback=allow_fallback,
-            )
-
-        if event.launcher_type != "group":
-            return None
-        member = self._service.state_store.get_member(group_id=event.launcher_id, user_id=event.sender_id)
-        if member is None:
-            return None
-        if command_candidate:
-            return self._confirm_preferred_name(
-                event,
-                session,
-                assistant_name=assistant_name,
-                candidate=command_candidate,
-                member=member,
-                allow_fallback=allow_fallback,
-            )
-
-        preferred_name = str(member.get("preferred_name", "") or "").strip()
-        if preferred_name:
-            return None
-
-        onboarding_status = str(member.get("onboarding_status", "") or "").strip() or "new"
-        if onboarding_status == "pending_name":
-            candidate = self.extract_preferred_name(latest_message)
-            if not candidate:
-                candidate = self._infer_preferred_name_candidate(
-                    event,
-                    session,
-                    latest_message=latest_message,
-                    assistant_name=assistant_name,
-                )
-            if candidate:
-                return self._confirm_preferred_name(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    candidate=candidate,
-                    member=member,
-                    allow_fallback=allow_fallback,
-                )
-            if self.should_retry_prompt(event, latest_message=latest_message):
-                reply_text = self._service.generator.generate_onboarding_reply(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    stage="retry_name",
-                    allow_fallback=allow_fallback,
-                )
-                if reply_text:
-                    message = OutboundMessage(
-                        launcher_id=event.launcher_id,
-                        launcher_type=event.launcher_type,
-                        text=reply_text,
-                    )
-                    return self._service.emitter.emit(event, message, assistant_name=assistant_name)
-            return None
-
-        bot_account_id = str(self._service.config.bot_account_id or "").strip()
-        if bot_account_id and event.has_bot_mention(bot_account_id):
-            self._service.state_store.save_member(
-                {
-                    "group_id": event.launcher_id,
-                    "user_id": event.sender_id,
-                    "qq_nickname": event.sender_name,
-                    "group_card": str(member.get("group_card", "") or ""),
-                    "onboarding_status": "pending_name",
-                }
-            )
-            reply_text = self._service.generator.generate_onboarding_reply(
-                event,
-                session,
-                assistant_name=assistant_name,
-                stage="ask_name",
-                allow_fallback=allow_fallback,
-            )
-            if not reply_text:
-                return None
-            message = OutboundMessage(
-                launcher_id=event.launcher_id,
-                launcher_type=event.launcher_type,
-                text=reply_text,
-            )
-            return self._service.emitter.emit(event, message, assistant_name=assistant_name)
-        return None
+        member = self._current_member(event)
+        return self._maybe_handle_common(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            member=member,
+        )
 
     async def amaybe_handle(
         self,
@@ -218,131 +127,403 @@ class MemberOnboarding:
         latest_message: str,
         assistant_name: str,
     ) -> OutboundMessage | None:
-        allow_fallback = not self._service._requires_live_llm()
-        command_candidate = self.extract_command_preferred_name(latest_message)
-        if event.launcher_type == "person":
-            member = await asyncio.to_thread(
-                self._service.state_store.get_member,
-                group_id="",
-                user_id=event.sender_id,
-            ) or {}
-            if command_candidate:
-                return await self._aconfirm_preferred_name(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    candidate=command_candidate,
-                    member=member,
-                    allow_fallback=allow_fallback,
-                )
-            preferred_name = str(member.get("preferred_name", "") or "").strip()
-            if preferred_name:
-                return None
-            candidate = self.extract_explicit_preferred_name(latest_message)
-            if not candidate:
-                return None
-            return await self._aconfirm_preferred_name(
-                event,
-                session,
-                assistant_name=assistant_name,
-                candidate=candidate,
-                member=member,
-                allow_fallback=allow_fallback,
-            )
-
-        if event.launcher_type != "group":
-            return None
-        member = await asyncio.to_thread(
-            self._service.state_store.get_member,
-            group_id=event.launcher_id,
-            user_id=event.sender_id,
+        member = await asyncio.to_thread(self._current_member, event)
+        return await self._amaybe_handle_common(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            member=member,
         )
-        if member is None:
-            return None
-        if command_candidate:
-            return await self._aconfirm_preferred_name(
+
+    def maybe_append_soft_ask(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        reply_text: str,
+        character_id: str = "",
+    ) -> str:
+        member = self._current_member(event)
+        return self._maybe_append_soft_ask_common(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            reply_text=reply_text,
+            character_id=character_id,
+            member=member,
+        )
+
+    async def amaybe_append_soft_ask(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        reply_text: str,
+        character_id: str = "",
+    ) -> str:
+        member = await asyncio.to_thread(self._current_member, event)
+        return await self._amaybe_append_soft_ask_common(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            reply_text=reply_text,
+            character_id=character_id,
+            member=member,
+        )
+
+    def looks_like_address_command(self, text: str) -> bool:
+        return bool(self.extract_command_preferred_name(text))
+
+    def looks_like_naming_input(self, text: str) -> bool:
+        return any(
+            (
+                bool(self.extract_command_preferred_name(text)),
+                bool(self.extract_assistant_alias_command(text)),
+                bool(self.extract_explicit_preferred_name(text)),
+                self._is_third_party_naming_request(text),
+                bool(self._clarify_naming_intent(text)),
+            )
+        )
+
+    def extract_command_preferred_name(self, text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        normalized_raw = re.sub(r"\s+", "", raw)
+        for pattern in self._ADDRESS_COMMAND_PATTERNS:
+            match = pattern.fullmatch(raw) or pattern.fullmatch(normalized_raw)
+            if not match:
+                continue
+            candidate = self._normalize_name_candidate(match.group(1))
+            if self._looks_like_general_name(candidate):
+                return candidate
+        return ""
+
+    def extract_assistant_alias_command(self, text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        normalized_raw = re.sub(r"\s+", "", raw)
+        for pattern in self._ASSISTANT_ALIAS_COMMAND_PATTERNS:
+            match = pattern.fullmatch(raw) or pattern.fullmatch(normalized_raw)
+            if not match:
+                continue
+            candidate = self._normalize_name_candidate(match.group(1))
+            if self._looks_like_general_name(candidate):
+                return candidate
+        return ""
+
+    def extract_explicit_preferred_name(self, text: str) -> str:
+        candidate = self._service.memory.extract_preferred_name(text)
+        candidate = self._normalize_name_candidate(candidate)
+        if candidate and self._looks_like_general_name(candidate):
+            return candidate
+        return ""
+
+    def extract_preferred_name(self, text: str) -> str:
+        candidate = self.extract_explicit_preferred_name(text)
+        if candidate:
+            return candidate
+        normalized = self._normalize_name_candidate(text)
+        if self._looks_like_bare_alias(normalized):
+            return normalized
+        return ""
+
+    def _current_member(self, event: InboundEvent) -> dict[str, Any]:
+        return self._service.state_store.get_member(
+            group_id=event.launcher_id if event.launcher_type == "group" else "",
+            user_id=event.sender_id,
+        ) or {}
+
+    def _maybe_handle_common(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> OutboundMessage | None:
+        allow_fallback = True
+        action, payload = self._resolve_naming_action(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            member=member,
+        )
+        if action == "confirm_name" and payload:
+            return self._confirm_preferred_name(
                 event,
                 session,
                 assistant_name=assistant_name,
-                candidate=command_candidate,
+                candidate=payload,
                 member=member,
                 allow_fallback=allow_fallback,
             )
-
-        preferred_name = str(member.get("preferred_name", "") or "").strip()
-        if preferred_name:
-            return None
-
-        onboarding_status = str(member.get("onboarding_status", "") or "").strip() or "new"
-        if onboarding_status == "pending_name":
-            candidate = self.extract_preferred_name(latest_message)
-            if not candidate:
-                candidate = await self._ainfer_preferred_name_candidate(
-                    event,
-                    session,
-                    latest_message=latest_message,
-                    assistant_name=assistant_name,
-                )
-            if candidate:
-                return await self._aconfirm_preferred_name(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    candidate=candidate,
-                    member=member,
-                    allow_fallback=allow_fallback,
-                )
-            if self.should_retry_prompt(event, latest_message=latest_message):
-                reply_text = await self._service.generator.agenerate_onboarding_reply(
-                    event,
-                    session,
-                    assistant_name=assistant_name,
-                    stage="retry_name",
-                    allow_fallback=allow_fallback,
-                )
-                if reply_text:
-                    message = OutboundMessage(
-                        launcher_id=event.launcher_id,
-                        launcher_type=event.launcher_type,
-                        text=reply_text,
-                    )
-                    return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
-            return None
-
-        bot_account_id = str(self._service.config.bot_account_id or "").strip()
-        if bot_account_id and event.has_bot_mention(bot_account_id):
-            await asyncio.to_thread(
-                self._service.state_store.save_member,
-                {
-                    "group_id": event.launcher_id,
-                    "user_id": event.sender_id,
-                    "qq_nickname": event.sender_name,
-                    "group_card": str(member.get("group_card", "") or ""),
-                    "onboarding_status": "pending_name",
-                },
-            )
-            reply_text = await self._service.generator.agenerate_onboarding_reply(
+        if action == "confirm_assistant_alias" and payload:
+            return self._confirm_assistant_alias(
                 event,
                 session,
                 assistant_name=assistant_name,
-                stage="ask_name",
+                candidate=payload,
                 allow_fallback=allow_fallback,
             )
-            if not reply_text:
-                return None
-            message = OutboundMessage(
-                launcher_id=event.launcher_id,
-                launcher_type=event.launcher_type,
-                text=reply_text,
+        if action == "reject_third_party_naming":
+            return self._emit_stage_reply(
+                event,
+                session,
+                assistant_name=assistant_name,
+                stage="reject_third_party_naming",
+                allow_fallback=allow_fallback,
             )
-            return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
+        if action == "clarify_naming_intent" and payload:
+            return self._emit_stage_reply(
+                event,
+                session,
+                assistant_name=assistant_name,
+                stage="clarify_naming_intent",
+                allow_fallback=allow_fallback,
+                intent_hint=payload,
+            )
         return None
 
-    def _normalize_candidate(self, text: str) -> str:
+    async def _amaybe_handle_common(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> OutboundMessage | None:
+        allow_fallback = True
+        action, payload = await self._aresolve_naming_action(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            member=member,
+        )
+        if action == "confirm_name" and payload:
+            return await self._aconfirm_preferred_name(
+                event,
+                session,
+                assistant_name=assistant_name,
+                candidate=payload,
+                member=member,
+                allow_fallback=allow_fallback,
+            )
+        if action == "confirm_assistant_alias" and payload:
+            return await self._aconfirm_assistant_alias(
+                event,
+                session,
+                assistant_name=assistant_name,
+                candidate=payload,
+                allow_fallback=allow_fallback,
+            )
+        if action == "reject_third_party_naming":
+            return await self._aemit_stage_reply(
+                event,
+                session,
+                assistant_name=assistant_name,
+                stage="reject_third_party_naming",
+                allow_fallback=allow_fallback,
+            )
+        if action == "clarify_naming_intent" and payload:
+            return await self._aemit_stage_reply(
+                event,
+                session,
+                assistant_name=assistant_name,
+                stage="clarify_naming_intent",
+                allow_fallback=allow_fallback,
+                intent_hint=payload,
+            )
+        return None
+
+    def _maybe_append_soft_ask_common(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        reply_text: str,
+        character_id: str,
+        member: dict[str, Any],
+    ) -> str:
+        cleaned_reply = str(reply_text or "").strip()
+        if not cleaned_reply:
+            return ""
+        if self.looks_like_naming_input(latest_message):
+            return cleaned_reply
+        if str(member.get("preferred_name", "") or "").strip():
+            return cleaned_reply
+        status = str(member.get("onboarding_status", "") or "").strip() or "new"
+        if status != "new":
+            return cleaned_reply
+        soft_ask = self._service.generator.generate_onboarding_reply(
+            event,
+            session,
+            assistant_name=assistant_name,
+            stage="soft_ask_name",
+            allow_fallback=True,
+        )
+        if not soft_ask:
+            return cleaned_reply
+        self._service.state_store.save_member(
+            self._member_payload(
+                event,
+                member,
+                onboarding_status="asked_once",
+            )
+        )
+        return self._append_soft_ask(cleaned_reply, soft_ask)
+
+    async def _amaybe_append_soft_ask_common(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        reply_text: str,
+        character_id: str,
+        member: dict[str, Any],
+    ) -> str:
+        cleaned_reply = str(reply_text or "").strip()
+        if not cleaned_reply:
+            return ""
+        if self.looks_like_naming_input(latest_message):
+            return cleaned_reply
+        if str(member.get("preferred_name", "") or "").strip():
+            return cleaned_reply
+        status = str(member.get("onboarding_status", "") or "").strip() or "new"
+        if status != "new":
+            return cleaned_reply
+        soft_ask = await self._service.generator.agenerate_onboarding_reply(
+            event,
+            session,
+            assistant_name=assistant_name,
+            stage="soft_ask_name",
+            allow_fallback=True,
+        )
+        if not soft_ask:
+            return cleaned_reply
+        await asyncio.to_thread(
+            self._service.state_store.save_member,
+            self._member_payload(
+                event,
+                member,
+                onboarding_status="asked_once",
+            ),
+        )
+        return self._append_soft_ask(cleaned_reply, soft_ask)
+
+    def _resolve_naming_action(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> tuple[str, str]:
+        command_candidate = self.extract_command_preferred_name(latest_message)
+        if command_candidate:
+            return "confirm_name", command_candidate
+
+        assistant_candidate = self.extract_assistant_alias_command(latest_message)
+        if assistant_candidate:
+            return "confirm_assistant_alias", assistant_candidate
+
+        if self._is_third_party_naming_request(latest_message):
+            return "reject_third_party_naming", ""
+
+        clarify_hint = self._clarify_naming_intent(latest_message)
+        if clarify_hint:
+            return "clarify_naming_intent", clarify_hint
+
+        explicit_candidate = self.extract_explicit_preferred_name(latest_message)
+        if explicit_candidate:
+            return "confirm_name", explicit_candidate
+
+        if not self._allows_passive_capture(member):
+            return "", ""
+
+        passive_candidate = self.extract_preferred_name(latest_message)
+        if passive_candidate:
+            return "confirm_name", passive_candidate
+        inferred_candidate = self._infer_preferred_name_candidate(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+        )
+        if inferred_candidate:
+            return "confirm_name", inferred_candidate
+        return "", ""
+
+    async def _aresolve_naming_action(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> tuple[str, str]:
+        command_candidate = self.extract_command_preferred_name(latest_message)
+        if command_candidate:
+            return "confirm_name", command_candidate
+
+        assistant_candidate = self.extract_assistant_alias_command(latest_message)
+        if assistant_candidate:
+            return "confirm_assistant_alias", assistant_candidate
+
+        if self._is_third_party_naming_request(latest_message):
+            return "reject_third_party_naming", ""
+
+        clarify_hint = self._clarify_naming_intent(latest_message)
+        if clarify_hint:
+            return "clarify_naming_intent", clarify_hint
+
+        explicit_candidate = self.extract_explicit_preferred_name(latest_message)
+        if explicit_candidate:
+            return "confirm_name", explicit_candidate
+
+        if not self._allows_passive_capture(member):
+            return "", ""
+
+        passive_candidate = self.extract_preferred_name(latest_message)
+        if passive_candidate:
+            return "confirm_name", passive_candidate
+        inferred_candidate = await self._ainfer_preferred_name_candidate(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+        )
+        if inferred_candidate:
+            return "confirm_name", inferred_candidate
+        return "", ""
+
+    @classmethod
+    def _normalize_name_candidate(cls, text: str) -> str:
         compact = re.sub(r"\s+", " ", str(text or "")).strip()
         if not compact:
             return ""
-        return compact.strip(".,!?;:\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A\u201C\u201D\"'`()[]{}<>")
+        cleaned = compact.strip(".,!?;:\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A\u201C\u201D\"'`()[]{}<>")
+        if len(cleaned) > 1 and cleaned[-1] in cls._TRAILING_PARTICLES:
+            cleaned = cleaned[:-1].rstrip()
+        return cleaned
 
     def _looks_like_general_name(self, candidate: str) -> bool:
         if not candidate or len(candidate) > 12:
@@ -364,37 +545,12 @@ class MemberOnboarding:
             return False
         return all(char not in self._BARE_ALIAS_FORBIDDEN_CHARS for char in candidate)
 
-    def looks_like_address_command(self, text: str) -> bool:
-        return bool(self.extract_command_preferred_name(text))
-
-    def extract_command_preferred_name(self, text: str) -> str:
-        raw = str(text or "").strip()
-        if not raw:
-            return ""
-        normalized_raw = re.sub(r"\s+", "", raw)
-        for pattern in self._ADDRESS_COMMAND_PATTERNS:
-            match = pattern.fullmatch(raw) or pattern.fullmatch(normalized_raw)
-            if not match:
-                continue
-            candidate = self._normalize_candidate(match.group(1))
-            if self._looks_like_general_name(candidate):
-                return candidate
-        return ""
-
-    def extract_explicit_preferred_name(self, text: str) -> str:
-        candidate = self._service.memory.extract_preferred_name(text)
-        if candidate and self._looks_like_general_name(candidate):
-            return candidate
-        return ""
-
-    def extract_preferred_name(self, text: str) -> str:
-        candidate = self.extract_explicit_preferred_name(text)
-        if candidate:
-            return candidate
-        normalized = self._normalize_candidate(text)
-        if self._looks_like_bare_alias(normalized):
-            return normalized
-        return ""
+    def _allows_passive_capture(self, member: dict[str, Any]) -> bool:
+        preferred_name = str(member.get("preferred_name", "") or "").strip()
+        if preferred_name:
+            return False
+        status = str(member.get("onboarding_status", "") or "").strip() or "new"
+        return status in self._PASSIVE_CAPTURE_STATUSES
 
     def _candidate_from_hint(self, hint: object) -> str:
         if not isinstance(hint, dict):
@@ -407,7 +563,7 @@ class MemberOnboarding:
             return ""
         if confidence < self._NAME_HINT_MIN_CONFIDENCE:
             return ""
-        candidate = self._normalize_candidate(str(hint.get("name", "") or ""))
+        candidate = self._normalize_name_candidate(str(hint.get("name", "") or ""))
         if not self._looks_like_general_name(candidate):
             return ""
         return candidate
@@ -444,20 +600,64 @@ class MemberOnboarding:
         )
         return self._candidate_from_hint(hint)
 
+    def _is_third_party_naming_request(self, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        normalized_raw = re.sub(r"\s+", "", raw)
+        return any(
+            pattern.fullmatch(raw) or pattern.fullmatch(normalized_raw)
+            for pattern in self._THIRD_PARTY_NAMING_PATTERNS
+        )
+
+    def _clarify_naming_intent(self, text: str) -> str:
+        compact = re.sub(r"\s+", "", str(text or "")).strip()
+        lowered = compact.casefold()
+        if not compact:
+            return ""
+        user_name_markers = (
+            "\u4F60\u8BE5\u53EB\u6211\u4EC0\u4E48",
+            "\u4F60\u60F3\u600E\u4E48\u53EB\u6211",
+            "\u4F60\u600E\u4E48\u53EB\u6211",
+            "\u4F60\u600E\u4E48\u79F0\u547C\u6211",
+            "\u4F60\u5E94\u8BE5\u600E\u4E48\u79F0\u547C\u6211",
+        )
+        assistant_name_markers = (
+            "\u522B\u4EBA\u90FD\u53EB\u4F60",
+            "\u4F60\u53EB",
+            "\u4F60\u662F\u4E0D\u662F\u53EB",
+            "\u5927\u5BB6\u90FD\u53EB\u4F60",
+        )
+        if any(marker in compact for marker in user_name_markers):
+            return "user_name"
+        if "whatshouldyoucallme" in lowered or "howshouldyoucallme" in lowered:
+            return "user_name"
+        if any(marker in compact for marker in assistant_name_markers) and compact.endswith(("\u5417", "?", "\uFF1F")):
+            return "assistant_alias"
+        if "callyou" in lowered and lowered.endswith("?"):
+            return "assistant_alias"
+        return ""
+
     def _member_payload(
         self,
         event: InboundEvent,
         member: dict[str, Any] | None,
         *,
-        candidate: str,
+        candidate: str = "",
+        onboarding_status: str = "",
+        character_id: str = "",
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "group_id": event.launcher_id if event.launcher_type == "group" else "",
             "user_id": event.sender_id,
             "qq_nickname": event.sender_name,
-            "preferred_name": candidate,
-            "onboarding_status": "ready",
         }
+        if candidate:
+            payload["preferred_name"] = candidate
+        if onboarding_status:
+            payload["onboarding_status"] = onboarding_status
+        if character_id:
+            payload["character_id"] = character_id
         if event.launcher_type == "group":
             payload["group_card"] = str((member or {}).get("group_card", "") or "")
         return payload
@@ -483,7 +683,9 @@ class MemberOnboarding:
         )
         if not reply_text:
             return None
-        self._service.state_store.save_member(self._member_payload(event, member, candidate=candidate))
+        self._service.state_store.save_member(
+            self._member_payload(event, member, candidate=candidate, onboarding_status="ready")
+        )
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -514,7 +716,7 @@ class MemberOnboarding:
             return None
         await asyncio.to_thread(
             self._service.state_store.save_member,
-            self._member_payload(event, member, candidate=candidate),
+            self._member_payload(event, member, candidate=candidate, onboarding_status="ready"),
         )
         message = OutboundMessage(
             launcher_id=event.launcher_id,
@@ -523,16 +725,129 @@ class MemberOnboarding:
         )
         return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
 
-    def should_retry_prompt(self, event: InboundEvent, *, latest_message: str = "") -> bool:
-        if event.launcher_type != "group":
-            return False
-        bot_account_id = str(self._service.config.bot_account_id or "").strip()
-        if not (bot_account_id and event.has_bot_mention(bot_account_id)):
-            return False
-        cleaned = self._normalize_candidate(latest_message)
-        if not cleaned:
-            return True
-        lowered = cleaned.casefold()
-        return any(marker in cleaned for marker in self._NAME_RETRY_HINTS) or any(
-            marker in lowered for marker in ("call me", "my name")
+    def _confirm_assistant_alias(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        candidate: str,
+        allow_fallback: bool,
+    ) -> OutboundMessage | None:
+        reply_text = self._service.generator.generate_onboarding_reply(
+            event,
+            session,
+            assistant_name=assistant_name,
+            stage="confirm_assistant_alias",
+            candidate_name=candidate,
+            allow_fallback=allow_fallback,
         )
+        if not reply_text:
+            return None
+        self._service.state_store.save_assistant_alias(
+            character_id=str(session.character_id or self._service._active_character_id()).strip(),
+            user_id=event.sender_id,
+            assistant_alias=candidate,
+        )
+        message = OutboundMessage(
+            launcher_id=event.launcher_id,
+            launcher_type=event.launcher_type,
+            text=reply_text,
+        )
+        return self._service.emitter.emit(event, message, assistant_name=candidate)
+
+    async def _aconfirm_assistant_alias(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        candidate: str,
+        allow_fallback: bool,
+    ) -> OutboundMessage | None:
+        reply_text = await self._service.generator.agenerate_onboarding_reply(
+            event,
+            session,
+            assistant_name=assistant_name,
+            stage="confirm_assistant_alias",
+            candidate_name=candidate,
+            allow_fallback=allow_fallback,
+        )
+        if not reply_text:
+            return None
+        await asyncio.to_thread(
+            self._service.state_store.save_assistant_alias,
+            character_id=str(session.character_id or self._service._active_character_id()).strip(),
+            user_id=event.sender_id,
+            assistant_alias=candidate,
+        )
+        message = OutboundMessage(
+            launcher_id=event.launcher_id,
+            launcher_type=event.launcher_type,
+            text=reply_text,
+        )
+        return await self._service.emitter.aemit(event, message, assistant_name=candidate)
+
+    def _emit_stage_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        stage: str,
+        allow_fallback: bool,
+        intent_hint: str = "",
+    ) -> OutboundMessage | None:
+        reply_text = self._service.generator.generate_onboarding_reply(
+            event,
+            session,
+            assistant_name=assistant_name,
+            stage=stage,
+            allow_fallback=allow_fallback,
+            intent_hint=intent_hint,
+        )
+        if not reply_text:
+            return None
+        message = OutboundMessage(
+            launcher_id=event.launcher_id,
+            launcher_type=event.launcher_type,
+            text=reply_text,
+        )
+        return self._service.emitter.emit(event, message, assistant_name=assistant_name)
+
+    async def _aemit_stage_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        stage: str,
+        allow_fallback: bool,
+        intent_hint: str = "",
+    ) -> OutboundMessage | None:
+        reply_text = await self._service.generator.agenerate_onboarding_reply(
+            event,
+            session,
+            assistant_name=assistant_name,
+            stage=stage,
+            allow_fallback=allow_fallback,
+            intent_hint=intent_hint,
+        )
+        if not reply_text:
+            return None
+        message = OutboundMessage(
+            launcher_id=event.launcher_id,
+            launcher_type=event.launcher_type,
+            text=reply_text,
+        )
+        return await self._service.emitter.aemit(event, message, assistant_name=assistant_name)
+
+    @staticmethod
+    def _append_soft_ask(reply_text: str, soft_ask: str) -> str:
+        base = str(reply_text or "").strip()
+        extra = str(soft_ask or "").strip()
+        if not extra:
+            return base
+        if not base:
+            return extra
+        return f"{base}\n{extra}"

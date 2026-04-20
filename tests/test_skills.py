@@ -328,14 +328,136 @@ command-tool: skill-list
         self.assertIn("先提醒对方这类内容最好核验。", prompt)
         self.assertNotIn("联网搜索", prompt)
 
+    def test_story_mode_prompt_pins_visible_reply_language(self) -> None:
+        generator = Generator(AppConfig(story_mode=True, story_detail_level=2))
+        session = SessionMemory(launcher_id="1", launcher_type="person")
+        event = InboundEvent(
+            launcher_id="1",
+            launcher_type="person",
+            sender_id="2",
+            sender_name="tester",
+            segments=[MessageSegment(kind="text", text="你在吗")],
+        )
+        card = generator._cards.load("person", session)
+
+        prompt = generator._build_chat_query(
+            event,
+            session,
+            EmotionState(),
+            card=card,
+            assistant_name=card.assistant_name,
+            address="tester",
+            search_hint="",
+            search_context="",
+            conversation_view="",
+            memory_hints=[],
+            speaker_notes=[],
+            analysis_hint="",
+            latest_message="你在吗",
+            active_skills=[],
+        )
+
+        self.assertIn("[Story Mode]", prompt)
+        self.assertIn("不要把外层叙事写成英文", prompt)
+        self.assertIn("这轮可见回复必须使用", prompt)
+
+    def test_explicit_named_summarize_skill_dispatches_real_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            (skills_dir / "skill.md").write_text(
+                """---
+name: summarize
+description: Summarize URLs and videos.
+---
+Use summarize for URLs.
+""",
+                encoding="utf-8",
+            )
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
+                {
+                    "summary": "这是视频的真实摘要。",
+                    "extracted": {"title": "测试视频标题"},
+                },
+                "",
+            )
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[
+                        MessageSegment(
+                            kind="text",
+                            text="用summarize技能总结一下这个视频在讲什么：https://www.youtube.com/watch?v=DmFdxaLgD70",
+                        )
+                    ],
+                )
+            )
+
+            self.assertIsNotNone(reply)
+            assert reply is not None
+            self.assertIn("按 summarize 技能真的跑", reply.text)
+            self.assertIn("这是视频的真实摘要", reply.text)
+
+    def test_explicit_named_summarize_skill_refuses_when_transcript_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            (skills_dir / "skill.md").write_text(
+                """---
+name: summarize
+description: Summarize URLs and videos.
+---
+Use summarize for URLs.
+""",
+                encoding="utf-8",
+            )
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
+                {
+                    "summary": "YouTube 是一个全球知名的视频分享平台。",
+                    "extracted": {
+                        "title": "- YouTube",
+                        "siteName": "youtube.com",
+                        "transcriptSource": "unavailable",
+                        "transcriptMetadata": {"reason": "no_transcript_available"},
+                    },
+                },
+                "",
+            )
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[
+                        MessageSegment(
+                            kind="text",
+                            text="用summarize技能总结一下这个视频在讲什么：https://www.youtube.com/watch?v=DmFdxaLgD70",
+                        )
+                    ],
+                )
+            )
+
+            self.assertIsNotNone(reply)
+            assert reply is not None
+            self.assertIn("没有拿到这个视频的可用字幕或正文", reply.text)
+            self.assertIn("不能假装", reply.text)
+
     def test_service_exposes_registered_tools(self) -> None:
         service, _ = build_default_service()
 
         tools = service.list_tools()
         tool_ids = {item["id"] for item in tools["items"]}
 
-        self.assertEqual(tools["count"], 4)
-        self.assertSetEqual(tool_ids, {"image", "search", "summary", "skill-list"})
+        self.assertEqual(tools["count"], 5)
+        self.assertSetEqual(tool_ids, {"image", "search", "summary", "skill-list", "summarize"})
 
 
 if __name__ == "__main__":

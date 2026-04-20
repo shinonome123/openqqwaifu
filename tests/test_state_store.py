@@ -254,6 +254,54 @@ class RuntimeStateStoreTests(unittest.TestCase):
             self.assertEqual(reopened.knowledge_count(character_id="default"), 1)
             self.assertEqual(reopened.knowledge_count(character_id="aurora"), 1)
 
+    def test_in_memory_store_persists_assistant_alias_by_character_and_user(self) -> None:
+        store = InMemoryRuntimeStateStore()
+        store.record_member_seen(group_id="612475113", user_id="783190298", qq_nickname="tester")
+        saved = store.save_assistant_alias(
+            character_id="aurora",
+            user_id="783190298",
+            assistant_alias="阿璃",
+        )
+
+        self.assertEqual(saved["assistant_alias"], "阿璃")
+        aurora_member = store.get_member(
+            group_id="612475113",
+            user_id="783190298",
+            character_id="aurora",
+        )
+        default_member = store.get_member(
+            group_id="612475113",
+            user_id="783190298",
+            character_id="default",
+        )
+
+        self.assertIsNotNone(aurora_member)
+        self.assertIsNotNone(default_member)
+        assert aurora_member is not None and default_member is not None
+        self.assertEqual(aurora_member["assistant_alias"], "阿璃")
+        self.assertEqual(default_member["assistant_alias"], "")
+
+    def test_sqlite_store_persists_assistant_alias_by_character_and_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "runtime.sqlite3"
+            store = SqliteRuntimeStateStore(path)
+            store.record_member_seen(group_id="", user_id="783190298", qq_nickname="tester")
+            store.save_assistant_alias(
+                character_id="aurora",
+                user_id="783190298",
+                assistant_alias="阿璃",
+            )
+
+            reopened = SqliteRuntimeStateStore(path)
+            alias = reopened.get_assistant_alias(character_id="aurora", user_id="783190298")
+            member = reopened.get_member(group_id="", user_id="783190298", character_id="aurora")
+
+            self.assertIsNotNone(alias)
+            self.assertIsNotNone(member)
+            assert alias is not None and member is not None
+            self.assertEqual(alias["assistant_alias"], "阿璃")
+            self.assertEqual(member["assistant_alias"], "阿璃")
+
     def test_in_memory_store_can_use_embedding_similarity(self) -> None:
         embedder = FakeEmbedder(
             {

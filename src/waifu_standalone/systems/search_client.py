@@ -36,6 +36,28 @@ class SearchClient(Protocol):
 
 class DuckDuckGoSearchClient:
     _USER_AGENT = "Mozilla/5.0 (compatible; openqqwaifu/0.1; +https://github.com/shinonome123/openqqwaifu)"
+    _FRESHNESS_HINTS = (
+        "最新",
+        "最近",
+        "刚",
+        "刚刚",
+        "今天",
+        "今日",
+        "昨天",
+        "前天",
+        "新闻",
+        "罚款",
+        "被罚",
+        "处罚",
+        "罚单",
+        "监管",
+        "公告",
+        "通报",
+        "立案",
+        "垄断",
+        "反垄断",
+    )
+    _DATE_PATTERN = re.compile(r"(20\d{2}年?|(?:1[0-2]|0?[1-9])月(?:[12]\d|3[01]|0?[1-9])日)")
     _RESULT_LINK_PATTERN = re.compile(
         r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>',
         re.IGNORECASE | re.DOTALL,
@@ -59,12 +81,20 @@ class DuckDuckGoSearchClient:
         )
 
     def fetch(self, query: str) -> list[SearchResult]:
+        if self._prefer_html_search(query):
+            results = self._duckduckgo_html_search(query)
+            if results:
+                return results[: max(1, self.config.search_result_limit)]
         results = self._duckduckgo_instant_answer(query)
         if results:
             return results[: max(1, self.config.search_result_limit)]
         return self._duckduckgo_html_search(query)[: max(1, self.config.search_result_limit)]
 
     async def afetch(self, query: str) -> list[SearchResult]:
+        if self._prefer_html_search(query):
+            results = await self._aduckduckgo_html_search(query)
+            if results:
+                return results[: max(1, self.config.search_result_limit)]
         results = await self._aduckduckgo_instant_answer(query)
         if results:
             return results[: max(1, self.config.search_result_limit)]
@@ -235,6 +265,15 @@ class DuckDuckGoSearchClient:
             title, snippet = text.split(" - ", 1)
             return title.strip(), snippet.strip()
         return text.strip(), text.strip()
+
+    @classmethod
+    def _prefer_html_search(cls, query: str) -> bool:
+        normalized = " ".join(str(query or "").strip().lower().split())
+        if not normalized:
+            return False
+        return any(hint in normalized for hint in cls._FRESHNESS_HINTS) or bool(
+            cls._DATE_PATTERN.search(normalized)
+        )
 
     def close(self) -> None:
         self._transport.close()

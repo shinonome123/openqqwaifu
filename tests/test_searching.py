@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 from waifu_standalone.app import build_default_service
 from waifu_standalone.config import AppConfig
 from waifu_standalone.models import InboundEvent, MessageSegment
+from waifu_standalone.systems.search_client import DuckDuckGoSearchClient
 from waifu_standalone.systems.searching import SearchDecider, SearchResult
 
 
@@ -107,6 +108,42 @@ class SearchDeciderTests(unittest.TestCase):
         self.assertIn("北京天气", reply.text)
         self.assertEqual(last_search.get("query"), "今天北京天气怎么样")
 
+    def test_recent_regulatory_queries_trigger_search(self) -> None:
+        decider = SearchDecider(AppConfig(search_enabled=True))
+        queries = (
+            "拼多多刚被罚款了",
+            "拼多多最近被罚了",
+            "拼多多刚被罚款是什么事",
+            "拼多多2026年罚款",
+        )
+
+        for query in queries:
+            event = InboundEvent(
+                launcher_id="1",
+                launcher_type="person",
+                sender_id="2",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text=query)],
+            )
+            self.assertTrue(decider.should_search(event), query)
+
+    def test_recent_news_fetch_prefers_html_search(self) -> None:
+        client = DuckDuckGoSearchClient(AppConfig(search_enabled=True, search_result_limit=2))
+        calls: list[str] = []
+        client._duckduckgo_instant_answer = lambda query: calls.append("instant") or [  # type: ignore[method-assign]
+            SearchResult(title="旧摘要", snippet="旧内容", url="https://example.com/stale")
+        ]
+        client._duckduckgo_html_search = lambda query: calls.append("html") or [  # type: ignore[method-assign]
+            SearchResult(title="新新闻", snippet="最新处罚结果", url="https://example.com/fresh")
+        ]
+
+        try:
+            results = client.fetch("拼多多刚被罚款了")
+        finally:
+            client.close()
+
+        self.assertEqual(calls, ["html"])
+        self.assertEqual(results[0].title, "新新闻")
 
     def test_html_fallback_extracts_real_search_results(self) -> None:
         decider = SearchDecider(AppConfig(search_enabled=True, search_result_limit=2))

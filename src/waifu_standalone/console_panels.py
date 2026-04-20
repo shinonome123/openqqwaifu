@@ -306,6 +306,33 @@ class ConsolePanels:
                 }
             )
             return current
+        try:
+            generated = svc.generator.generate_image(prompt)
+            image_bytes, content_type = svc.generator.resolve_generated_image(generated.image_ref)
+            saved = svc.cards.save_portrait_asset(
+                character,
+                image_bytes,
+                content_type,
+                prompt=generated.prompt,
+                style=style,
+                prompt_suffix=prompt_suffix,
+                auto_generate=auto_generate,
+            )
+            saved.pop("notice", None)
+            saved.pop("error", None)
+            return saved
+        except Exception as exc:
+            current.update(
+                {
+                    "style": style,
+                    "prompt_suffix": prompt_suffix,
+                    "auto_generate": auto_generate,
+                    "last_prompt": prompt,
+                    "error": str(exc) or "portrait generation failed",
+                }
+            )
+            current.pop("notice", None)
+            return current
 
     def get_ai_panel(self) -> dict[str, object]:
         svc = self.service
@@ -795,28 +822,3 @@ class ConsolePanels:
         svc._refresh_runtime_components()
         svc._persist_config()
         return self.get_other_panel()
-        try:
-            generated = svc.generator.generate_image(prompt)
-            image_bytes, content_type = svc.generator.resolve_generated_image(generated.image_ref)
-            portrait = svc.cards.save_portrait_asset(
-                character,
-                image_bytes,
-                content_type,
-                prompt=prompt,
-                style=style,
-                prompt_suffix=prompt_suffix,
-                auto_generate=auto_generate,
-            )
-            portrait["generated"] = True
-            return portrait
-        except Exception as exc:
-            current.update(
-                {
-                    "style": style,
-                    "prompt_suffix": prompt_suffix,
-                    "auto_generate": auto_generate,
-                    "last_prompt": prompt,
-                    "error": str(exc),
-                }
-            )
-            return current

@@ -18,9 +18,7 @@
       (function preflightTheme() {
         try {
           const saved = JSON.parse(localStorage.getItem("waifu:prefs") || "{}");
-          const mode =
-            saved.themeMode ||
-            (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+          const mode = saved.themeMode || "dark";
           const family = saved.themeFamily || "default";
           const lang =
             saved.lang || (navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en");

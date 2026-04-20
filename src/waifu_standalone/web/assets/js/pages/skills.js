@@ -1,7 +1,7 @@
 // Skills page: toggle skills, marketplace search and import.
 
 import { api } from "../api.js";
-import { el, card, chip, empty, switchControl, textInput } from "../components.js";
+import { el, card, chip, empty, switchControl, textInput, statCard } from "../components.js";
 import { t, onLangChange } from "../i18n.js";
 import { toastOk, toastError, confirmDialog } from "../ui.js";
 
@@ -110,13 +110,46 @@ export function mount(root) {
       return;
     }
 
+    container.appendChild(renderSummary());
     container.appendChild(renderSkillsList());
-    container.appendChild(renderToolsList());
-    container.appendChild(renderMarketplace());
+    container.appendChild(
+      el("div", { class: "skills-secondary-grid" }, [renderToolsList(), renderMarketplace()]),
+    );
+  }
+
+  function renderSummary() {
+    const skills = panel?.skills?.items || [];
+    const tools = panel?.tools?.items || [];
+    const sources = panel?.marketplace?.sources || [];
+    const enabledCount = skills.filter((item) => !!item?.enabled).length;
+    const enabledSources = sources.filter((item) => !!item?.enabled).length;
+    return el("div", { class: "kpi-row skills-summary-row" }, [
+      statCard({
+        label: t("skills.summary.enabled"),
+        value: String(enabledCount),
+        meta: t("skills.summary.enabledMeta", { count: skills.length }),
+      }),
+      statCard({
+        label: t("skills.summary.tools"),
+        value: String(tools.length),
+        meta: t("skills.summary.toolsMeta", { count: tools.length }),
+      }),
+      statCard({
+        label: t("skills.summary.sources"),
+        value: String(enabledSources),
+        meta: t("skills.summary.sourcesMeta", { count: sources.length }),
+      }),
+      statCard({
+        label: t("skills.summary.results"),
+        value: String(results.length),
+        meta: query ? `"${query}"` : t("skills.summary.resultsIdle"),
+      }),
+    ]);
   }
 
   function renderSkillsList() {
     const skills = panel?.skills?.items || [];
+    const enabledCount = skills.filter((item) => !!item?.enabled).length;
     if (!Array.isArray(skills) || !skills.length) {
       return card({
         title: t("nav.skills"),
@@ -125,8 +158,10 @@ export function mount(root) {
     }
     return card({
       title: `${t("nav.skills")} (${skills.length})`,
+      subtitle: t("skills.section.skillsDesc"),
+      actions: [chip({ label: `${enabledCount}/${skills.length}`, variant: "ok" })],
       body: skills.map((skill) =>
-        el("div", { class: "rule-card" }, [
+        el("div", { class: "rule-card skill-rule-card" }, [
           el("div", { class: "rule-card-head" }, [
             el("div", {}, [
               el("div", { class: "rule-card-title", text: skill.name || skill.id }),
@@ -155,6 +190,16 @@ export function mount(root) {
                 ? chip({ label: `tool:${skill.command_tool || "unknown"}`, variant: "ok" })
                 : chip({ label: "prompt", variant: "outline" }),
           ]),
+          Array.isArray(skill.triggers) && skill.triggers.length
+            ? el("div", { class: "skill-trigger-list" }, [
+                el("div", { class: "skill-trigger-label", text: t("skills.triggers") }),
+                el(
+                  "div",
+                  { class: "row" },
+                  skill.triggers.map((trigger) => chip({ label: trigger, variant: "outline" })),
+                ),
+              ])
+            : null,
         ]),
       ),
     });
@@ -172,7 +217,7 @@ export function mount(root) {
       title: `${t("skills.tools.title")} (${tools.length})`,
       subtitle: t("skills.tools.desc"),
       body: tools.map((tool) =>
-        el("div", { class: "rule-card" }, [
+        el("div", { class: "rule-card skill-tool-card" }, [
           el("div", { class: "rule-card-head" }, [
             el("div", {}, [
               el("div", { class: "rule-card-title", text: tool.name || tool.id }),
@@ -198,6 +243,12 @@ export function mount(root) {
         query = v;
       },
     });
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void search();
+      }
+    });
     const searchBtn = el("button", {
       type: "button",
       class: "btn is-primary is-sm",
@@ -205,13 +256,13 @@ export function mount(root) {
       onClick: search,
     });
 
-    const resultsList = el("div", { class: "stack" });
+    const resultsList = el("div", { class: "skills-marketplace-results" });
     if (!results.length) {
       resultsList.appendChild(empty({ title: t("skills.marketplace.empty") }));
     } else {
       results.forEach((item) => {
         resultsList.appendChild(
-          el("div", { class: "rule-card" }, [
+          el("div", { class: "rule-card skill-marketplace-card" }, [
             el("div", { class: "rule-card-head" }, [
               el("div", {}, [
                 el("div", { class: "rule-card-title", text: item.name || item.title || item.skill_id || "?" }),
@@ -239,6 +290,7 @@ export function mount(root) {
 
     return card({
       title: t("skills.marketplace.title"),
+      subtitle: t("skills.section.resultsDesc"),
       body: [
         el("div", { class: "row-tight" }, [searchInput, searchBtn]),
         el("div", { class: "row" }, sources.map((s) =>
@@ -247,6 +299,9 @@ export function mount(root) {
             variant: s.enabled ? "ok" : "outline",
           }),
         )),
+        results.length
+          ? chip({ label: `${t("skills.section.results")}: ${results.length}`, variant: "info" })
+          : null,
         resultsList,
       ],
     });

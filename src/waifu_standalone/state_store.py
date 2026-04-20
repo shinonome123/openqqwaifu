@@ -44,6 +44,16 @@ def _normalize_character_id(value: object) -> str:
     return _normalize_string(value)
 
 
+def _normalize_assistant_alias_key(character_id: object, user_id: object) -> tuple[str, str]:
+    resolved_character_id = _normalize_character_id(character_id)
+    resolved_user_id = _normalize_string(user_id)
+    if not resolved_character_id:
+        raise ValueError("character_id is required")
+    if not resolved_user_id:
+        raise ValueError("user_id is required")
+    return resolved_character_id, resolved_user_id
+
+
 def _normalize_membership_status(value: object) -> str:
     resolved = _normalize_string(value).lower()
     if resolved in {"active", "left", "removed"}:
@@ -191,6 +201,7 @@ def _merge_member_payload(
     persona: dict[str, Any] | None = None,
     *,
     character_id: str = "",
+    assistant_alias: str = "",
 ) -> dict[str, Any]:
     merged = dict(shared)
     if character_id or persona is not None:
@@ -219,6 +230,7 @@ def _merge_member_payload(
                 "persona_updated_at": int(persona.get("updated_at") or persona.get("persona_updated_at") or 0),
             }
         )
+    merged["assistant_alias"] = _normalize_string(assistant_alias)
     return merged
 
 
@@ -226,6 +238,7 @@ class InMemoryRuntimeStateStore:
     def __init__(self, embedder: Any = None) -> None:
         self._members: dict[tuple[str, str], dict[str, Any]] = {}
         self._persona_members: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._assistant_aliases: dict[tuple[str, str], dict[str, Any]] = {}
         self._knowledge: dict[int, dict[str, Any]] = {}
         self._knowledge_id = 1
         self._lock = threading.Lock()
@@ -284,6 +297,49 @@ class InMemoryRuntimeStateStore:
                     entry["character_id"] = safe_character_id
         return migrated
 
+    def save_assistant_alias(
+        self,
+        *,
+        character_id: object,
+        user_id: object,
+        assistant_alias: object,
+    ) -> dict[str, Any]:
+        safe_character_id, safe_user_id = _normalize_assistant_alias_key(character_id, user_id)
+        cleaned_alias = _normalize_string(assistant_alias)
+        now = _now()
+        key = (safe_character_id, safe_user_id)
+        with self._lock:
+            existing = dict(self._assistant_aliases.get(key, {}))
+            if not cleaned_alias:
+                self._assistant_aliases.pop(key, None)
+                return {
+                    "character_id": safe_character_id,
+                    "user_id": safe_user_id,
+                    "assistant_alias": "",
+                    "created_at": int(existing.get("created_at") or 0),
+                    "updated_at": now,
+                }
+            payload = {
+                "character_id": safe_character_id,
+                "user_id": safe_user_id,
+                "assistant_alias": cleaned_alias,
+                "created_at": int(existing.get("created_at") or now),
+                "updated_at": now,
+            }
+            self._assistant_aliases[key] = payload
+            return dict(payload)
+
+    def get_assistant_alias(
+        self,
+        *,
+        character_id: object,
+        user_id: object,
+    ) -> dict[str, Any] | None:
+        safe_character_id, safe_user_id = _normalize_assistant_alias_key(character_id, user_id)
+        with self._lock:
+            record = self._assistant_aliases.get((safe_character_id, safe_user_id))
+            return dict(record) if record is not None else None
+
     def record_member_seen(
         self,
         *,
@@ -320,7 +376,12 @@ class InMemoryRuntimeStateStore:
                 "updated_at": now,
             }
             self._members[key] = member
-            return _merge_member_payload(member, character_id=self._default_character_id)
+            alias_record = self._assistant_aliases.get((self._default_character_id, safe_user_id))
+            return _merge_member_payload(
+                member,
+                character_id=self._default_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def save_member(self, payload: dict[str, Any]) -> dict[str, Any]:
         safe_group_id, safe_user_id = _normalize_member(payload.get("group_id"), payload.get("user_id"))
@@ -374,7 +435,13 @@ class InMemoryRuntimeStateStore:
                     "updated_at": now,
                 }
                 self._persona_members[persona_key] = persona
-                return _merge_member_payload(member, persona, character_id=safe_character_id)
+                alias_record = self._assistant_aliases.get((safe_character_id, safe_user_id))
+                return _merge_member_payload(
+                    member,
+                    persona,
+                    character_id=safe_character_id,
+                    assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+                )
             member["profile_summary"] = _normalize_string(payload.get("profile_summary", member.get("profile_summary")))
             member["affinity_score"] = _coerce_affinity(payload.get("affinity_score", member.get("affinity_score")))
             member["notes_count"] = int(payload.get("notes_count", member.get("notes_count") or 0) or 0)
@@ -382,7 +449,7 @@ class InMemoryRuntimeStateStore:
                 payload.get("last_addressed_at", member.get("last_addressed_at") or 0) or 0
             )
             self._members[key] = member
-            return _merge_member_payload(member, character_id="")
+            return _merge_member_payload(member, character_id="", assistant_alias="")
 
     def mark_member_membership(
         self,
@@ -466,7 +533,13 @@ class InMemoryRuntimeStateStore:
                     }
                 )
                 self._persona_members[persona_key] = persona_existing
-                return _merge_member_payload(member, persona_existing, character_id=safe_character_id)
+                alias_record = self._assistant_aliases.get((safe_character_id, safe_user_id))
+                return _merge_member_payload(
+                    member,
+                    persona_existing,
+                    character_id=safe_character_id,
+                    assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+                )
             member["last_addressed_at"] = now
             member["updated_at"] = now
             self._members[key] = member
@@ -509,7 +582,13 @@ class InMemoryRuntimeStateStore:
                     }
                 )
                 self._persona_members[persona_key] = persona_existing
-                return _merge_member_payload(member, persona_existing, character_id=safe_character_id)
+                alias_record = self._assistant_aliases.get((safe_character_id, safe_user_id))
+                return _merge_member_payload(
+                    member,
+                    persona_existing,
+                    character_id=safe_character_id,
+                    assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+                )
             member["affinity_score"] = _coerce_affinity(float(member.get("affinity_score") or 0.0) + float(delta or 0.0))
             member["updated_at"] = now
             self._members[key] = member
@@ -531,7 +610,13 @@ class InMemoryRuntimeStateStore:
             persona = None
             if safe_character_id:
                 persona = self._persona_members.get((safe_character_id, safe_group_id, safe_user_id))
-            return _merge_member_payload(dict(member), dict(persona) if persona is not None else None, character_id=safe_character_id)
+            alias_record = self._assistant_aliases.get((safe_character_id, safe_user_id)) if safe_character_id else None
+            return _merge_member_payload(
+                dict(member),
+                dict(persona) if persona is not None else None,
+                character_id=safe_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def reset_member_persona(
         self,
@@ -549,7 +634,13 @@ class InMemoryRuntimeStateStore:
             if member is None:
                 return None
             self._persona_members.pop((safe_character_id, safe_group_id, safe_user_id), None)
-            return _merge_member_payload(dict(member), None, character_id=safe_character_id)
+            alias_record = self._assistant_aliases.get((safe_character_id, safe_user_id))
+            return _merge_member_payload(
+                dict(member),
+                None,
+                character_id=safe_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def list_members(self, *, limit: int = 120, character_id: object = "") -> list[dict[str, Any]]:
         safe_character_id = _normalize_character_id(character_id)
@@ -560,7 +651,18 @@ class InMemoryRuntimeStateStore:
                 if safe_character_id:
                     persona = self._persona_members.get((safe_character_id, key[0], key[1]))
                 members.append(
-                    _merge_member_payload(dict(item), dict(persona) if persona is not None else None, character_id=safe_character_id)
+                    _merge_member_payload(
+                        dict(item),
+                        dict(persona) if persona is not None else None,
+                        character_id=safe_character_id,
+                        assistant_alias=str(
+                            (
+                                self._assistant_aliases.get((safe_character_id, str(item.get("user_id", "") or "")))
+                                or {}
+                            ).get("assistant_alias", "")
+                            or ""
+                        ),
+                    )
                 )
         members.sort(
             key=lambda item: (
@@ -971,6 +1073,62 @@ class SqliteRuntimeStateStore:
             finally:
                 connection.close()
 
+    def save_assistant_alias(
+        self,
+        *,
+        character_id: object,
+        user_id: object,
+        assistant_alias: object,
+    ) -> dict[str, Any]:
+        safe_character_id, safe_user_id = _normalize_assistant_alias_key(character_id, user_id)
+        cleaned_alias = _normalize_string(assistant_alias)
+        now = _now()
+        with self._lock, self._session() as connection:
+            existing = self._fetch_assistant_alias(connection, safe_character_id, safe_user_id) or {}
+            if not cleaned_alias:
+                connection.execute(
+                    """
+                    DELETE FROM assistant_aliases
+                    WHERE character_id = ? AND user_id = ?
+                    """,
+                    (safe_character_id, safe_user_id),
+                )
+                return {
+                    "character_id": safe_character_id,
+                    "user_id": safe_user_id,
+                    "assistant_alias": "",
+                    "created_at": int(existing.get("created_at") or 0),
+                    "updated_at": now,
+                }
+            connection.execute(
+                """
+                INSERT INTO assistant_aliases (
+                    character_id, user_id, assistant_alias, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(character_id, user_id) DO UPDATE SET
+                    assistant_alias = excluded.assistant_alias,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    safe_character_id,
+                    safe_user_id,
+                    cleaned_alias,
+                    int(existing.get("created_at") or now),
+                    now,
+                ),
+            )
+            return self._fetch_assistant_alias(connection, safe_character_id, safe_user_id) or {}
+
+    def get_assistant_alias(
+        self,
+        *,
+        character_id: object,
+        user_id: object,
+    ) -> dict[str, Any] | None:
+        safe_character_id, safe_user_id = _normalize_assistant_alias_key(character_id, user_id)
+        with self._read_session() as connection:
+            return self._fetch_assistant_alias(connection, safe_character_id, safe_user_id)
+
     def record_member_seen(
         self,
         *,
@@ -1021,7 +1179,17 @@ class SqliteRuntimeStateStore:
                     now,
                 ),
             )
-            return self._fetch_member(connection, safe_group_id, safe_user_id) or {}
+            shared = self._fetch_member(connection, safe_group_id, safe_user_id)
+            if shared is None:
+                return {}
+            alias_record = None
+            if self._default_character_id:
+                alias_record = self._fetch_assistant_alias(connection, self._default_character_id, safe_user_id)
+            return _merge_member_payload(
+                shared,
+                character_id=self._default_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def save_member(self, payload: dict[str, Any]) -> dict[str, Any]:
         safe_group_id, safe_user_id = _normalize_member(payload.get("group_id"), payload.get("user_id"))
@@ -1105,7 +1273,13 @@ class SqliteRuntimeStateStore:
             persona = None
             if safe_character_id:
                 persona = self._fetch_member_persona(connection, safe_character_id, safe_group_id, safe_user_id)
-            return _merge_member_payload(shared, persona, character_id=safe_character_id)
+            alias_record = self._fetch_assistant_alias(connection, safe_character_id, safe_user_id) if safe_character_id else None
+            return _merge_member_payload(
+                shared,
+                persona,
+                character_id=safe_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def reset_member_persona(
         self,
@@ -1129,7 +1303,13 @@ class SqliteRuntimeStateStore:
                 """,
                 (safe_character_id, safe_group_id, safe_user_id),
             )
-            return _merge_member_payload(shared, None, character_id=safe_character_id)
+            alias_record = self._fetch_assistant_alias(connection, safe_character_id, safe_user_id)
+            return _merge_member_payload(
+                shared,
+                None,
+                character_id=safe_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def mark_member_membership(
         self,
@@ -1255,7 +1435,13 @@ class SqliteRuntimeStateStore:
             persona = None
             if safe_character_id:
                 persona = self._fetch_member_persona(connection, safe_character_id, safe_group_id, safe_user_id)
-            return _merge_member_payload(shared, persona, character_id=safe_character_id)
+            alias_record = self._fetch_assistant_alias(connection, safe_character_id, safe_user_id) if safe_character_id else None
+            return _merge_member_payload(
+                shared,
+                persona,
+                character_id=safe_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def adjust_member_affinity(
         self,
@@ -1313,7 +1499,13 @@ class SqliteRuntimeStateStore:
             persona = None
             if safe_character_id:
                 persona = self._fetch_member_persona(connection, safe_character_id, safe_group_id, safe_user_id)
-            return _merge_member_payload(shared, persona, character_id=safe_character_id)
+            alias_record = self._fetch_assistant_alias(connection, safe_character_id, safe_user_id) if safe_character_id else None
+            return _merge_member_payload(
+                shared,
+                persona,
+                character_id=safe_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def get_member(
         self,
@@ -1331,7 +1523,13 @@ class SqliteRuntimeStateStore:
             persona = None
             if safe_character_id:
                 persona = self._fetch_member_persona(connection, safe_character_id, safe_group_id, safe_user_id)
-            return _merge_member_payload(shared, persona, character_id=safe_character_id)
+            alias_record = self._fetch_assistant_alias(connection, safe_character_id, safe_user_id) if safe_character_id else None
+            return _merge_member_payload(
+                shared,
+                persona,
+                character_id=safe_character_id,
+                assistant_alias=str((alias_record or {}).get("assistant_alias", "") or ""),
+            )
 
     def list_members(self, *, limit: int = 120, character_id: object = "") -> list[dict[str, Any]]:
         safe_character_id = _normalize_character_id(character_id)
@@ -1364,11 +1562,33 @@ class SqliteRuntimeStateStore:
                     else []
                 )
             }
+            alias_rows = {
+                _normalize_string(row["user_id"]): dict(row)
+                for row in (
+                    connection.execute(
+                        """
+                        SELECT *
+                        FROM assistant_aliases
+                        WHERE character_id = ?
+                        """,
+                        (safe_character_id,),
+                    ).fetchall()
+                    if safe_character_id
+                    else []
+                )
+            }
         return [
             _merge_member_payload(
                 _row_to_member(row),
                 persona_rows.get((_normalize_string(row["group_id"]), _normalize_string(row["user_id"]))),
                 character_id=safe_character_id,
+                assistant_alias=str(
+                    (
+                        alias_rows.get(_normalize_string(row["user_id"]))
+                        or {}
+                    ).get("assistant_alias", "")
+                    or ""
+                ),
             )
             for row in rows
         ]
@@ -1725,6 +1945,22 @@ class SqliteRuntimeStateStore:
         ).fetchone()
         return _row_to_member_persona(row) if row is not None else None
 
+    def _fetch_assistant_alias(
+        self,
+        connection: sqlite3.Connection,
+        character_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM assistant_aliases
+            WHERE character_id = ? AND user_id = ?
+            """,
+            (character_id, user_id),
+        ).fetchone()
+        return _row_to_assistant_alias(row) if row is not None else None
+
     def _fetch_knowledge(self, connection: sqlite3.Connection, entry_id: int) -> dict[str, Any] | None:
         row = connection.execute(
             """
@@ -1806,6 +2042,16 @@ def _row_to_member_persona(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "affinity_score": _coerce_affinity(row["affinity_score"]),
         "notes_count": int(row["notes_count"] or 0),
         "last_addressed_at": int(row["last_addressed_at"] or 0),
+        "created_at": int(row["created_at"] or 0),
+        "updated_at": int(row["updated_at"] or 0),
+    }
+
+
+def _row_to_assistant_alias(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "character_id": _normalize_character_id(row["character_id"] if "character_id" in row.keys() else ""),
+        "user_id": _normalize_string(row["user_id"]),
+        "assistant_alias": _normalize_string(row["assistant_alias"]),
         "created_at": int(row["created_at"] or 0),
         "updated_at": int(row["updated_at"] or 0),
     }

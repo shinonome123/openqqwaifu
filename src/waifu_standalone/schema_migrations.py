@@ -127,8 +127,30 @@ def _migration_001_baseline(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_002_assistant_aliases(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assistant_aliases (
+            character_id TEXT NOT NULL DEFAULT '',
+            user_id TEXT NOT NULL,
+            assistant_alias TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (character_id, user_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_assistant_aliases_updated
+        ON assistant_aliases (character_id, updated_at DESC)
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration(version=1, description="baseline schema", apply=_migration_001_baseline),
+    Migration(version=2, description="assistant alias state", apply=_migration_002_assistant_aliases),
 ]
 
 

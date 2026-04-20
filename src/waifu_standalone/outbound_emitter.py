@@ -72,6 +72,7 @@ class OutboundEmitter:
             emotion=emotion or EmotionState(),
             reply_text=message.text,
             search_used=search_used,
+            character_id=resolved_character_id,
         )
         self._service.gate.refresh_follow_up_window(event)
         return message
@@ -124,6 +125,7 @@ class OutboundEmitter:
             emotion=emotion or EmotionState(),
             reply_text=message.text,
             search_used=search_used,
+            character_id=resolved_character_id,
         )
         self._service.gate.refresh_follow_up_window(event)
         return message

@@ -24,7 +24,11 @@ body {
   font-weight: 400;
   line-height: 1.55;
   color: var(--text);
-  background: var(--bg);
+  background:
+    radial-gradient(circle at 18% 16%, rgba(255, 92, 92, 0.12), transparent 28%),
+    radial-gradient(circle at 82% 14%, rgba(59, 130, 246, 0.08), transparent 24%),
+    radial-gradient(circle at 50% 100%, rgba(20, 184, 166, 0.08), transparent 30%),
+    var(--bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -196,12 +200,12 @@ input[type="search"],
 textarea,
 select {
   width: 100%;
-  padding: 8px 12px;
-  background: var(--bg-elevated);
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
   color: var(--text-strong);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font-size: 13.5px;
+  font-size: 13px;
   line-height: 1.5;
   transition: border-color var(--duration-fast) var(--ease-out),
     box-shadow var(--duration-fast) var(--ease-out),
@@ -228,7 +232,8 @@ input[type="search"]:focus,
 textarea:focus,
 select:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-subtle);
+  background: color-mix(in srgb, var(--bg-elevated) 98%, transparent);
+  box-shadow: var(--focus-ring);
 }
 
 textarea {

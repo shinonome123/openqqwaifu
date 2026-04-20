@@ -149,10 +149,13 @@ class PersonaGuard:
         changed = False
         for raw_line in list(session.history):
             speaker, content = self._service._split_history_line(raw_line)
-            speaker_is_assistant = speaker == "assistant" or self.mentions_any_name(speaker, other_names)
+            speaker_is_internal_assistant = speaker == "assistant"
+            speaker_mentions_other_name = (
+                not speaker_is_internal_assistant and self.mentions_any_name(speaker, other_names)
+            )
+            speaker_is_assistant = speaker_is_internal_assistant or speaker_mentions_other_name
             if speaker_is_assistant and (
-                self.mentions_any_name(speaker, other_names)
-                or self.mentions_any_name(content, other_names)
+                speaker_mentions_other_name or self.mentions_any_name(content, other_names)
             ):
                 changed = True
                 continue

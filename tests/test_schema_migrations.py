@@ -27,18 +27,19 @@ class SchemaMigrationTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     ).fetchall()
                 }
-                self.assertEqual(version, 1)
+                self.assertEqual(version, 2)
                 self.assertIn("schema_version", tables)
                 self.assertIn("members", tables)
                 self.assertIn("member_persona_state", tables)
+                self.assertIn("assistant_aliases", tables)
                 self.assertIn("knowledge_entries", tables)
                 row = conn.execute(
-                    "SELECT version, description FROM schema_version ORDER BY version"
+                    "SELECT version, description FROM schema_version ORDER BY version DESC"
                 ).fetchone()
                 self.assertIsNotNone(row)
                 assert row is not None
-                self.assertEqual(row[0], 1)
-                self.assertEqual(row[1], "baseline schema")
+                self.assertEqual(row[0], 2)
+                self.assertEqual(row[1], "assistant alias state")
             finally:
                 conn.close()
 
@@ -50,11 +51,11 @@ class SchemaMigrationTests(unittest.TestCase):
                 first = run_migrations(conn)
                 second = run_migrations(conn)
                 version_rows = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()
-                self.assertEqual(first, 1)
-                self.assertEqual(second, 1)
+                self.assertEqual(first, 2)
+                self.assertEqual(second, 2)
                 self.assertIsNotNone(version_rows)
                 assert version_rows is not None
-                self.assertEqual(version_rows[0], 1)
+                self.assertEqual(version_rows[0], 2)
             finally:
                 conn.close()
 
@@ -141,8 +142,8 @@ class SchemaMigrationTests(unittest.TestCase):
 
                 version = run_migrations(conn)
 
-                self.assertEqual(version, 1)
-                self.assertEqual(current_version(conn), 1)
+                self.assertEqual(version, 2)
+                self.assertEqual(current_version(conn), 2)
                 member_columns = {
                     row[1]
                     for row in conn.execute("PRAGMA table_info(members)").fetchall()
@@ -156,6 +157,13 @@ class SchemaMigrationTests(unittest.TestCase):
                 self.assertIn("last_sync_at", member_columns)
                 self.assertIn("character_id", knowledge_columns)
                 self.assertIn("embedding_json", knowledge_columns)
+                alias_tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'assistant_aliases'"
+                    ).fetchall()
+                }
+                self.assertIn("assistant_aliases", alias_tables)
             finally:
                 conn.close()
 

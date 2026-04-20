@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -66,6 +67,46 @@ class SearchDecider:
         "score",
         "stock",
     )
+    _RECENT_HINTS = (
+        "最近",
+        "刚",
+        "刚刚",
+        "近日",
+        "这两天",
+        "这几天",
+        "刚被",
+        "今天",
+        "今日",
+        "昨天",
+        "前天",
+    )
+    _NEWS_HINTS = (
+        "罚款",
+        "被罚",
+        "处罚",
+        "罚单",
+        "通报",
+        "公告",
+        "监管",
+        "垄断",
+        "反垄断",
+        "立案",
+        "约谈",
+        "查处",
+        "回应",
+    )
+    _QUESTION_HINTS = (
+        "?",
+        "？",
+        "怎么回事",
+        "什么事",
+        "啥事",
+        "怎么了",
+        "是真的吗",
+        "是真的么",
+        "是否属实",
+    )
+    _DATE_PATTERN = re.compile(r"(20\d{2}年?|(?:1[0-2]|0?[1-9])月(?:[12]\d|3[01]|0?[1-9])日)")
     _CACHE_MAX_SIZE = 128
     _CACHE_TTL_SECONDS = 300.0
     _CACHE_FAILURE_TTL_SECONDS = 60.0
@@ -91,7 +132,15 @@ class SearchDecider:
         normalized = str(text or "").strip().lower()
         if not normalized:
             return False
-        return any(keyword in normalized for keyword in self._KEYWORDS)
+        if any(keyword in normalized for keyword in self._KEYWORDS):
+            return True
+        if not any(keyword in normalized for keyword in self._NEWS_HINTS):
+            return False
+        if any(hint in normalized for hint in self._RECENT_HINTS):
+            return True
+        if self._DATE_PATTERN.search(normalized):
+            return True
+        return any(hint in normalized for hint in self._QUESTION_HINTS)
 
     def build_context(self, event: InboundEvent) -> SearchContext:
         if not self.should_search(event):

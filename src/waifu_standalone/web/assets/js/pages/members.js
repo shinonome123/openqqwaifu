@@ -5,6 +5,7 @@ import { toastOk, toastError, confirmDialog } from "../ui.js";
 
 const ONBOARDING_OPTIONS = [
   { value: "new", labelKey: "user.directory.status.new" },
+  { value: "asked_once", labelKey: "user.directory.status.askedOnce" },
   { value: "pending_name", labelKey: "user.directory.status.pending" },
   { value: "ready", labelKey: "user.directory.status.ready" },
 ];
@@ -167,7 +168,7 @@ export function mount(root) {
               el("div", { text: displayName }),
               el("div", { class: "session-id", text: `${member.group_id || "person"}:${member.user_id}` }),
             ]),
-            el("td", {}, [chip({ label: member.onboarding_status || "new", variant: member.preferred_name ? "ok" : "outline" })]),
+            el("td", {}, [chip({ label: onboardingLabel(member.onboarding_status), variant: member.preferred_name ? "ok" : "outline" })]),
             el("td", {}, [chip({ label: member.membership_status || "active", variant: (member.membership_status || "active") === "active" ? "ok" : "outline" })]),
             el("td", { class: "session-meta", text: `${Number(member.affinity_score || 0).toFixed(2)} / ${bondStage(member.affinity_score)}` }),
             el("td", { class: "session-meta", text: formatDateTime(member.last_seen_at) }),
@@ -282,6 +283,14 @@ export function mount(root) {
           }),
         }),
         fieldRow({
+          label: t("user.directory.assistantAlias"),
+          hint: t("user.directory.assistantAliasHint"),
+          control: textInput({
+            value: memberDraft.assistant_alias || "",
+            disabled: true,
+          }),
+        }),
+        fieldRow({
           label: t("user.directory.status"),
           control: select({
             value: memberDraft.onboarding_status || "new",
@@ -374,4 +383,10 @@ function bondStage(score) {
   if (value < 0.55) return "familiar";
   if (value < 0.8) return "close";
   return "devoted";
+}
+
+function onboardingLabel(status) {
+  const value = String(status || "new");
+  const option = ONBOARDING_OPTIONS.find((item) => item.value === value);
+  return option ? t(option.labelKey) : value;
 }

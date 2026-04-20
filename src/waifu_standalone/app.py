@@ -195,22 +195,32 @@ class WaifuService:
         current_character = self._active_character_id()
         text = event.command_text(self.config.bot_account_id)
         live_runtime = self._requires_live_llm()
+        latest_message = self._latest_message_text(event, text)
+        naming_input = self.onboarding.looks_like_naming_input(latest_message)
+        search_link_request = self.gate.looks_like_search_link_request(latest_message)
+        explicit_skill_request = self.dispatcher.resolve_explicit_skill_request(latest_message)
         self._record_inbound(event, text)
         if not text and event.image_count == 0:
             return None
         if text and any(text.startswith(prefix) for prefix in self.config.ignore_prefixes):
-            if self.onboarding.looks_like_address_command(text):
+            if self.onboarding.looks_like_naming_input(text):
                 pass
             else:
                 return None
         if not self.gate.should_reply(event):
             return None
-        if live_runtime and not self.generator.llm_ready:
+        if (
+            live_runtime
+            and not self.generator.llm_ready
+            and not naming_input
+            and not search_link_request
+            and explicit_skill_request is None
+        ):
             return None
 
         await self.onboarding.aremember_directory_member(event)
         session = await self.memory.asave_user_event(event, character_id=current_character)
-        assistant_name = self.generator.resolve_assistant_name(event.launcher_type, session)
+        assistant_name = self._resolve_assistant_name(event, session, character_id=current_character)
         session = await self.persona.asanitize_session_state(session, assistant_name=assistant_name)
         await self.persona.asanitize_member_state(
             group_id=event.launcher_id if event.launcher_type == "group" else "",
@@ -218,7 +228,6 @@ class WaifuService:
             character_id=current_character,
         )
         address = await self._resolve_address_async(event, session)
-        latest_message = self._latest_message_text(event, text)
         inbound_behavior = self.event_engine.capture_inbound(
             event,
             text=latest_message,
@@ -249,7 +258,32 @@ class WaifuService:
                 assistant_name=assistant_name,
             )
 
+        if search_link_request:
+            return await self.dispatcher.ahandle_search_link_request(
+                event,
+                session,
+                address=address,
+                assistant_name=assistant_name,
+                search_payload=self.gate.recent_search_payload_for_message(
+                    session, latest_message
+                ),
+            )
+
         active_skills = self.skills.match(latest_message)
+        if explicit_skill_request is not None:
+            skill, raw_args = explicit_skill_request
+            if all(existing.skill_id != skill.skill_id for existing in active_skills):
+                active_skills = [skill, *active_skills][: max(1, self.config.max_active_skills)]
+            await self._store_active_skills_async(session, active_skills)
+            return await self.dispatcher.adispatch_explicit_skill(
+                event,
+                session,
+                skill=skill,
+                raw_args=raw_args,
+                address=address,
+                assistant_name=assistant_name,
+                active_skills=active_skills,
+            )
         await self._store_active_skills_async(session, active_skills)
 
         dispatch = self.skills.resolve_dispatch(latest_message)
@@ -348,6 +382,14 @@ class WaifuService:
         )
         if live_runtime and not str(reply_text or "").strip():
             return None
+        reply_text = await self.onboarding.amaybe_append_soft_ask(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            reply_text=reply_text,
+            character_id=current_character,
+        )
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -718,11 +760,12 @@ class WaifuService:
             active_skill_names = self._active_skill_names(session)
             last_search_query = self._last_search_query(session)
             result.append(
-                    {
-                        "character_id": current_character,
-                        "launcher_id": session.launcher_id,
-                        "launcher_type": session.launcher_type,
+                {
+                    "character_id": current_character,
+                    "launcher_id": session.launcher_id,
+                    "launcher_type": session.launcher_type,
                     "preferred_name": self._session_preferred_name(session),
+                    "assistant_alias": self._session_assistant_alias(session),
                     "assistant_name": card.assistant_name,
                     "history_count": len(history),
                     "message_count": len(history),
@@ -748,6 +791,7 @@ class WaifuService:
             "launcher_id": session.launcher_id,
             "launcher_type": session.launcher_type,
             "preferred_name": self._session_preferred_name(session),
+            "assistant_alias": self._session_assistant_alias(session),
             "history": list(session.history),
             "metadata": clean_metadata,
             "memory_graph": graph,
@@ -1181,13 +1225,68 @@ class WaifuService:
             if preferred_name:
                 return preferred_name
         if event.launcher_type == "person":
-            user_name = str(self.cards.load(event.launcher_type, session).user_name or "").strip()
+            identity_metadata: dict[str, object] = {}
+            waifu_root = session.metadata.get("waifu_root")
+            if isinstance(waifu_root, str) and waifu_root.strip():
+                identity_metadata["waifu_root"] = waifu_root
+            identity_session = SessionMemory(
+                launcher_id=session.launcher_id,
+                launcher_type=session.launcher_type,
+                character_id=str(session.character_id or self._active_character_id()).strip(),
+                metadata=identity_metadata,
+            )
+            user_name = str(self.cards.load(event.launcher_type, identity_session).user_name or "").strip()
             if user_name:
                 return user_name
         return event.sender_name or "你"
 
     async def _resolve_address_async(self, event: InboundEvent, session: SessionMemory) -> str:
         return await asyncio.to_thread(self._resolve_address, event, session)
+
+    def _assistant_alias_for_user(self, user_id: str, *, character_id: str = "") -> str:
+        getter = getattr(self.state_store, "get_assistant_alias", None)
+        if not callable(getter):
+            return ""
+        safe_user_id = str(user_id or "").strip()
+        safe_character_id = str(character_id or self._active_character_id()).strip()
+        if not (safe_user_id and safe_character_id):
+            return ""
+        try:
+            record = getter(character_id=safe_character_id, user_id=safe_user_id)
+        except ValueError:
+            return ""
+        return str((record or {}).get("assistant_alias", "") or "").strip()
+
+    def _resolve_assistant_name(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        character_id: str = "",
+    ) -> str:
+        base_name = self.generator.resolve_assistant_name(event.launcher_type, session)
+        alias = self._assistant_alias_for_user(
+            event.sender_id,
+            character_id=str(character_id or session.character_id or self._active_character_id()).strip(),
+        )
+        return alias or base_name
+
+    def _session_assistant_alias(self, session: SessionMemory) -> str:
+        character_id = str(session.character_id or self._active_character_id()).strip()
+        if not character_id:
+            return ""
+        if session.launcher_type == "person":
+            return self._assistant_alias_for_user(session.launcher_id, character_id=character_id)
+        recent_behavior = self.get_behavior_events(
+            limit=1,
+            launcher_type=session.launcher_type,
+            launcher_id=session.launcher_id,
+            character_id=character_id,
+        )
+        sender_id = str(recent_behavior[0].get("sender_id", "") or "").strip() if recent_behavior else ""
+        if not sender_id:
+            return ""
+        return self._assistant_alias_for_user(sender_id, character_id=character_id)
 
     def _outbound_mode_label(self) -> str:
         if not self.config.qq_sidecar.outbound_base_url:
@@ -1575,5 +1674,12 @@ def _build_service(
         description="列出当前所有已启用的技能及其触发方式。",
         handler=service.dispatcher.run_skill_list_tool,
         async_handler=service.dispatcher.arun_skill_list_tool,
+    )
+    tools.register(
+        "summarize",
+        name="外部内容总结",
+        description="调用 summarize CLI 总结 URL、视频或本地文件。",
+        handler=service.dispatcher.run_summarize_tool,
+        async_handler=service.dispatcher.arun_summarize_tool,
     )
     return service, outbound
