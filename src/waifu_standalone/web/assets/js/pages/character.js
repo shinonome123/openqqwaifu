@@ -12,6 +12,7 @@ import {
   switchControl,
   chip,
   empty,
+  statCard,
 } from "../components.js";
 import { t, onLangChange } from "../i18n.js";
 import { toastOk, toastError, toastInfo, openModal } from "../ui.js";
@@ -358,6 +359,7 @@ export function mount(root) {
       container.appendChild(empty({ title: t("common.loading") }));
       return;
     }
+    container.appendChild(renderSummaryStrip());
     container.appendChild(renderCarousel());
     container.appendChild(renderWorkbench());
   }
@@ -446,6 +448,35 @@ export function mount(root) {
         disabled: items.length <= 1,
         onClick: () => moveCursor(1),
         title: t("character.carousel.next"),
+      }),
+    ]);
+  }
+
+  function renderSummaryStrip() {
+    const availableCards = cards();
+    const activeCard = availableCards.find((item) => item.character === bundle?.current_character) || null;
+    const portraitReadyCount = availableCards.filter((item) => !!item?.portrait?.available).length;
+    return el("div", { class: "kpi-row character-summary-row" }, [
+      statCard({
+        label: t("character.summary.personas"),
+        value: String(availableCards.length),
+        meta: t("character.summary.portraitsMeta", { count: portraitReadyCount }),
+      }),
+      statCard({
+        label: t("advanced.fact.currentCharacter"),
+        value: bundle?.current_character || "-",
+        meta: activeCard?.assistant_name || t("common.none"),
+      }),
+      statCard({
+        label: t("character.portrait.title"),
+        value: isImageProviderReady() ? t("common.enabled") : t("common.disabled"),
+        meta: ai?.image_generation?.model || t("character.summary.imageOffline"),
+        metaVariant: isImageProviderReady() ? "up" : "down",
+      }),
+      statCard({
+        label: t("character.editor.title"),
+        value: editor?.character || "-",
+        meta: editor?.shared?.assistant_name || t("common.none"),
       }),
     ]);
   }

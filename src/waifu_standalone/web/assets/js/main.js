@@ -291,6 +291,16 @@ function mountConsole(currentUser) {
   const router = createRouter(visibleRoutes, defaultRoute);
   let healthTimer = null;
   let currentTeardown = null;
+  let saveObserver = null;
+
+  function syncSaveButton() {
+    const saveBtn = document.getElementById("save-config");
+    if (!saveBtn) return;
+    const canSaveConfig = currentUser?.role === "admin";
+    const active = outlet.querySelector(".page-actions .btn.is-primary");
+    saveBtn.hidden = !canSaveConfig || !active;
+    saveBtn.disabled = !active;
+  }
 
   buildNav(visibleRoutes, (id) => router.navigate(id), router.current());
   applyI18nTo(document.body);
@@ -318,6 +328,7 @@ function mountConsole(currentUser) {
         toastError(err?.message || String(err));
       }
     }
+    syncSaveButton();
   });
 
   router.start();
@@ -346,14 +357,18 @@ function mountConsole(currentUser) {
     saveBtn.hidden = !canSaveConfig;
     if (canSaveConfig) {
       saveBtn.addEventListener("click", () => {
-        const active = document.querySelector(".page-actions .btn.is-primary");
+        const active = outlet.querySelector(".page-actions .btn.is-primary");
         if (active && active !== saveBtn) active.click();
       });
+      saveObserver = new MutationObserver(() => syncSaveButton());
+      saveObserver.observe(outlet, { childList: true, subtree: true, attributes: true });
+      syncSaveButton();
     }
   }
 
   return () => {
     if (healthTimer) window.clearInterval(healthTimer);
+    if (saveObserver) saveObserver.disconnect();
   };
 }
 
@@ -444,20 +459,22 @@ function renderAuthScreen(state) {
   );
 
   const card = el("section", { class: "auth-card" }, [
-    el("div", { class: "auth-card-head" }, [
-      el("div", { class: "auth-card-mark" }, [
-        el("img", {
-          class: "auth-card-logo",
-          src: "/assets/img/brand-logo.png",
-          alt: "",
-        }),
+    el("div", { class: "auth-brand-row" }, [
+      el("div", { class: "auth-brand-lockup" }, [
+        el("div", { class: "auth-card-mark" }, [
+          el("img", {
+            class: "auth-card-logo",
+            src: "/assets/img/brand-logo.png",
+            alt: "",
+          }),
+        ]),
+        el("div", { class: "auth-brand-copy" }, [
+          el("div", { class: "auth-brand-name", text: t("brand.name") }),
+        ]),
       ]),
+      el("div", { class: "auth-brand-badge", text: t("auth.kicker") }),
     ]),
     el("div", { class: "auth-card-intro" }, [
-      el("div", { class: "auth-card-meta" }, [
-        el("div", { class: "auth-card-kicker", text: t("auth.kicker") }),
-        el("div", { class: "auth-card-brand", text: t("brand.name") }),
-      ]),
       el("h1", {
         class: "auth-card-title",
         text: requiresSetup ? t("auth.setupTitle") : t("auth.loginTitle"),
@@ -476,10 +493,17 @@ function renderAuthScreen(state) {
 
   app.appendChild(
     el("div", { class: "auth-stage" }, [
-      el("div", { class: "auth-bg-tile", "aria-hidden": "true" }),
-      el("div", { class: "auth-orb auth-orb-a", "aria-hidden": "true" }),
-      el("div", { class: "auth-orb auth-orb-b", "aria-hidden": "true" }),
-      el("div", { class: "auth-orb auth-orb-c", "aria-hidden": "true" }),
+      el("div", { class: "auth-grid", "aria-hidden": "true" }),
+      el("div", { class: "auth-ambient auth-ambient-a", "aria-hidden": "true" }),
+      el("div", { class: "auth-ambient auth-ambient-b", "aria-hidden": "true" }),
+      el("div", { class: "auth-ambient auth-ambient-c", "aria-hidden": "true" }),
+      el("div", { class: "auth-watermark", "aria-hidden": "true" }, [
+        el("img", {
+          class: "auth-watermark-logo",
+          src: "/assets/img/brand-logo.png",
+          alt: "",
+        }),
+      ]),
       card,
     ]),
   );

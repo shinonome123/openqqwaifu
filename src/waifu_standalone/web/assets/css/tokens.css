@@ -7,10 +7,10 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo,
     Monaco, Consolas, monospace;
 
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
   --radius-full: 9999px;
   --radius: var(--radius-md);
 
@@ -22,9 +22,9 @@
   --duration-normal: 180ms;
   --duration-slow: 300ms;
 
-  --sidebar-width: 248px;
-  --topbar-height: 56px;
-  --content-max-width: 1480px;
+  --sidebar-width: 236px;
+  --topbar-height: 64px;
+  --content-max-width: 1120px;
 
   --z-sidebar: 20;
   --z-topbar: 30;
@@ -38,20 +38,20 @@
 
   --bg: #0e1015;
   --bg-accent: #13151b;
-  --bg-elevated: #191c24;
-  --bg-hover: #1f2330;
-  --bg-muted: #1f2330;
+  --bg-elevated: #161920;
+  --bg-hover: #1b1f28;
+  --bg-muted: #1a1e27;
 
   --text: #d4d4d8;
   --text-strong: #f4f4f5;
   --muted: #838387;
   --muted-strong: #a1a1a6;
 
-  --card: #161920;
+  --card: rgba(22, 25, 32, 0.88);
   --card-foreground: #f0f0f2;
-  --card-highlight: rgba(255, 255, 255, 0.04);
+  --card-highlight: rgba(255, 255, 255, 0.045);
   --panel: #0e1015;
-  --panel-strong: #191c24;
+  --panel-strong: #13151b;
 
   --accent: #ff5c5c;
   --accent-hover: #ff7070;
@@ -71,20 +71,20 @@
   --info: #3b82f6;
   --info-subtle: rgba(59, 130, 246, 0.15);
 
-  --border: #1e2028;
-  --border-strong: #2e3040;
-  --border-hover: #3e4050;
-  --input: #1e2028;
+  --border: rgba(255, 255, 255, 0.075);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --border-hover: rgba(255, 255, 255, 0.18);
+  --input: rgba(255, 255, 255, 0.06);
   --ring: var(--accent);
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
 
   --grid-line: rgba(255, 255, 255, 0.03);
-  --chrome: rgba(14, 16, 21, 0.96);
+  --chrome: rgba(14, 16, 21, 0.82);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
-  --shadow-xl: 0 24px 48px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 12px 28px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 24px 48px rgba(0, 0, 0, 0.38);
+  --shadow-xl: 0 32px 72px rgba(0, 0, 0, 0.48);
 }
 
 [data-theme-mode="light"] {

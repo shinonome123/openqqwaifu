@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from dataclasses import replace
 from typing import Any
 
 from ..config import AppConfig
@@ -52,6 +53,13 @@ class Generator:
         return card.assistant_name or self.config.assistant_name
 
     @staticmethod
+    def _card_with_assistant_name(card: CharacterCard, assistant_name: str) -> CharacterCard:
+        resolved_name = str(assistant_name or "").strip()
+        if not resolved_name or resolved_name == card.assistant_name:
+            return card
+        return replace(card, assistant_name=resolved_name)
+
+    @staticmethod
     def _llm_user_key(event: InboundEvent, session: SessionMemory, *, purpose: str) -> str:
         parts = [
             str(purpose or "chat").strip() or "chat",
@@ -89,6 +97,7 @@ class Generator:
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
         address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         active_skills = active_skills or []
+        card = self._card_with_assistant_name(card, assistant_name)
         if self.llm_ready:
             prompt = self._build_analysis_query(
                 event,
@@ -147,6 +156,7 @@ class Generator:
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
         address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         active_skills = active_skills or []
+        card = self._card_with_assistant_name(card, assistant_name)
         if self.llm_ready:
             prompt = self._build_analysis_query(
                 event,
@@ -192,7 +202,8 @@ class Generator:
         allow_fallback: bool = True,
     ) -> str:
         card = card_override or self._cards.load(event.launcher_type, session)
-        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
         address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
         memory_hints = memory_hints or []
@@ -277,7 +288,8 @@ class Generator:
                 allow_fallback=allow_fallback,
             )
         card = card_override or self._cards.load(event.launcher_type, session)
-        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
         address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
         memory_hints = memory_hints or []
@@ -559,12 +571,14 @@ class Generator:
         assistant_name: str,
         stage: str,
         candidate_name: str = "",
+        intent_hint: str = "",
         address_override: str = "",
         card_override: CharacterCard | None = None,
         allow_fallback: bool = True,
     ) -> str:
         card = card_override or self._cards.load(event.launcher_type, session)
-        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
         base_address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
         if self.llm_ready:
@@ -577,6 +591,7 @@ class Generator:
                 latest_message=latest_message,
                 stage=stage,
                 candidate_name=candidate_name,
+                intent_hint=intent_hint,
             )
             try:
                 response = self._dify_client.invoke(
@@ -593,6 +608,7 @@ class Generator:
                 stage=stage,
                 address=base_address,
                 candidate_name=candidate_name,
+                intent_hint=intent_hint,
             )
         return ""
 
@@ -604,6 +620,7 @@ class Generator:
         assistant_name: str,
         stage: str,
         candidate_name: str = "",
+        intent_hint: str = "",
         address_override: str = "",
         card_override: CharacterCard | None = None,
         allow_fallback: bool = True,
@@ -616,12 +633,14 @@ class Generator:
                 assistant_name=assistant_name,
                 stage=stage,
                 candidate_name=candidate_name,
+                intent_hint=intent_hint,
                 address_override=address_override,
                 card_override=card_override,
                 allow_fallback=allow_fallback,
             )
         card = card_override or self._cards.load(event.launcher_type, session)
-        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
         base_address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
         if self.llm_ready:
@@ -634,6 +653,7 @@ class Generator:
                 latest_message=latest_message,
                 stage=stage,
                 candidate_name=candidate_name,
+                intent_hint=intent_hint,
             )
             try:
                 response = await self._ainvoke_client(
@@ -650,6 +670,7 @@ class Generator:
                 stage=stage,
                 address=base_address,
                 candidate_name=candidate_name,
+                intent_hint=intent_hint,
             )
         return ""
 
@@ -666,7 +687,8 @@ class Generator:
         if not self.llm_ready:
             return self._empty_preferred_name_hint()
         card = card_override or self._cards.load(event.launcher_type, session)
-        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
         address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         prompt = self._build_preferred_name_hint_query(
             event,
@@ -708,7 +730,8 @@ class Generator:
         if not self.llm_ready:
             return self._empty_preferred_name_hint()
         card = card_override or self._cards.load(event.launcher_type, session)
-        resolved_assistant_name = card.assistant_name or assistant_name or self.config.assistant_name
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
         address = str(address_override or "").strip() or self._resolve_address(event, session, card)
         prompt = self._build_preferred_name_hint_query(
             event,
@@ -822,6 +845,7 @@ class Generator:
         latest_message: str,
         stage: str,
         candidate_name: str,
+        intent_hint: str,
     ) -> str:
         conversation_view = self._conversation_excerpt(session.history, assistant_name=assistant_name)
         system_prompt = card.system_prompt(
@@ -850,10 +874,49 @@ class Generator:
                 [
                     f"对方刚刚明确告诉你，希望被称呼为：{candidate_name}",
                     f"当前显示昵称：{event.sender_name or address}",
-                    "请用一句自然中文、保持角色语气，确认你记住了这个称呼。",
-                    "可以轻微延续聊天，但不要复述规则，不要输出英文。",
+                    "请用一句自然中文、保持角色语气，明确确认：好的，我叫你这个名字。",
+                    "不要复述规则，不要输出英文，不要改成别的含义。",
                 ]
             )
+        elif stage == "soft_ask_name":
+            parts.extend(
+                [
+                    "你已经正常接住了对方这句话，现在只需要补一句很轻的尾句。",
+                    "请用一句自然中文、保持角色语气，表达：如果对方想换个称呼，可以直接告诉你“叫我 xx”。",
+                    "语气要轻，不要像流程表单，不要重复追问。",
+                ]
+            )
+        elif stage == "confirm_assistant_alias":
+            parts.extend(
+                [
+                    f"对方刚刚明确说，以后想叫你：{candidate_name}",
+                    "请用一句自然中文、保持角色语气，明确确认：好的，那就叫我这个名字。",
+                    "不要输出英文，不要解释规则。",
+                ]
+            )
+        elif stage == "reject_third_party_naming":
+            parts.extend(
+                [
+                    "对方正在替第三方决定称呼边界，这件事你不能接受。",
+                    "请用一句自然中文、保持角色语气，明确表达：你只能接受对方给自己定称呼，也只能接受别人亲自来给你定称呼，不能替别人决定怎么叫。",
+                    "拒绝要清楚，但不要生硬。",
+                ]
+            )
+        elif stage == "clarify_naming_intent":
+            if intent_hint == "assistant_alias":
+                parts.extend(
+                    [
+                        "对方是在问大家是否这样叫你，或者想确认能不能给你起称呼。",
+                        "请用一句自然中文、保持角色语气，说明：如果想给你起称呼，可以直接说“以后就叫你 xx”。",
+                    ]
+                )
+            else:
+                parts.extend(
+                    [
+                        "对方是在问你应该怎么称呼 ta，但还没有正式定义名字。",
+                        "请用一句自然中文、保持角色语气，引导 ta 直接说“叫我 xx”。",
+                    ]
+                )
         else:
             parts.extend(
                 [
@@ -1226,9 +1289,20 @@ class Generator:
         stage: str,
         address: str,
         candidate_name: str,
+        intent_hint: str,
     ) -> str:
         if stage == "confirm_name" and candidate_name:
-            return f"好呀，{candidate_name}，我记住你了，以后就这样叫你。"
+            return f"好的，我叫你{candidate_name}。"
+        if stage == "soft_ask_name":
+            return "如果你想让我换个叫法，直接告诉我“叫我 xx”就好。"
+        if stage == "confirm_assistant_alias" and candidate_name:
+            return f"好的，那就叫我{candidate_name}。"
+        if stage == "reject_third_party_naming":
+            return "我只能接受你给你自己定称呼，也只能接受别人亲自来给我定称呼，不能替别人决定怎么叫哦。"
+        if stage == "clarify_naming_intent":
+            if intent_hint == "assistant_alias":
+                return "如果你想给我起个称呼，可以直接说“以后就叫你 xx”。"
+            return "如果你想让我换个叫法，直接告诉我“叫我 xx”就好。"
         if stage == "retry_name":
             return f"等等呀，{address}，我还没记住你的称呼呢，你直接告诉我想让我怎么叫你吧。"
         return f"你好呀，{address}，你想让我怎么称呼你呢？"
