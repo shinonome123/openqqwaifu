@@ -159,6 +159,17 @@ class SkillRegistry:
                 return skill
         return None
 
+    def find_by_name_or_id(self, value: str) -> SkillSpec | None:
+        target = _normalize_lookup_key(value)
+        if not target:
+            return None
+        for skill in self.list_skills():
+            if _normalize_lookup_key(skill.skill_id) == target:
+                return skill
+            if _normalize_lookup_key(skill.name) == target:
+                return skill
+        return None
+
     def get_skill_markdown(self, skill_id: str) -> str | None:
         path = self._find_skill_file(skill_id)
         if path is None:
@@ -411,7 +422,11 @@ def _coerce_str_list(value: Any) -> list[str]:
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str) and value.strip():
         return [item.strip() for item in value.split(",") if item.strip()]
-    return []
+    return [] 
+
+
+def _normalize_lookup_key(value: Any) -> str:
+    return re.sub(r"[\s_\-]+", "", str(value or "").strip().lower())
 
 
 def _parse_scalar(value: str) -> Any:

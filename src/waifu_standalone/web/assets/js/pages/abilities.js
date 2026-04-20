@@ -165,27 +165,32 @@ export function mount(root) {
               onChange: (v) => patch({ story_mode: v }),
             }),
           }),
-          fieldRow({
-            label: t("abilities.field.storyStyle"),
-            control: select({
-              value: String(state.story_style || "intimate"),
-              options: [
-                { value: "intimate", label: t("abilities.option.story.intimate") },
-                { value: "cinematic", label: t("abilities.option.story.cinematic") },
-                { value: "diary", label: t("abilities.option.story.diary") },
-              ],
-              onChange: (v) => patch({ story_style: v }),
-            }),
-          }),
-          fieldRow({
-            label: t("abilities.field.storyDetail"),
-            control: numberInput({
-              value: Number(state.story_detail_level || 2),
-              min: 1,
-              max: 4,
-              onChange: (v) => patch({ story_detail_level: v }),
-            }),
-          }),
+          ...(state.story_mode
+            ? [
+                el("div", { class: "page-desc", text: t("abilities.field.story.activeHint") }),
+                fieldRow({
+                  label: t("abilities.field.storyStyle"),
+                  control: select({
+                    value: String(state.story_style || "intimate"),
+                    options: [
+                      { value: "intimate", label: t("abilities.option.story.intimate") },
+                      { value: "cinematic", label: t("abilities.option.story.cinematic") },
+                      { value: "diary", label: t("abilities.option.story.diary") },
+                    ],
+                    onChange: (v) => patch({ story_style: v }),
+                  }),
+                }),
+                fieldRow({
+                  label: t("abilities.field.storyDetail"),
+                  control: numberInput({
+                    value: Number(state.story_detail_level || 2),
+                    min: 1,
+                    max: 4,
+                    onChange: (v) => patch({ story_detail_level: v }),
+                  }),
+                }),
+              ]
+            : [el("div", { class: "page-desc", text: t("abilities.field.story.inactiveHint") })]),
           fieldRow({
             label: t("character.field.maxThinkingWords"),
             hint: t("character.field.maxThinkingWords.hint"),

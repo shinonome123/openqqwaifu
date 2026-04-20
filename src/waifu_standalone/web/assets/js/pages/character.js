@@ -743,65 +743,65 @@ export function mount(root) {
   }
 
   function renderRuntimeCard() {
+    const flags = [
+      other?.service_name ? chip({ label: other.service_name, variant: "info" }) : null,
+      chip({
+        label: other?.group_reply_requires_mention !== false
+          ? t("character.runtime.flag.mentionOn")
+          : t("character.runtime.flag.mentionOff"),
+        variant: other?.group_reply_requires_mention !== false ? "accent" : "outline",
+      }),
+      chip({
+        label: other?.multimodal_enabled !== false
+          ? t("character.runtime.flag.multimodalOn")
+          : t("character.runtime.flag.multimodalOff"),
+        variant: other?.multimodal_enabled !== false ? "ok" : "outline",
+      }),
+      other?.image_command_prefix
+        ? chip({
+            label: t("character.runtime.flag.imagePrefix", {
+              prefix: other.image_command_prefix,
+            }),
+            variant: "outline",
+          })
+        : null,
+    ].filter(Boolean);
     return card({
-      title: t("character.tab.pipeline"),
-      subtitle: t("character.carousel.desc"),
+      title: t("character.runtime.title"),
+      subtitle: t("character.runtime.desc"),
       body: [
         el("div", { class: "stack" }, [
           chip({ label: t("character.runtime.note"), variant: "info" }),
           el("div", { class: "page-desc", text: t("character.runtime.tip") }),
+          el("div", { class: "page-desc", text: t("character.runtime.moved") }),
+          el("div", { class: "row-tight" }, flags),
+          el("div", { class: "row-tight" }, [
+            el("button", {
+              type: "button",
+              class: "btn",
+              text: t("character.runtime.openAbilities"),
+              onClick: () => {
+                window.location.hash = "#/abilities";
+              },
+            }),
+            el("button", {
+              type: "button",
+              class: "btn",
+              text: t("character.runtime.openAi"),
+              onClick: () => {
+                window.location.hash = "#/ai";
+              },
+            }),
+            el("button", {
+              type: "button",
+              class: "btn",
+              text: t("character.runtime.openAdvanced"),
+              onClick: () => {
+                window.location.hash = "#/advanced";
+              },
+            }),
+          ]),
         ]),
-        fieldRow({ label: t("character.field.serviceName"), hint: t("character.field.serviceName.hint"), control: textInput({ value: other.service_name || "", onChange: (value) => { other.service_name = value; } }) }),
-        fieldRow({
-          label: t("character.field.groupReplyRequiresMention"),
-          hint: t("character.field.groupReplyRequiresMention.hint"),
-          control: switchControl({
-            checked: other.group_reply_requires_mention !== false,
-            onChange: (value) => {
-              other.group_reply_requires_mention = value;
-            },
-          }),
-        }),
-        fieldRow({ label: t("character.pipeline.followup"), control: numberInput({ value: Number(other.group_follow_up_window_seconds || 5), min: 0, max: 60, step: 1, onChange: (value) => { other.group_follow_up_window_seconds = value; } }) }),
-        fieldRow({
-          label: t("character.field.groupReplyDelay"),
-          hint: t("character.field.groupReplyDelay.hint"),
-          control: numberInput({
-            value: Number(other.group_response_delay_seconds || 0),
-            min: 0,
-            max: 15,
-            step: 0.5,
-            onChange: (value) => {
-              other.group_response_delay_seconds = value;
-            },
-          }),
-        }),
-        fieldRow({
-          label: t("character.field.repeatTrigger"),
-          hint: t("character.field.repeatTrigger.hint"),
-          control: numberInput({
-            value: Number(other.repeat_trigger_count || 0),
-            min: 0,
-            max: 10,
-            step: 1,
-            onChange: (value) => {
-              other.repeat_trigger_count = value;
-            },
-          }),
-        }),
-        fieldRow({
-          label: t("character.field.multimodal"),
-          hint: t("character.field.multimodal.hint"),
-          control: switchControl({
-            checked: other.multimodal_enabled !== false,
-            onChange: (value) => {
-              other.multimodal_enabled = value;
-            },
-          }),
-        }),
-        fieldRow({ label: t("character.pipeline.imageCmd"), control: textInput({ value: other.image_command_prefix || "", onChange: (value) => { other.image_command_prefix = value.trim(); } }) }),
-        fieldRow({ label: t("character.pipeline.aliases"), control: tagInput({ values: other.image_command_aliases || [], onChange: (value) => { other.image_command_aliases = value; } }) }),
-        fieldRow({ label: t("character.field.ignorePrefixes"), hint: t("character.field.ignorePrefixes.hint"), control: tagInput({ values: other.ignore_prefixes || [], onChange: (value) => { other.ignore_prefixes = value; } }) }),
       ],
     });
   }

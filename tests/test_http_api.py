@@ -265,7 +265,7 @@ class HttpApiTests(unittest.TestCase):
     def test_tool_listing_is_available(self) -> None:
         tools = self.api.list_tools()
 
-        self.assertEqual(tools["count"], 4)
+        self.assertEqual(tools["count"], 5)
 
     def test_behavior_and_proactive_api_are_available(self) -> None:
         service, _ = build_default_service(

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 FOLLOW_UP_METADATA_KEY = "follow_up_until"
 PENDING_SEARCH_METADATA_KEY = "pending_search"
 PENDING_SEARCH_TTL_SECONDS = 1800.0
+LAST_SEARCH_TTL_SECONDS = 1800.0
 
 
 def _safe_float(payload: dict[str, object], key: str, default: float) -> float:
@@ -65,6 +66,8 @@ class ReplyGate:
         if not bot_account_id:
             return True
         if self.is_follow_up_window_active(event.launcher_id):
+            return True
+        if self._has_recent_search_link_follow_up(event):
             return True
         return self._has_pending_search_follow_up(event)
 
@@ -174,6 +177,13 @@ class ReplyGate:
             ).strip()
         return str(pending.get("query", "") or "").strip()
 
+    def recent_search_payload_for_message(
+        self, session: SessionMemory, latest_message: str
+    ) -> dict[str, object]:
+        if not self.looks_like_search_link_request(latest_message):
+            return {}
+        return self._recent_search_payload(session)
+
     def store_pending_search(self, session: SessionMemory, *, query: str) -> None:
         cleaned_query = " ".join(str(query or "").split()).strip()
         if not cleaned_query:
@@ -205,6 +215,21 @@ class ReplyGate:
         )
         return bool(self.pending_search_query_for_message(session, latest_message))
 
+    def _has_recent_search_link_follow_up(self, event: InboundEvent) -> bool:
+        service = self._service
+        if event.launcher_type != "group":
+            return False
+        latest_message = (
+            event.command_text(service.config.bot_account_id).strip()
+            or event.to_memory_text()
+        )
+        session = service.memory.load(
+            event.launcher_id,
+            event.launcher_type,
+            character_id=service._active_character_id(),
+        )
+        return bool(self.recent_search_payload_for_message(session, latest_message))
+
     def _pending_search_payload(self, session: SessionMemory) -> dict[str, object]:
         raw_value = session.metadata.get(PENDING_SEARCH_METADATA_KEY, {})
         if isinstance(raw_value, dict) and str(raw_value.get("query", "") or "").strip():
@@ -224,6 +249,18 @@ class ReplyGate:
             "created_at": fetched_at or time.time(),
             "expires_at": (fetched_at or time.time()) + PENDING_SEARCH_TTL_SECONDS,
         }
+
+    def _recent_search_payload(self, session: SessionMemory) -> dict[str, object]:
+        raw_value = session.metadata.get("last_search", {})
+        if not isinstance(raw_value, dict):
+            return {}
+        query = str(raw_value.get("query", "") or "").strip()
+        fetched_at = _safe_float(raw_value, "fetched_at", 0.0)
+        if not query:
+            return {}
+        if fetched_at and time.time() - fetched_at > LAST_SEARCH_TTL_SECONDS:
+            return {}
+        return raw_value
 
     @staticmethod
     def looks_like_search_confirmation(text: str) -> bool:
@@ -276,6 +313,52 @@ class ReplyGate:
             return True
         cjk_chars = [char for char in compact if "\u4e00" <= char <= "\u9fff"]
         return 2 <= len(cjk_chars) <= 8
+
+    @staticmethod
+    def looks_like_search_link_request(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "").strip().lower())
+        if not compact or len(compact) > 48:
+            return False
+        if any(token in compact for token in ("url", "source")):
+            return True
+        markers = ("链接", "原文", "来源", "出处", "网址", "官网", "公告")
+        if not any(marker in compact for marker in markers):
+            return False
+        explicit_patterns = (
+            "把链接发给我",
+            "把链接发我",
+            "把原文发给我",
+            "把原文发我",
+            "把来源发给我",
+            "把来源发我",
+            "把网址发给我",
+            "把网址发我",
+            "链接发给我",
+            "链接发我",
+            "给我链接",
+            "给下链接",
+            "发下链接",
+            "发我链接",
+            "原文发给我",
+            "原文发我",
+            "给我原文",
+            "来源发给我",
+            "来源发我",
+            "给我来源",
+            "原文呢",
+            "来源呢",
+            "链接呢",
+            "网址呢",
+            "官网链接",
+            "公告链接",
+        )
+        if any(pattern in compact for pattern in explicit_patterns):
+            return True
+        if compact in {"链接", "原文", "来源", "出处", "网址", "官网", "公告"}:
+            return True
+        return any(marker in compact for marker in markers) and any(
+            verb in compact for verb in ("发", "给", "贴", "甩", "来")
+        )
 
     # ------------------------------------------------------------------
     # Repeat detection

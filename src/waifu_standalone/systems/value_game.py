@@ -41,6 +41,7 @@ class ValueGameEngine:
         emotion: EmotionState,
         reply_text: str,
         search_used: bool,
+        character_id: str = "",
     ) -> AffinityOutcome | None:
         if not self.config.value_game_mode:
             return None
@@ -56,7 +57,12 @@ class ValueGameEngine:
         adjusted = None
         adjust = getattr(state_store, "adjust_member_affinity", None)
         if callable(adjust):
-            adjusted = adjust(group_id=group_id, user_id=event.sender_id, delta=delta)
+            adjusted = adjust(
+                group_id=group_id,
+                user_id=event.sender_id,
+                delta=delta,
+                character_id=character_id,
+            )
         if adjusted is None:
             return None
         score = float(adjusted.get("affinity_score") or 0.0)

@@ -197,6 +197,8 @@ class WaifuService:
         live_runtime = self._requires_live_llm()
         latest_message = self._latest_message_text(event, text)
         naming_input = self.onboarding.looks_like_naming_input(latest_message)
+        search_link_request = self.gate.looks_like_search_link_request(latest_message)
+        explicit_skill_request = self.dispatcher.resolve_explicit_skill_request(latest_message)
         self._record_inbound(event, text)
         if not text and event.image_count == 0:
             return None
@@ -207,7 +209,13 @@ class WaifuService:
                 return None
         if not self.gate.should_reply(event):
             return None
-        if live_runtime and not self.generator.llm_ready and not naming_input:
+        if (
+            live_runtime
+            and not self.generator.llm_ready
+            and not naming_input
+            and not search_link_request
+            and explicit_skill_request is None
+        ):
             return None
 
         await self.onboarding.aremember_directory_member(event)
@@ -250,7 +258,32 @@ class WaifuService:
                 assistant_name=assistant_name,
             )
 
+        if search_link_request:
+            return await self.dispatcher.ahandle_search_link_request(
+                event,
+                session,
+                address=address,
+                assistant_name=assistant_name,
+                search_payload=self.gate.recent_search_payload_for_message(
+                    session, latest_message
+                ),
+            )
+
         active_skills = self.skills.match(latest_message)
+        if explicit_skill_request is not None:
+            skill, raw_args = explicit_skill_request
+            if all(existing.skill_id != skill.skill_id for existing in active_skills):
+                active_skills = [skill, *active_skills][: max(1, self.config.max_active_skills)]
+            await self._store_active_skills_async(session, active_skills)
+            return await self.dispatcher.adispatch_explicit_skill(
+                event,
+                session,
+                skill=skill,
+                raw_args=raw_args,
+                address=address,
+                assistant_name=assistant_name,
+                active_skills=active_skills,
+            )
         await self._store_active_skills_async(session, active_skills)
 
         dispatch = self.skills.resolve_dispatch(latest_message)
@@ -1641,5 +1674,12 @@ def _build_service(
         description="列出当前所有已启用的技能及其触发方式。",
         handler=service.dispatcher.run_skill_list_tool,
         async_handler=service.dispatcher.arun_skill_list_tool,
+    )
+    tools.register(
+        "summarize",
+        name="外部内容总结",
+        description="调用 summarize CLI 总结 URL、视频或本地文件。",
+        handler=service.dispatcher.run_summarize_tool,
+        async_handler=service.dispatcher.arun_summarize_tool,
     )
     return service, outbound
