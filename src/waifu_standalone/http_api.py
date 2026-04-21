@@ -387,6 +387,9 @@ class HttpApi:
     def import_skill_pack(self, payload: dict[str, Any] | str, *, overwrite: bool = True) -> dict[str, Any]:
         return dict(self.service.import_skill_pack(payload, overwrite=overwrite))
 
+    def import_skill_bundle(self, path: str, *, overwrite: bool = True) -> dict[str, Any]:
+        return dict(self.service.import_skill_bundle(path, overwrite=overwrite))
+
     def get_skill_detail(self, skill_id: str) -> dict[str, Any] | None:
         detail = self.service.get_skill_detail(skill_id)
         return dict(detail) if detail else None
@@ -456,6 +459,22 @@ class HttpApi:
 
     def get_skills_panel(self) -> dict[str, Any]:
         return dict(self.service.get_skills_panel())
+
+    def get_claw_runtime_panel(self, *, refresh: bool = False) -> dict[str, Any]:
+        return dict(self.service.get_claw_runtime_panel(refresh=refresh))
+
+    def list_claw_plugins(self) -> dict[str, Any]:
+        return dict(self.service.list_claw_plugins())
+
+    def inspect_claw_plugin(self, plugin_id: str) -> dict[str, Any] | None:
+        detail = self.service.inspect_claw_plugin(plugin_id)
+        return dict(detail) if detail else None
+
+    def check_claw_plugins(self) -> dict[str, Any]:
+        return dict(self.service.check_claw_plugins())
+
+    def update_claw_plugin(self, plugin_id: str) -> dict[str, Any]:
+        return dict(self.service.update_claw_plugin(plugin_id))
 
     def search_marketplace(self, query: str, *, source_id: str = "", limit: int = 12) -> dict[str, Any]:
         return dict(self.service.search_marketplace(query, source_id=source_id, limit=limit))
@@ -602,6 +621,8 @@ def make_handler(api: HttpApi):
                 "/api/panels/abilities": self._get_abilities_panel,
                 "/api/panels/proactive": self._get_proactive_panel,
                 "/api/panels/skills": self._get_skills_panel,
+                "/api/claw/runtime": self._get_claw_runtime_panel,
+                "/api/claw/plugins": self._get_claw_plugins,
                 "/api/panels/sidecar": self._get_sidecar_panel,
                 "/api/panels/qq-login": self._get_qq_login_panel,
                 "/api/qq-login/qrcode-image": self._get_qq_login_qrcode_image,
@@ -658,7 +679,10 @@ def make_handler(api: HttpApi):
                 "/api/marketplace/import": self._post_marketplace_import,
                 "/api/skill-packs/export": self._post_skill_pack_export,
                 "/api/skill-packs/import": self._post_skill_pack_import,
+                "/api/skill-bundles/import-local": self._post_skill_bundle_import_local,
                 "/api/skills/install": self._post_skill_install,
+                "/api/claw/plugins/check": self._post_claw_plugins_check,
+                "/api/claw/plugins/update": self._post_claw_plugin_update,
             }
             handler = routes.get(parsed.path)
             if handler is not None:
@@ -733,6 +757,23 @@ def make_handler(api: HttpApi):
                     self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                     return True
                 detail = api.get_skill_detail(skill_id)
+                if detail is None:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                self._write_json(HTTPStatus.OK, detail)
+                return True
+            if parsed.path.startswith("/api/claw/plugins/"):
+                parts = [unquote(part) for part in parsed.path.split("/") if part]
+                if len(parts) != 4:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+                    return True
+                try:
+                    _, _, _, plugin_id = parts
+                    plugin_id = _validate_route_segment(plugin_id, name="plugin_id")
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
+                detail = api.inspect_claw_plugin(plugin_id)
                 if detail is None:
                     self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
                     return True
@@ -828,6 +869,21 @@ def make_handler(api: HttpApi):
                     self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found"})
                     return True
                 self._write_json(HTTPStatus.OK, {"status": "ok", "session": detail})
+                return True
+            if parsed.path == "/api/claw/plugins/update":
+                payload = self._read_json_body()
+                if payload is None:
+                    return True
+                plugin_id = str(payload.get("plugin_id", "") or "").strip()
+                if not plugin_id:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "plugin_id is required"})
+                    return True
+                try:
+                    detail = api.update_claw_plugin(plugin_id)
+                except ValueError as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                    return True
+                self._write_json(HTTPStatus.OK, {"status": "ok", "bundle": detail})
                 return True
             return False
 
@@ -962,6 +1018,14 @@ def make_handler(api: HttpApi):
 
         def _get_skills_panel(self, parsed) -> None:
             self._write_json(HTTPStatus.OK, api.get_skills_panel())
+
+        def _get_claw_runtime_panel(self, parsed) -> None:
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            refresh = query.get("refresh", ["0"])[0] in {"1", "true", "yes"}
+            self._write_json(HTTPStatus.OK, api.get_claw_runtime_panel(refresh=refresh))
+
+        def _get_claw_plugins(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.list_claw_plugins())
 
         def _get_sidecar_panel(self, parsed) -> None:
             query = parse_qs(parsed.query, keep_blank_values=False)
@@ -1218,7 +1282,7 @@ def make_handler(api: HttpApi):
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                 return
-            self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
+            self._write_json(HTTPStatus.OK, {"status": "ok", "bundle": detail})
 
         def _post_skill_pack_export(self, parsed) -> None:
             payload = self._read_json_body(allow_empty=True)
@@ -1253,6 +1317,21 @@ def make_handler(api: HttpApi):
                 return
             self._write_json(HTTPStatus.OK, {"status": "ok", "pack": result})
 
+        def _post_skill_bundle_import_local(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            source_path = str(payload.get("path", "") or "").strip()
+            if not source_path:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "path is required"})
+                return
+            try:
+                result = api.import_skill_bundle(source_path, overwrite=bool(payload.get("overwrite", True)))
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, {"status": "ok", "bundle": result})
+
         def _post_skill_install(self, parsed) -> None:
             payload = self._read_json_body()
             if payload is None:
@@ -1268,6 +1347,25 @@ def make_handler(api: HttpApi):
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                 return
             self._write_json(HTTPStatus.OK, {"status": "ok", "skill": detail})
+
+        def _post_claw_plugins_check(self, parsed) -> None:
+            self._read_json_body(allow_empty=True)
+            self._write_json(HTTPStatus.OK, api.check_claw_plugins())
+
+        def _post_claw_plugin_update(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            plugin_id = str(payload.get("plugin_id", "") or "").strip()
+            if not plugin_id:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "plugin_id is required"})
+                return
+            try:
+                detail = api.update_claw_plugin(plugin_id)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, {"status": "ok", "bundle": detail})
 
         def log_message(self, format: str, *args: object) -> None:
             return

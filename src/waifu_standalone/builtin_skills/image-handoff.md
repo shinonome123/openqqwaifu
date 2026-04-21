@@ -1,8 +1,9 @@
 ---
 id: image-handoff
 name: 生图交付语气
-description: 当本轮是生图请求时，强化图片交付回执的角色语气。
+description: 当本轮在交付图片时，强化图片交付时的角色语气。
 triggers: ["生图", "draw", "画一张", "生成一张图"]
+aliases: ["image_handoff", "image_caption", "生图交付", "图片文案"]
 mode: contains
 priority: 4
 ---

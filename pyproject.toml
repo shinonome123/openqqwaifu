@@ -24,4 +24,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-waifu_standalone = ["web/*.html", "web/*.css", "web/*.js", "templates/*.yaml", "builtin_skills/*.md"]
+waifu_standalone = ["*.mjs", "web/*.html", "web/*.css", "web/*.js", "templates/*.yaml", "builtin_skills/*.md"]

@@ -17,7 +17,7 @@ if str(SRC) not in sys.path:
 
 from waifu_standalone.app import build_default_service
 from waifu_standalone.cells.skill_registry import build_skill_markdown_template
-from waifu_standalone.config import AppConfig
+from waifu_standalone.config import AppConfig, ClawRuntimeConfig
 from waifu_standalone.http_api import HttpApi, RequestTooLarge, _read_chunked_body, parse_onebot_event
 
 
@@ -265,7 +265,35 @@ class HttpApiTests(unittest.TestCase):
     def test_tool_listing_is_available(self) -> None:
         tools = self.api.list_tools()
 
-        self.assertEqual(tools["count"], 5)
+        self.assertEqual(tools["count"], 13)
+
+    def test_skills_panel_includes_normalized_capabilities_and_safety(self) -> None:
+        panel = self.api.get_skills_panel()
+
+        self.assertIn("capabilities", panel)
+        self.assertIn("skill_groups", panel)
+        self.assertIn("tool_groups", panel)
+        self.assertIn("safety", panel)
+        self.assertIn("claw_runtime", panel)
+        self.assertGreaterEqual(len(panel["capabilities"]), 3)
+        self.assertIn("exec_allowlist", panel["safety"])
+
+    def test_claw_runtime_api_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    claw_runtime=ClawRuntimeConfig(enabled=True, mode="managed", routing_mode="shadow"),
+                )
+            )
+            api = HttpApi(service)
+            try:
+                runtime = api.get_claw_runtime_panel(refresh=True)
+                self.assertTrue(runtime["healthy"])
+                plugins = api.list_claw_plugins()
+                self.assertIn("items", plugins)
+            finally:
+                service.close()
 
     def test_behavior_and_proactive_api_are_available(self) -> None:
         service, _ = build_default_service(

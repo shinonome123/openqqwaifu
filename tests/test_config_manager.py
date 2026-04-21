@@ -14,7 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from waifu_standalone.cells.config import ConfigManager
-from waifu_standalone.config import AppConfig, QQSidecarConfig
+from waifu_standalone.config import AppConfig, ClawRuntimeConfig, QQSidecarConfig
 
 
 class ConfigManagerTests(unittest.TestCase):
@@ -560,6 +560,104 @@ class ConfigManagerTests(unittest.TestCase):
             raw["network"]["httpClients"][0]["url"],
             "http://openqqwaifu:8080/onebot/events",
         )
+
+    def test_loads_and_saves_claw_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "claw_runtime": {
+                            "enabled": True,
+                            "mode": "external",
+                            "routing_mode": "hybrid",
+                            "base_url": "http://127.0.0.1:19555",
+                            "node_path": "custom-node",
+                            "runtime_root": "./runtime/claw",
+                            "acp_enabled": True,
+                            "acp_default_command": "python",
+                            "acp_default_args": ["-m", "openqqwaifu_acp"],
+                            "codex_harness_command": "codex",
+                            "codex_harness_args": ["serve"],
+                            "acp_session_timeout_seconds": 6.5,
+                            "plugin_tools_mcp_bridge": True,
+                            "startup_timeout_seconds": 18.0,
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            config = ConfigManager(config_path).load()
+
+            self.assertTrue(config.claw_runtime.enabled)
+            self.assertEqual(config.claw_runtime.mode, "external")
+            self.assertEqual(config.claw_runtime.routing_mode, "hybrid")
+            self.assertEqual(config.claw_runtime.base_url, "http://127.0.0.1:19555")
+            self.assertEqual(config.claw_runtime.node_path, "custom-node")
+            self.assertTrue(config.claw_runtime.runtime_root.endswith("runtime\\claw"))
+            self.assertTrue(Path(config.claw_runtime.runtime_root).is_absolute())
+            self.assertTrue(config.claw_runtime.acp_enabled)
+            self.assertEqual(config.claw_runtime.acp_default_command, "python")
+            self.assertEqual(config.claw_runtime.acp_default_args, ["-m", "openqqwaifu_acp"])
+            self.assertEqual(config.claw_runtime.codex_harness_command, "codex")
+            self.assertEqual(config.claw_runtime.codex_harness_args, ["serve"])
+            self.assertEqual(config.claw_runtime.acp_session_timeout_seconds, 6.5)
+            self.assertTrue(config.claw_runtime.plugin_tools_mcp_bridge)
+            self.assertEqual(config.claw_runtime.startup_timeout_seconds, 18.0)
+
+            saved_path = root / "saved.json"
+            ConfigManager().save(config, saved_path)
+            saved = json.loads(saved_path.read_text(encoding="utf-8"))
+            self.assertIn("claw_runtime", saved)
+            self.assertEqual(saved["claw_runtime"]["routing_mode"], "hybrid")
+            self.assertEqual(saved["claw_runtime"]["codex_harness_command"], "codex")
+
+    def test_env_overrides_claw_runtime_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"claw_runtime": {"enabled": False}}), encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "OPENQQWAIFU_CLAW_RUNTIME_ENABLED": "true",
+                    "OPENQQWAIFU_CLAW_RUNTIME_MODE": "external",
+                    "OPENQQWAIFU_CLAW_RUNTIME_ROUTING_MODE": "authoritative",
+                    "OPENQQWAIFU_CLAW_RUNTIME_BASE_URL": "http://127.0.0.1:19666",
+                    "OPENQQWAIFU_CLAW_RUNTIME_NODE_PATH": "node-custom",
+                    "OPENQQWAIFU_CLAW_RUNTIME_ROOT": "./runtime-root",
+                    "OPENQQWAIFU_CLAW_RUNTIME_ACP_ENABLED": "true",
+                    "OPENQQWAIFU_CLAW_RUNTIME_ACP_DEFAULT_COMMAND": "python3",
+                    "OPENQQWAIFU_CLAW_RUNTIME_ACP_DEFAULT_ARGS": "-m,agent_runtime",
+                    "OPENQQWAIFU_CLAW_RUNTIME_CODEX_HARNESS_COMMAND": "codex",
+                    "OPENQQWAIFU_CLAW_RUNTIME_CODEX_HARNESS_ARGS": "serve,--stdio",
+                    "OPENQQWAIFU_CLAW_RUNTIME_ACP_SESSION_TIMEOUT_SECONDS": "8.5",
+                    "OPENQQWAIFU_CLAW_RUNTIME_PLUGIN_TOOLS_MCP_BRIDGE": "true",
+                    "OPENQQWAIFU_CLAW_RUNTIME_STARTUP_TIMEOUT_SECONDS": "21",
+                },
+                clear=False,
+            ):
+                config = ConfigManager(config_path).load()
+
+        self.assertTrue(config.claw_runtime.enabled)
+        self.assertEqual(config.claw_runtime.mode, "external")
+        self.assertEqual(config.claw_runtime.routing_mode, "authoritative")
+        self.assertEqual(config.claw_runtime.base_url, "http://127.0.0.1:19666")
+        self.assertEqual(config.claw_runtime.node_path, "node-custom")
+        self.assertTrue(config.claw_runtime.runtime_root.endswith("runtime-root"))
+        self.assertTrue(Path(config.claw_runtime.runtime_root).is_absolute())
+        self.assertTrue(config.claw_runtime.acp_enabled)
+        self.assertEqual(config.claw_runtime.acp_default_command, "python3")
+        self.assertEqual(config.claw_runtime.acp_default_args, ["-m", "agent_runtime"])
+        self.assertEqual(config.claw_runtime.codex_harness_command, "codex")
+        self.assertEqual(config.claw_runtime.codex_harness_args, ["serve", "--stdio"])
+        self.assertEqual(config.claw_runtime.acp_session_timeout_seconds, 8.5)
+        self.assertTrue(config.claw_runtime.plugin_tools_mcp_bridge)
+        self.assertEqual(config.claw_runtime.startup_timeout_seconds, 21.0)
 
 
 if __name__ == "__main__":

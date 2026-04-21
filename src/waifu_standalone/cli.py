@@ -40,6 +40,34 @@ def main() -> None:
         _check_sidecar(config)
         return
 
+    if args.command == "check-claw-runtime":
+        service, _ = build_default_service(config)
+        print(json.dumps(service.get_claw_runtime_panel(refresh=True), ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "list-claw-plugins":
+        service, _ = build_default_service(config)
+        print(json.dumps(service.list_claw_plugins(), ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "inspect-claw-plugin":
+        service, _ = build_default_service(config)
+        detail = service.inspect_claw_plugin(args.plugin_id)
+        if detail is None:
+            raise SystemExit(f"claw plugin not found: {args.plugin_id}")
+        print(json.dumps(detail, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "check-claw-plugins":
+        service, _ = build_default_service(config)
+        print(json.dumps(service.check_claw_plugins(), ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "update-claw-plugin":
+        service, _ = build_default_service(config)
+        print(json.dumps(service.update_claw_plugin(args.plugin_id), ensure_ascii=False, indent=2))
+        return
+
     if args.command == "export-skill-pack":
         service, _ = build_default_service(config)
         bundle = service.export_skill_pack(
@@ -62,6 +90,12 @@ def main() -> None:
         service, _ = build_default_service(config)
         payload = Path(args.input).read_text(encoding="utf-8")
         result = service.import_skill_pack(payload, overwrite=not args.no_overwrite)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "import-skill-bundle":
+        service, _ = build_default_service(config)
+        result = service.import_skill_bundle(args.input, overwrite=not args.no_overwrite)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
@@ -135,6 +169,23 @@ def _build_parser() -> argparse.ArgumentParser:
     check = subparsers.add_parser("check-sidecar")
     check.add_argument("--config", default=None)
 
+    claw_runtime = subparsers.add_parser("check-claw-runtime")
+    claw_runtime.add_argument("--config", default=None)
+
+    list_claw_plugins = subparsers.add_parser("list-claw-plugins")
+    list_claw_plugins.add_argument("--config", default=None)
+
+    inspect_claw_plugin = subparsers.add_parser("inspect-claw-plugin")
+    inspect_claw_plugin.add_argument("--config", default=None)
+    inspect_claw_plugin.add_argument("--plugin-id", required=True)
+
+    check_claw_plugins = subparsers.add_parser("check-claw-plugins")
+    check_claw_plugins.add_argument("--config", default=None)
+
+    update_claw_plugin = subparsers.add_parser("update-claw-plugin")
+    update_claw_plugin.add_argument("--config", default=None)
+    update_claw_plugin.add_argument("--plugin-id", required=True)
+
     export_pack = subparsers.add_parser("export-skill-pack")
     export_pack.add_argument("--config", default=None)
     export_pack.add_argument("--output", default=None)
@@ -147,6 +198,11 @@ def _build_parser() -> argparse.ArgumentParser:
     import_pack.add_argument("--config", default=None)
     import_pack.add_argument("--input", required=True)
     import_pack.add_argument("--no-overwrite", action="store_true")
+
+    import_bundle = subparsers.add_parser("import-skill-bundle")
+    import_bundle.add_argument("--config", default=None)
+    import_bundle.add_argument("--input", required=True)
+    import_bundle.add_argument("--no-overwrite", action="store_true")
 
     parser.set_defaults(command="serve", config=None, store_root=None)
     return parser

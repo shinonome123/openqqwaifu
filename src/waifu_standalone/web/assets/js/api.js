@@ -96,6 +96,15 @@ export const api = {
     request("POST", "/api/users/directory/sync", { group_id: groupId }),
 
   getSkillsPanel: () => request("GET", "/api/panels/skills"),
+  getClawRuntimePanel: (refresh = false) =>
+    request("GET", refresh ? "/api/claw/runtime?refresh=1" : "/api/claw/runtime"),
+  listClawPlugins: () => request("GET", "/api/claw/plugins"),
+  inspectClawPlugin: (id) => request("GET", `/api/claw/plugins/${encodeURIComponent(id)}`),
+  checkClawPlugins: () => request("POST", "/api/claw/plugins/check", {}),
+  updateClawPlugin: (pluginId) =>
+    request("POST", "/api/claw/plugins/update", {
+      plugin_id: pluginId,
+    }),
   getSidecarPanel: (refresh = false) =>
     request("GET", refresh ? "/api/panels/sidecar?refresh=1" : "/api/panels/sidecar"),
   saveSidecarPanel: (payload) => request("POST", "/api/panels/sidecar", payload),
@@ -134,6 +143,8 @@ export const api = {
       source_id: sourceId,
       github_url: githubUrl,
     }),
+  importSkillBundle: (path, overwrite = true) =>
+    request("POST", "/api/skill-bundles/import-local", { path, overwrite }),
 
   listSessions: (limit = 60) =>
     request("GET", `/api/sessions?limit=${encodeURIComponent(limit)}`),

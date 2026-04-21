@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -84,29 +85,30 @@ class SearchDeciderTests(unittest.TestCase):
         self.assertIn("hangzhou weather", context.summary)
 
     def test_service_uses_search_summary_in_fallback_reply(self) -> None:
-        service, _ = build_default_service(AppConfig(search_enabled=True))
-        service.search._fetcher = lambda query: [
-            SearchResult(title="北京天气", snippet="今天晴，最高温 26 度", url="https://example.com/weather")
-        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(search_enabled=True, data_root=tmpdir))
+            service.search._fetcher = lambda query: [
+                SearchResult(title="北京天气", snippet="今天晴，最高温 26 度", url="https://example.com/weather")
+            ]
 
-        reply = service.handle_event(
-            InboundEvent(
-                launcher_id="783190298",
-                launcher_type="person",
-                sender_id="783190298",
-                sender_name="tester",
-                segments=[MessageSegment(kind="text", text="今天北京天气怎么样")],
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="今天北京天气怎么样")],
+                )
             )
-        )
 
-        session = service.memory.load("783190298", "person")
-        last_search = session.metadata.get("last_search", {})
+            session = service.memory.load("783190298", "person")
+            last_search = session.metadata.get("last_search", {})
 
-        self.assertIsNotNone(reply)
-        assert reply is not None
-        self.assertIn("我刚查了一下", reply.text)
-        self.assertIn("北京天气", reply.text)
-        self.assertEqual(last_search.get("query"), "今天北京天气怎么样")
+            self.assertIsNotNone(reply)
+            assert reply is not None
+            self.assertIn("我刚查了一下", reply.text)
+            self.assertIn("北京天气", reply.text)
+            self.assertEqual(last_search.get("query"), "今天北京天气怎么样")
 
     def test_recent_regulatory_queries_trigger_search(self) -> None:
         decider = SearchDecider(AppConfig(search_enabled=True))
