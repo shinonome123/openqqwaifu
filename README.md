@@ -4,81 +4,30 @@
 
 # openqqwaifu
 
-`openqqwaifu` 是一个独立运行的 QQ AI 角色服务。
+`openqqwaifu` 是一个独立运行的 QQ Waifu 控制台与运行时。
 
-它把角色卡、会话记忆、知识库、成员目录、技能系统、模型接入、Web Console 和 QQ 登录桥接整合到一个服务里；NapCat / OneBot 只负责 QQ 协议和消息收发，业务逻辑全部由本项目自己维护。
+它把角色卡、会话记忆、知识库、成员目录、技能系统、模型接入、Web Console，以及 OpenClaw 兼容 skill runtime 都收敛在同一个服务里；NapCat / OneBot 只负责 QQ 协议和消息收发。
 
-当前推荐部署方式是 `Docker + NapCat sidecar`。
+## 现在它是什么
 
-## 现在到了哪一步
+这已经不是一个临时脚本集合，而是一套可单独部署、可持续迭代的运行时：
 
-项目已经不是“原型插件”，而是一个可以独立部署、持续迭代的运行时：
+- 独立的 Python 后端和 Web Console
+- 角色卡编辑、切换、预览、画像管理
+- 按角色隔离的会话、知识、成员与运行时状态
+- 搜索、生图、总结、文件读取、网页抓取等 tool 能力
+- skill marketplace、bundle 导入、技能面板和安全策略
+- OpenClaw 兼容运行时
+  - native / bundle 检测
+  - ClawHub / SkillsMP / GitHub 多源导入
+  - MCP tool bridge
+  - hook-pack 执行
+  - hybrid routing
+  - ACP / Codex harness session bridge
+- NapCat WebUI 登录桥与 sidecar 管理
+- Docker Compose 部署
 
-- 有独立的 Python 后端、Web Console、Docker 部署和测试体系
-- 支持角色卡编辑、切换、预览、立绘管理
-- 支持群聊 / 私聊会话、成员目录、知识抽取、技能调度、搜索和生图能力
-- 支持 NapCat WebUI 登录桥和控制台内 QQ 登录流程
-- 已建立按角色隔离的会话和运行时存储
-
-截至当前分支，测试基线为 `191/191` 通过：
-
-```powershell
-python -B -m unittest discover -s tests -v
-```
-
-## 最近完成的里程碑
-
-### 1. 角色隔离补齐
-
-这轮最重要的改动，是把“切角色卡后仍受上一张卡影响”的问题收敛到了真正的角色边界内。
-
-现在已经做到：
-
-- 会话文件按角色分目录保存：`data/sessions/<character>/...`
-- 运行时 SQLite 按角色分库保存：`data/state/characters/<character>/runtime.sqlite3`
-- 切换角色时会重绑当前角色的 memory store 和 state store
-- 切换角色时会清掉上一张卡留下来的运行时上下文
-  - follow-up 窗口
-  - recent behavior events
-  - session locks
-- 行为事件和 follow-up 状态现在也带 `character_id`
-- 角色切换不再只是更新 `active_character.json`，而是会真正切换整套角色作用域
-
-这意味着：
-
-- `default` 的会话不会再跑到 `aurora`
-- `default` 的运行时成员状态不会再被 `aurora` 读到
-- 上一张卡的 follow-up / behavior graph 上下文不会再串到下一张卡
-
-这不意味着：
-
-- 当前激活角色自己的聊天内容不会继续影响它自己
-
-如果某张卡本身允许自动知识回写，那么它仍然会把“这张卡自己刚聊出来的内容”写进它自己的长期状态。这是当前刻意保留的行为，而不是隔离缺失。
-
-### 2. 前端控制台完成一轮稳定化
-
-本分支已经完成一轮控制台修补，主要包括：
-
-- 角色切换竞态修复
-- 非管理员导航和接口收口
-- 通用 modal 事件泄漏修复
-- 前端不再直接暴露部署机本地绝对路径
-- 角色相关页面的默认文案不再硬编码旧人格名
-
-控制台现在的目标不是“做演示”，而是作为正式运维入口存在。
-
-### 3. 运行时和接口层继续工程化
-
-当前代码库已经具备：
-
-- async HTTP runtime
-- `aiohttp` / `httpx` 传输层
-- OneBot 回调接入
-- 健康检查接口 `/healthz`
-- Console API、角色页、技能页、NapCat / QQ 登录页
-
-## 系统结构
+## 架构概览
 
 ```text
 NapCat / OneBot
@@ -89,90 +38,67 @@ http_api / http_api_async
         v
 WaifuService (app.py)
         |
-        +-- cards / generator / auth / skill registry / marketplace
+        +-- cards / generator / auth / skills / marketplace
         +-- memory / state_store / migration
-        +-- searching / events / narrator / proactive / value_game
+        +-- searching / events / proactive / narrator / value_game
+        +-- ClawRuntime bridge
         +-- web console
 ```
 
-### 关键模块
+## 核心能力
 
-| 路径 | 作用 |
-|---|---|
-| `src/waifu_standalone/app.py` | 核心运行时编排，当前仍是项目的控制中心 |
-| `src/waifu_standalone/http_api.py` | 兼容 HTTP 服务层和控制台 API |
-| `src/waifu_standalone/http_api_async.py` | async 服务层 |
-| `src/waifu_standalone/memory.py` | 会话存储，当前支持角色作用域隔离 |
-| `src/waifu_standalone/state_store.py` | 成员、知识、画像、运行时状态存储 |
-| `src/waifu_standalone/cells/cards.py` | 角色卡加载、编辑、切换、预览 |
-| `src/waifu_standalone/console_panels.py` | Web Console 业务面板 |
-| `src/waifu_standalone/gateways/napcat_login.py` | NapCat WebUI / QQ 登录桥 |
-| `src/waifu_standalone/web/` | 静态前端资源 |
+- QQ runtime
+  - 通过 NapCat / OneBot 接收和发送消息
+  - 支持群聊、私聊、follow-up window、重复触发等行为控制
+- 角色系统
+  - 支持多角色卡
+  - 切换角色时会切换对应的 memory store 与 runtime state
+- 记忆与状态
+  - `session_history`
+  - `user_directory`
+  - `knowledge_base`
+  - 角色级运行时 SQLite
+- 技能与工具
+  - 内置技能 + 工作区技能 + 插件技能
+  - skill pack / bundle 导入导出
+  - tool alias、显式 `/skill` 调用、模型 tool loop
+- OpenClaw 兼容层
+  - `SKILL.md` / bundle 导入
+  - native plugin / bundle capability 诊断
+  - `wired / detect-only / unsupported` 边界展示
+  - MCP、hook-pack、ACP/Codex harness 兼容桥
 
-## 数据模型
+## 快速开始
 
-### 1. Session History
+### 1. Docker Compose
 
-短期会话历史，当前按以下维度隔离：
-
-- `character_id`
-- `launcher_type`
-- `launcher_id`
-
-文件位置示例：
-
-```text
-data/sessions/default/group_568701249.jsonl
-data/sessions/aurora/group_568701249.jsonl
-```
-
-### 2. User Directory
-
-成员目录保存稳定用户资料，例如：
-
-- QQ 昵称
-- 群名片
-- preferred name
-- onboarding 状态
-- profile summary
-- affinity / bond 状态
-
-这部分也按角色隔离存放在各自的 runtime DB 中。
-
-### 3. Knowledge Base
-
-知识条目同样属于角色作用域内的数据，和成员目录一起进入该角色自己的 SQLite runtime DB。
-
-## 当前推荐部署方式
-
-### Docker Compose
+推荐部署方式：
 
 ```powershell
-copy .env.example .env
-docker compose -f compose.napcat.yml up --build -d
+docker compose -f compose.napcat.yml up -d --build
 ```
 
-启动后访问：
+默认入口：
 
 - Console: [http://127.0.0.1:8080/](http://127.0.0.1:8080/)
 - NapCat WebUI: [http://127.0.0.1:6099/](http://127.0.0.1:6099/)
 
-### 本地直接运行
+如果本机 `8080` 被占用，可以像现在这套本地环境一样通过环境变量覆盖端口。
+
+### 2. 本地运行
 
 ```powershell
 python run_cli.py dump-config data/config.json
 python run_cli.py serve --config data/config.json
 ```
 
-## 开发者入口
-
-### 常用命令
+## 常用命令
 
 ```powershell
 # 全量测试
 python -B -m unittest discover -s tests -v
 
-# 单测文件
+# 单个测试文件
 python -B -m unittest tests.test_app -v
 
 # 启动服务
@@ -181,45 +107,80 @@ python run_cli.py serve --config data/config.json
 # 检查 NapCat sidecar
 python run_cli.py check-sidecar --config data/config.json
 
-# 导出 / 导入技能包
+# 检查 OpenClaw 兼容运行时
+python run_cli.py check-claw-runtime --config data/config.json
+
+# 列出 ClawRuntime 插件
+python run_cli.py list-claw-plugins --config data/config.json
+
+# 导出 / 导入 skill pack
 python run_cli.py export-skill-pack --config data/config.json --output pack.json
 python run_cli.py import-skill-pack --config data/config.json --input pack.json
+
+# 导入本地 skill bundle
+python run_cli.py import-skill-bundle --config data/config.json --input C:\path\to\bundle
 ```
 
-### 代码阅读顺序
+## 配置说明
 
-如果你是第一次接手，建议按这个顺序看：
+配置由 `AppConfig` 管理，主文件通常是 `data/config.json`。
 
-1. `src/waifu_standalone/app.py`
-2. `src/waifu_standalone/cells/cards.py`
-3. `src/waifu_standalone/memory.py`
-4. `src/waifu_standalone/state_store.py`
-5. `src/waifu_standalone/console_panels.py`
-6. `src/waifu_standalone/http_api.py` / `http_api_async.py`
+- JSON 文件是主配置源
+- 环境变量会以 `OPENQQWAIFU_` 前缀覆盖配置
+- 可通过 `dump-config` 生成带默认值的模板
 
-## 当前已知边界
+关键配置块：
 
-这些问题不是“未知问题”，而是当前明确还在排队的工程项：
+- `llm`
+- `image_generation`
+- `embedding`
+- `qq_sidecar`
+- `marketplace`
+- `tool_policy`
+- `claw_runtime`
 
-- `WaifuService` 仍然很大，后续仍需要继续拆分
-- 可观测性仍然偏弱，结构化日志和 metrics 还没有补齐
-- graceful shutdown 还有继续完善空间
-- 配置 schema 校验还不够强
-- 同一张角色卡自己的知识回写，仍然可能把当前聊天风格沉淀到它自己的长期状态
+`claw_runtime` 里已经支持：
 
-最后这一条要特别强调：
+- `enabled`
+- `mode`
+- `routing_mode`
+- `plugin_tools_mcp_bridge`
+- `acp_enabled`
+- `acp_default_command`
+- `acp_default_args`
+- `codex_harness_command`
+- `codex_harness_args`
+- `acp_session_timeout_seconds`
 
-项目当前已经修的是“跨角色串人格”，不是“阻止角色学习它自己刚聊出来的内容”。
+## 目录结构
 
-## 这份 README 的定位
+| 路径 | 作用 |
+|---|---|
+| `src/waifu_standalone/app.py` | 核心运行时编排 |
+| `src/waifu_standalone/cli.py` | CLI 入口 |
+| `src/waifu_standalone/config.py` | dataclass 配置定义 |
+| `src/waifu_standalone/http_api.py` | 同步 HTTP API |
+| `src/waifu_standalone/http_api_async.py` | 异步 HTTP API |
+| `src/waifu_standalone/console_panels.py` | 控制台面板数据 |
+| `src/waifu_standalone/skill_dispatcher.py` | skill 调度与 tool 分发 |
+| `src/waifu_standalone/cells/skill_registry.py` | skill 注册与兼容层 |
+| `src/waifu_standalone/cells/tool_registry.py` | tool 注册表 |
+| `src/waifu_standalone/cells/marketplace.py` | marketplace 聚合与下载 |
+| `src/waifu_standalone/cells/skill_bundle.py` | bundle 导入 |
+| `src/waifu_standalone/claw_runtime.py` | Python -> ClawRuntime bridge |
+| `src/waifu_standalone/claw_runtime_server.mjs` | 受管 Node/OpenClaw 兼容运行时 |
+| `src/waifu_standalone/web/` | Web Console 静态资源 |
+| `src/waifu_standalone/builtin_skills/` | 内置技能定义 |
+| `tests/` | 单测与集成测试 |
 
-这份 README 不再把项目描述成“还在试验的脚本集合”，而是把它当成一个正在持续工程化的独立服务来写。
+## 当前边界
 
-如果你接下来要继续推进项目，当前比较明确的优先级是：
+项目已经具备 OpenClaw 等级兼容的主骨架，但边界仍然明确：
 
-1. 继续拆 `WaifuService`
-2. 补 structured logging / metrics
-3. 继续打磨角色隔离边界和运行时生命周期
+- 目标是“对齐 OpenClaw 已接线能力面”，不是兼容所有外部 skill
+- detect-only 能力会明确显示，不会伪装成已可执行
+- ACP / Codex harness 已经有 session bridge，但是否真的可用仍取决于你是否配置了实际 harness 命令
+- `WaifuService` 仍然偏大，后续还可以继续拆分
 
 ## 文档
 
@@ -227,3 +188,7 @@ python run_cli.py import-skill-pack --config data/config.json --input pack.json
 - [docs/DEPLOYMENT_PLAN.md](./docs/DEPLOYMENT_PLAN.md)
 - [docs/MEMORY_SYSTEM_PLAN.md](./docs/MEMORY_SYSTEM_PLAN.md)
 - [docs/MIGRATION_GAP_ANALYSIS.md](./docs/MIGRATION_GAP_ANALYSIS.md)
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=shinonome123/openqqwaifu&type=Date)](https://www.star-history.com/#shinonome123/openqqwaifu&Date)
