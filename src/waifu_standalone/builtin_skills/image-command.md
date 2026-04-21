@@ -1,8 +1,9 @@
 ---
 id: image-command
 name: 直接生图
-description: 当前缀是生图或 draw 时，直接调用图片生成工具。
+description: 当用户明确要你生成图片时，直接调用图片生成工具。
 triggers: ["生图", "draw", "画一张", "生成一张图"]
+aliases: ["image", "image_generate", "draw", "生成图片", "画图"]
 mode: prefix
 priority: 13
 user-invocable: true

@@ -11,7 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from waifu_standalone.cells.skill_registry import SkillSpec
-from waifu_standalone.cells.tool_registry import ToolInvocation, ToolRegistry
+from waifu_standalone.cells.tool_registry import ToolExecutionResult, ToolInvocation, ToolRegistry
 from waifu_standalone.models import InboundEvent, MessageSegment, OutboundMessage, SessionMemory
 
 
@@ -33,6 +33,7 @@ def _build_invocation() -> ToolInvocation:
         name="Demo",
         description="",
         triggers=["demo"],
+        aliases=[],
         mode="prefix",
         priority=0,
         content="",
@@ -150,6 +151,50 @@ class ToolRegistryTests(unittest.TestCase):
         assert result is not None
         self.assertEqual(result.text, "hello")
         self.assertEqual(calls, ["sync"])
+
+    def test_model_schemas_only_expose_model_callable_tools(self) -> None:
+        registry = ToolRegistry()
+
+        def handler(invocation: ToolInvocation) -> OutboundMessage | None:
+            return OutboundMessage(
+                launcher_id=invocation.event.launcher_id,
+                launcher_type=invocation.event.launcher_type,
+                text="ok",
+            )
+
+        registry.register(
+            "demo-tool",
+            name="Demo",
+            description="callable from model",
+            handler=handler,
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            model_handler=lambda invocation: ToolExecutionResult(text="demo"),
+        )
+        registry.register(
+            "write-tool",
+            name="Write",
+            description="direct only",
+            handler=handler,
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            },
+            model_handler=lambda invocation: ToolExecutionResult(text="write"),
+            model_callable=False,
+        )
+
+        schemas = registry.model_schemas()
+        described = registry.describe()
+        items_by_id = {item["id"]: item for item in described["items"]}
+
+        self.assertEqual([item["name"] for item in schemas], ["demo-tool"])
+        self.assertEqual(described["model_callable_count"], 1)
+        self.assertTrue(items_by_id["demo-tool"]["model_callable"])
+        self.assertFalse(items_by_id["write-tool"]["model_callable"])
 
 
 if __name__ == "__main__":

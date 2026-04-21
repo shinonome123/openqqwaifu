@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import time
+import tempfile
 from copy import deepcopy
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .cells.config import serialize_app_config
@@ -14,6 +16,26 @@ if TYPE_CHECKING:
 
 
 _MASK_SENTINEL = "..."
+_RESTRICTED_TOOL_IDS = {"write-file", "exec-command"}
+_BUILTIN_CAPABILITY_MAP: dict[str, dict[str, str]] = {
+    "image": {"title": "生图", "summary": "生成图片并直接回传。", "category": "creative"},
+    "image-caption": {"title": "生图交付", "summary": "为生成后的图片补交付文案。", "category": "creative"},
+    "search": {"title": "联网搜索", "summary": "执行联网检索并整理结果。", "category": "network"},
+    "search-links": {"title": "来源链接", "summary": "返回搜索结果对应的来源链接。", "category": "network"},
+    "summary": {"title": "会话总结", "summary": "总结最近的对话上下文。", "category": "memory"},
+    "summarize": {"title": "外部内容总结", "summary": "总结链接、视频或文件内容。", "category": "content"},
+    "skill-list": {"title": "技能列表", "summary": "列出当前可用技能和触发方式。", "category": "orchestration"},
+    "web-fetch": {"title": "抓取网页", "summary": "抓取 URL 文本并归一化输出。", "category": "network"},
+    "read-file": {"title": "读取文件", "summary": "读取允许目录内的文件内容。", "category": "filesystem"},
+    "list-files": {"title": "列出文件", "summary": "列出允许目录内的文件和目录。", "category": "filesystem"},
+    "write-file": {"title": "写入文件", "summary": "写入允许目录内的文件。", "category": "filesystem"},
+    "exec-command": {"title": "执行命令", "summary": "执行白名单命令。", "category": "runtime"},
+}
+_PROMPT_CAPABILITY_MAP: dict[str, dict[str, str]] = {
+    "freshness-check": {"title": "时效性核验", "summary": "提醒模型优先核验时效性。", "category": "prompt"},
+    "concise-answer": {"title": "简洁回答", "summary": "压缩回答长度，优先给结论。", "category": "prompt"},
+    "image-handoff": {"title": "生图交付语气", "summary": "统一图片交付时的语气和文案。", "category": "prompt"},
+}
 
 
 def _mask_key(key: str) -> str:
@@ -575,11 +597,192 @@ class ConsolePanels:
 
     def get_skills_panel(self) -> dict[str, object]:
         svc = self.service
+        skills = svc.list_skills()
+        tools = svc.list_tools()
         return {
-            "skills": svc.list_skills(),
-            "tools": svc.list_tools(),
+            "skills": skills,
+            "tools": tools,
+            "capabilities": self._normalized_capabilities(skills, tools),
+            "skill_groups": self._grouped_skills(skills),
+            "tool_groups": self._grouped_tools(tools),
+            "safety": self._tool_policy_panel(),
+            "claw_runtime": svc.get_claw_runtime_panel(refresh=True),
             "marketplace": svc.marketplace.describe(),
         }
+
+    def _normalized_capabilities(
+        self,
+        skills_payload: dict[str, object],
+        tools_payload: dict[str, object],
+    ) -> list[dict[str, object]]:
+        skill_items = [
+            dict(item)
+            for item in list(skills_payload.get("items", []))
+            if isinstance(item, dict)
+        ]
+        tool_items = [
+            dict(item)
+            for item in list(tools_payload.get("items", []))
+            if isinstance(item, dict)
+        ]
+        by_tool: dict[str, list[dict[str, object]]] = {}
+        for skill in skill_items:
+            tool_id = str(skill.get("command_tool", "") or "").strip()
+            if tool_id:
+                by_tool.setdefault(tool_id, []).append(skill)
+        items: list[dict[str, object]] = []
+        for tool in tool_items:
+            tool_id = str(tool.get("id", "") or "").strip()
+            meta = _BUILTIN_CAPABILITY_MAP.get(tool_id, {})
+            attached_skills = by_tool.get(tool_id, [])
+            source_kind = "builtin" if tool_id in _BUILTIN_CAPABILITY_MAP else "runtime"
+            if attached_skills:
+                source_kind = str(attached_skills[0].get("source_kind", source_kind) or source_kind)
+            items.append(
+                {
+                    "id": tool_id,
+                    "title": meta.get("title", tool.get("name") or tool_id),
+                    "summary": meta.get("summary", tool.get("description") or ""),
+                    "category": meta.get("category", "runtime"),
+                    "type": "tool",
+                    "source_kind": source_kind,
+                    "model_callable": bool(tool.get("model_callable")),
+                    "restricted": tool_id in _RESTRICTED_TOOL_IDS,
+                    "aliases": list(tool.get("aliases", [])),
+                    "dispatch_skill_ids": [str(skill.get("id", "") or "") for skill in attached_skills],
+                    "dispatch_skill_count": len(attached_skills),
+                }
+            )
+        for skill in skill_items:
+            if str(skill.get("command_dispatch", "") or "").strip() == "tool":
+                continue
+            skill_id = str(skill.get("id", "") or "").strip()
+            meta = _PROMPT_CAPABILITY_MAP.get(skill_id, {})
+            items.append(
+                {
+                    "id": skill_id,
+                    "title": meta.get("title", skill.get("name") or skill_id),
+                    "summary": meta.get("summary", skill.get("description") or ""),
+                    "category": meta.get("category", "prompt"),
+                    "type": "prompt",
+                    "source_kind": str(skill.get("source_kind", "workspace") or "workspace"),
+                    "model_callable": False,
+                    "restricted": False,
+                    "aliases": list(skill.get("aliases", [])),
+                    "dispatch_skill_ids": [skill_id],
+                    "dispatch_skill_count": 1,
+                }
+            )
+        items.sort(
+            key=lambda item: (
+                0 if str(item.get("source_kind")) == "builtin" else 1,
+                0 if str(item.get("type")) == "tool" else 1,
+                str(item.get("title", "")).lower(),
+            )
+        )
+        return items
+
+    def _grouped_skills(self, skills_payload: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+        skill_items = [
+            dict(item)
+            for item in list(skills_payload.get("items", []))
+            if isinstance(item, dict)
+        ]
+        groups = {
+            "builtin": [],
+            "workspace": [],
+            "plugin": [],
+            "prompt": [],
+            "tool_dispatch": [],
+            "restricted": [],
+        }
+        for skill in skill_items:
+            source_kind = str(skill.get("source_kind", "workspace") or "workspace")
+            command_dispatch = str(skill.get("command_dispatch", "") or "").strip()
+            command_tool = str(skill.get("command_tool", "") or "").strip()
+            if source_kind in groups:
+                groups[source_kind].append(skill)
+            else:
+                groups["workspace"].append(skill)
+            if command_dispatch == "tool":
+                groups["tool_dispatch"].append(skill)
+                if command_tool in _RESTRICTED_TOOL_IDS:
+                    groups["restricted"].append(skill)
+            else:
+                groups["prompt"].append(skill)
+        return groups
+
+    def _grouped_tools(self, tools_payload: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+        tool_items = [
+            dict(item)
+            for item in list(tools_payload.get("items", []))
+            if isinstance(item, dict)
+        ]
+        groups = {
+            "builtin": [],
+            "runtime": [],
+            "model_callable": [],
+            "restricted": [],
+            "aliased": [],
+        }
+        for tool in tool_items:
+            tool_id = str(tool.get("id", "") or "").strip()
+            if tool_id in _BUILTIN_CAPABILITY_MAP:
+                groups["builtin"].append(tool)
+            else:
+                groups["runtime"].append(tool)
+            if bool(tool.get("model_callable")):
+                groups["model_callable"].append(tool)
+            if tool_id in _RESTRICTED_TOOL_IDS:
+                groups["restricted"].append(tool)
+            if list(tool.get("aliases", [])):
+                groups["aliased"].append(tool)
+        return groups
+
+    def _tool_policy_panel(self) -> dict[str, object]:
+        policy = self.service.config.tool_policy
+        return {
+            "enabled": policy.enabled,
+            "allowed_roots": list(policy.allowed_roots),
+            "write_enabled": policy.write_enabled,
+            "write_allowed_roots": list(policy.write_allowed_roots),
+            "exec_enabled": policy.exec_enabled,
+            "exec_allowed_roots": list(policy.exec_allowed_roots),
+            "exec_allowlist": list(policy.exec_allowlist),
+            "resolved_allowed_roots": self._resolve_policy_roots(policy.allowed_roots),
+            "resolved_write_allowed_roots": self._resolve_policy_roots(policy.write_allowed_roots),
+            "resolved_exec_allowed_roots": self._resolve_policy_roots(policy.exec_allowed_roots),
+            "restricted_tools": sorted(_RESTRICTED_TOOL_IDS),
+        }
+
+    def _resolve_policy_roots(self, raw_roots: list[str]) -> list[str]:
+        config_path = str(self.service.config.config_path or "").strip()
+        if config_path:
+            try:
+                base_dir = Path(config_path).resolve().parent
+            except OSError:
+                base_dir = Path.cwd().resolve()
+        else:
+            base_dir = Path.cwd().resolve()
+        roots: list[str] = []
+        for item in raw_roots:
+            token = str(item or "").strip()
+            lowered = token.replace("\\", "/").strip().lower()
+            if lowered in {"data", "./data", ".\\data"}:
+                path = Path(self.service.config.data_root or ".").expanduser()
+            elif lowered in {".", "./", ".\\"}:
+                path = base_dir
+            else:
+                path = Path(token).expanduser()
+                if not path.is_absolute():
+                    path = base_dir / path
+            try:
+                resolved = str(path.resolve(strict=False))
+            except OSError:
+                continue
+            if resolved not in roots:
+                roots.append(resolved)
+        return roots
 
     def search_marketplace(self, query: str, *, source_id: str = "", limit: int = 12) -> dict[str, object]:
         return self.service.marketplace.search(query, source_id=source_id, limit=limit)
@@ -591,10 +794,22 @@ class ConsolePanels:
         github_url: str,
     ) -> dict[str, object]:
         svc = self.service
-        payload = svc.marketplace.fetch_skill_markdown(source_id, github_url)
-        skill = svc.install_skill(payload["markdown"], filename=payload["filename"])
-        skill["raw_url"] = payload["raw_url"]
-        return skill
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prepared = svc.marketplace.prepare_skill_bundle(source_id, github_url, tmpdir)
+            result = svc.import_skill_bundle(
+                prepared["path"],
+                source_metadata={
+                    "source_id": source_id,
+                    "source_url": prepared.get("source_url", github_url),
+                    "bundle_url": prepared.get("bundle_url", ""),
+                    "page_url": prepared.get("page_url", ""),
+                },
+            )
+        result["source_id"] = source_id
+        result["source_url"] = prepared.get("source_url", github_url)
+        result["bundle_url"] = prepared.get("bundle_url", "")
+        result["page_url"] = prepared.get("page_url", "")
+        return result
 
     def get_sidecar_panel(self, *, refresh: bool = False) -> dict[str, object]:
         svc = self.service

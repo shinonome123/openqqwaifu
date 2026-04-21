@@ -1,9 +1,115 @@
-// Skills page: toggle skills, marketplace search and import.
+// Skills page: normalized capabilities, grouped skills, tool safety and marketplace import.
 
 import { api } from "../api.js";
-import { el, card, chip, empty, switchControl, textInput, statCard } from "../components.js";
-import { t, onLangChange } from "../i18n.js";
-import { toastOk, toastError, confirmDialog } from "../ui.js";
+import { card, chip, el, empty, statCard, switchControl, textInput } from "../components.js";
+import { getLang, onLangChange, t } from "../i18n.js";
+import { confirmDialog, toastError, toastOk } from "../ui.js";
+
+const COPY = {
+  en: {
+    capabilitiesTitle: "Capability board",
+    capabilitiesDesc: "Normalized built-in abilities and prompt-only overlays currently wired into the runtime.",
+    capabilityDispatchCount: "{count} dispatch skill(s)",
+    capabilityAliasCount: "{count} alias(es)",
+    skillSourcesTitle: "Skill sources",
+    skillSourcesDesc: "Loaded skills grouped by where they come from.",
+    skillModesTitle: "Dispatch modes",
+    skillModesDesc: "How the runtime currently uses each skill.",
+    builtin: "Built-in",
+    workspace: "Workspace",
+    plugin: "Plugin",
+    prompt: "Prompt-only",
+    toolDispatch: "Tool dispatch",
+    restricted: "Restricted",
+    aliases: "Aliases",
+    commandArgMode: "Argument mode",
+    modelCallable: "Model callable",
+    manualOnly: "Manual only",
+    typeTool: "tool",
+    typePrompt: "prompt",
+    safetyTitle: "Safety policy",
+    safetyDesc: "Write/exec tools are restricted by configured roots and command allowlists.",
+    allowedRoots: "Allowed roots",
+    writeRoots: "Write roots",
+    execRoots: "Exec roots",
+    execAllowlist: "Exec allowlist",
+    enabled: "enabled",
+    disabled: "disabled",
+    noAliases: "No aliases",
+    clawTitle: "Claw runtime",
+    clawDesc: "Managed OpenClaw-compatible runtime status, plugin routing owner, and capability diagnostics.",
+    clawPlugins: "Installed plugins",
+    clawRouting: "Routing",
+    clawState: "State",
+    clawHealthy: "Healthy",
+    clawRefresh: "Refresh runtime",
+    clawCheck: "Check plugins",
+    clawUpdate: "Update",
+    clawDetectOnly: "Detect only",
+    clawUnsupported: "Unsupported",
+    clawWired: "Wired",
+    clawPluginCount: "{count} plugin(s)",
+    clawCapabilityCount: "{count} capability item(s)",
+    clawToolCount: "{count} tool(s)",
+    clawAcp: "ACP",
+    clawCodexHarness: "Codex Harness",
+  },
+  zh: {
+    capabilitiesTitle: "能力面板",
+    capabilitiesDesc: "把内置能力和 Prompt 型附加行为归一化后展示，便于确认哪些真的已经接上 tool。",
+    capabilityDispatchCount: "{count} 个分发技能",
+    capabilityAliasCount: "{count} 个语义别名",
+    skillSourcesTitle: "技能来源",
+    skillSourcesDesc: "按来源查看当前已加载技能。",
+    skillModesTitle: "技能模式",
+    skillModesDesc: "按运行方式查看当前技能如何参与回复或分发。",
+    builtin: "内置",
+    workspace: "工作区",
+    plugin: "插件",
+    prompt: "Prompt 型",
+    toolDispatch: "Tool 分发",
+    restricted: "受限",
+    aliases: "别名",
+    commandArgMode: "参数模式",
+    modelCallable: "模型可自主调用",
+    manualOnly: "仅显式调用",
+    typeTool: "tool",
+    typePrompt: "prompt",
+    safetyTitle: "安全策略",
+    safetyDesc: "写文件 / 执行命令都会受到目录白名单和命令白名单限制。",
+    allowedRoots: "通用允许目录",
+    writeRoots: "写入允许目录",
+    execRoots: "执行允许目录",
+    execAllowlist: "执行命令白名单",
+    enabled: "启用",
+    disabled: "禁用",
+    noAliases: "无别名",
+    clawTitle: "Claw 运行时",
+    clawDesc: "受管的 OpenClaw 兼容运行时状态、插件路由归属和能力诊断。",
+    clawPlugins: "已安装插件",
+    clawRouting: "路由",
+    clawState: "状态",
+    clawHealthy: "健康",
+    clawRefresh: "刷新运行时",
+    clawCheck: "检查插件",
+    clawUpdate: "更新",
+    clawDetectOnly: "仅检测",
+    clawUnsupported: "未接线",
+    clawWired: "已接线",
+    clawPluginCount: "{count} 个插件",
+    clawCapabilityCount: "{count} 条能力项",
+    clawToolCount: "{count} 个工具",
+    clawAcp: "ACP",
+    clawCodexHarness: "Codex Harness",
+  },
+};
+
+function copy(key, params = {}) {
+  const dict = COPY[getLang()] || COPY.en;
+  const fallback = COPY.en[key] || key;
+  const template = dict[key] || fallback;
+  return String(template).replace(/\{(\w+)\}/g, (_, name) => String(params[name] ?? ""));
+}
 
 export function mount(root) {
   let stopped = false;
@@ -30,7 +136,7 @@ export function mount(root) {
     try {
       await api.toggleSkill(skillId, enabled);
       toastOk(t("actions.savedOk"));
-      load();
+      await load();
     } catch (err) {
       toastError(t("actions.saveFailed", { msg: err?.message || err }));
     }
@@ -46,7 +152,7 @@ export function mount(root) {
     try {
       await api.deleteSkill(skillId);
       toastOk(t("skills.deleted"));
-      load();
+      await load();
     } catch (err) {
       toastError(err?.message || String(err));
     }
@@ -66,7 +172,7 @@ export function mount(root) {
     try {
       await api.importMarketplace(sourceId, githubUrl);
       toastOk(t("actions.savedOk"));
-      load();
+      await load();
     } catch (err) {
       toastError(err?.message || String(err));
     }
@@ -95,7 +201,7 @@ export function mount(root) {
               try {
                 await api.reloadSkills();
                 toastOk(t("skills.reloaded"));
-                load();
+                await load();
               } catch (err) {
                 toastError(err?.message || String(err));
               }
@@ -111,18 +217,24 @@ export function mount(root) {
     }
 
     container.appendChild(renderSummary());
-    container.appendChild(renderSkillsList());
+    container.appendChild(renderClawRuntime());
+    container.appendChild(renderCapabilities());
     container.appendChild(
-      el("div", { class: "skills-secondary-grid" }, [renderToolsList(), renderMarketplace()]),
+      el("div", { class: "skills-secondary-grid" }, [
+        renderSkillSources(),
+        renderSkillModes(),
+        renderToolsList(),
+        renderMarketplace(),
+      ]),
     );
   }
 
   function renderSummary() {
     const skills = panel?.skills?.items || [];
+    const capabilities = panel?.capabilities || [];
     const tools = panel?.tools?.items || [];
-    const sources = panel?.marketplace?.sources || [];
+    const restrictedTools = panel?.tool_groups?.restricted || [];
     const enabledCount = skills.filter((item) => !!item?.enabled).length;
-    const enabledSources = sources.filter((item) => !!item?.enabled).length;
     return el("div", { class: "kpi-row skills-summary-row" }, [
       statCard({
         label: t("skills.summary.enabled"),
@@ -130,83 +242,337 @@ export function mount(root) {
         meta: t("skills.summary.enabledMeta", { count: skills.length }),
       }),
       statCard({
+        label: copy("capabilitiesTitle"),
+        value: String(capabilities.length),
+        meta: `${capabilities.filter((item) => item?.source_kind === "builtin").length} builtin`,
+      }),
+      statCard({
         label: t("skills.summary.tools"),
         value: String(tools.length),
         meta: t("skills.summary.toolsMeta", { count: tools.length }),
       }),
       statCard({
-        label: t("skills.summary.sources"),
-        value: String(enabledSources),
-        meta: t("skills.summary.sourcesMeta", { count: sources.length }),
-      }),
-      statCard({
-        label: t("skills.summary.results"),
-        value: String(results.length),
-        meta: query ? `"${query}"` : t("skills.summary.resultsIdle"),
+        label: copy("restricted"),
+        value: String(restrictedTools.length),
+        meta: panel?.safety?.enabled ? copy("enabled") : copy("disabled"),
       }),
     ]);
   }
 
-  function renderSkillsList() {
-    const skills = panel?.skills?.items || [];
-    const enabledCount = skills.filter((item) => !!item?.enabled).length;
-    if (!Array.isArray(skills) || !skills.length) {
+  function renderCapabilities() {
+    const capabilities = Array.isArray(panel?.capabilities) ? panel.capabilities : [];
+    if (!capabilities.length) {
       return card({
-        title: t("nav.skills"),
+        title: copy("capabilitiesTitle"),
+        subtitle: copy("capabilitiesDesc"),
         body: [empty({ title: t("common.empty") })],
       });
     }
     return card({
-      title: `${t("nav.skills")} (${skills.length})`,
-      subtitle: t("skills.section.skillsDesc"),
-      actions: [chip({ label: `${enabledCount}/${skills.length}`, variant: "ok" })],
-      body: skills.map((skill) =>
-        el("div", { class: "rule-card skill-rule-card" }, [
-          el("div", { class: "rule-card-head" }, [
-            el("div", {}, [
-              el("div", { class: "rule-card-title", text: skill.name || skill.id }),
-              el("div", { class: "rule-card-desc", text: skill.description || "" }),
-            ]),
-            el("div", { class: "row-tight" }, [
-              switchControl({
-                checked: !!skill.enabled,
-                onChange: (v) => toggle(skill.id, v),
+      title: `${copy("capabilitiesTitle")} (${capabilities.length})`,
+      subtitle: copy("capabilitiesDesc"),
+      body: [
+        el(
+          "div",
+          { class: "skills-capability-grid" },
+          capabilities.map((capability) => renderCapabilityCard(capability)),
+        ),
+      ],
+    });
+  }
+
+  function renderClawRuntime() {
+    const runtime = panel?.claw_runtime || {};
+    const plugins = runtime?.plugins?.items || [];
+    const tools = runtime?.tools?.items || [];
+    return card({
+      title: copy("clawTitle"),
+      subtitle: copy("clawDesc"),
+      body: [
+        el("div", { class: "row" }, [
+          chip({ label: `enabled:${runtime?.enabled ? copy("enabled") : copy("disabled")}`, variant: runtime?.enabled ? "ok" : "outline" }),
+          chip({ label: `${copy("clawState")}: ${runtime?.state || "idle"}`, variant: runtime?.healthy ? "ok" : "outline" }),
+          chip({ label: `${copy("clawRouting")}: ${runtime?.routing_mode || "shadow"}`, variant: "info" }),
+          chip({ label: `${copy("clawHealthy")}: ${runtime?.healthy ? copy("enabled") : copy("disabled")}`, variant: runtime?.healthy ? "ok" : "danger" }),
+          chip({ label: `${copy("clawAcp")}: ${runtime?.acp_enabled ? copy("enabled") : copy("disabled")}`, variant: runtime?.acp_enabled ? "ok" : "outline" }),
+          chip({ label: `${copy("clawCodexHarness")}: ${runtime?.codex_harness_configured ? copy("enabled") : copy("disabled")}`, variant: runtime?.codex_harness_configured ? "ok" : "outline" }),
+          chip({ label: copy("clawPluginCount", { count: plugins.length }), variant: "outline" }),
+          chip({ label: copy("clawToolCount", { count: tools.length }), variant: "outline" }),
+        ]),
+        el("div", { class: "row-tight" }, [
+          el("button", {
+            type: "button",
+            class: "btn is-sm",
+            text: copy("clawRefresh"),
+            onClick: async () => {
+              try {
+                panel.claw_runtime = await api.getClawRuntimePanel(true);
+                render();
+              } catch (err) {
+                toastError(err?.message || String(err));
+              }
+            },
+          }),
+          el("button", {
+            type: "button",
+            class: "btn is-sm",
+            text: copy("clawCheck"),
+            onClick: async () => {
+              try {
+                const checked = await api.checkClawPlugins();
+                panel.claw_runtime = { ...(panel?.claw_runtime || {}), plugins: checked };
+                render();
+              } catch (err) {
+                toastError(err?.message || String(err));
+              }
+            },
+          }),
+        ]),
+        runtime?.error ? chip({ label: runtime.error, variant: "danger" }) : null,
+        tools.length
+          ? el(
+              "div",
+              { class: "row" },
+              tools.slice(0, 10).map((tool) =>
+                chip({
+                  label: `${tool.id}:${tool.status}`,
+                  variant:
+                    tool.status === "wired"
+                      ? "ok"
+                      : tool.status === "detect_only"
+                        ? "info"
+                        : "outline",
+                }),
+              ),
+            )
+          : null,
+        plugins.length
+          ? el(
+              "div",
+              { class: "skill-panel-stack" },
+              plugins.map((plugin) => renderClawPluginCard(plugin)),
+            )
+          : empty({ title: t("common.empty") }),
+      ],
+    });
+  }
+
+  function renderClawPluginCard(plugin) {
+    const capabilities = Array.isArray(plugin?.capabilities) ? plugin.capabilities : [];
+    const counts = plugin?.capability_counts || {};
+    const canUpdate = !!plugin?.source_id && !!plugin?.source_url;
+    return el("div", { class: "rule-card skill-rule-card" }, [
+      el("div", { class: "rule-card-head" }, [
+        el("div", {}, [
+          el("div", { class: "rule-card-title", text: plugin.name || plugin.id || "plugin" }),
+          el("div", { class: "rule-card-desc", text: `${plugin.format || "bundle"} / ${plugin.bundle_type || "none"}` }),
+        ]),
+        el("div", { class: "row-tight" }, [
+          canUpdate
+            ? el("button", {
+                type: "button",
+                class: "btn is-sm",
+                text: copy("clawUpdate"),
+                onClick: async () => {
+                  try {
+                    await api.updateClawPlugin(plugin.id);
+                    await load();
+                  } catch (err) {
+                    toastError(err?.message || String(err));
+                  }
+                },
+              })
+            : null,
+          chip({ label: plugin.id || "plugin", variant: "info" }),
+        ]),
+      ]),
+      el("div", { class: "row" }, [
+        chip({ label: `owner:${plugin.owner_routing || "python"}`, variant: plugin.owner_routing === "claw" ? "ok" : "outline" }),
+        chip({ label: `${copy("clawWired")}: ${counts.wired || 0}`, variant: "ok" }),
+        chip({ label: `${copy("clawDetectOnly")}: ${counts.detect_only || 0}`, variant: (counts.detect_only || 0) > 0 ? "info" : "outline" }),
+        chip({ label: `${copy("clawUnsupported")}: ${counts.unsupported || 0}`, variant: (counts.unsupported || 0) > 0 ? "danger" : "outline" }),
+      ]),
+      capabilities.length
+        ? el(
+            "div",
+            { class: "row" },
+            capabilities.slice(0, 12).map((capability) =>
+              chip({
+                label: `${capability.kind}:${capability.status}`,
+                variant:
+                  capability.status === "wired"
+                    ? "ok"
+                    : capability.status === "detect_only"
+                      ? "info"
+                      : "danger",
               }),
-              el("button", {
+            ),
+          )
+        : null,
+      Array.isArray(plugin?.diagnostics) && plugin.diagnostics.length
+        ? el(
+            "div",
+            { class: "skill-meta-block" },
+            plugin.diagnostics.slice(0, 6).map((item) =>
+              chip({
+                label: `${item.kind}${item.reason ? `: ${item.reason}` : ""}`,
+                variant: item.status === "detect_only" ? "info" : "danger",
+              }),
+            ),
+          )
+        : null,
+    ]);
+  }
+
+  function renderCapabilityCard(capability) {
+    const aliases = Array.isArray(capability?.aliases) ? capability.aliases : [];
+    return el("div", { class: "rule-card skill-capability-card" }, [
+      el("div", { class: "rule-card-head" }, [
+        el("div", {}, [
+          el("div", { class: "rule-card-title", text: capability.title || capability.id || "capability" }),
+          el("div", { class: "rule-card-desc", text: capability.summary || "" }),
+        ]),
+        chip({
+          label: capability.type === "prompt" ? copy("typePrompt") : copy("typeTool"),
+          variant: capability.type === "prompt" ? "outline" : "ok",
+        }),
+      ]),
+      el("div", { class: "row" }, [
+        capability.id ? chip({ label: capability.id, variant: "info" }) : null,
+        capability.category ? chip({ label: capability.category, variant: "outline" }) : null,
+        capability.source_kind ? chip({ label: capability.source_kind, variant: "outline" }) : null,
+        capability.model_callable ? chip({ label: copy("modelCallable"), variant: "ok" }) : null,
+        capability.restricted ? chip({ label: copy("restricted"), variant: "danger" }) : null,
+      ]),
+      el("div", { class: "skill-meta-block" }, [
+        chip({
+          label: copy("capabilityDispatchCount", { count: capability.dispatch_skill_count || 0 }),
+          variant: "outline",
+        }),
+        chip({
+          label: copy("capabilityAliasCount", { count: aliases.length }),
+          variant: aliases.length ? "info" : "outline",
+        }),
+        aliases.length
+          ? el(
+              "div",
+              { class: "row" },
+              aliases.slice(0, 8).map((alias) => chip({ label: alias, variant: "outline" })),
+            )
+          : null,
+      ]),
+    ]);
+  }
+
+  function renderSkillSources() {
+    const groups = panel?.skill_groups || {};
+    return card({
+      title: copy("skillSourcesTitle"),
+      subtitle: copy("skillSourcesDesc"),
+      body: [
+        renderSkillGroup(copy("builtin"), groups.builtin || []),
+        renderSkillGroup(copy("workspace"), groups.workspace || []),
+        renderSkillGroup(copy("plugin"), groups.plugin || []),
+      ],
+    });
+  }
+
+  function renderSkillModes() {
+    const groups = panel?.skill_groups || {};
+    return card({
+      title: copy("skillModesTitle"),
+      subtitle: copy("skillModesDesc"),
+      body: [
+        renderSkillGroup(copy("prompt"), groups.prompt || []),
+        renderSkillGroup(copy("toolDispatch"), groups.tool_dispatch || []),
+        renderSkillGroup(copy("restricted"), groups.restricted || []),
+      ],
+    });
+  }
+
+  function renderSkillGroup(title, items) {
+    const list = Array.isArray(items) ? items : [];
+    return el("section", { class: "skill-section" }, [
+      el("div", { class: "skill-section-head" }, [
+        el("div", { class: "skill-section-title", text: title }),
+        chip({ label: String(list.length), variant: list.length ? "info" : "outline" }),
+      ]),
+      list.length
+        ? el(
+            "div",
+            { class: "skill-panel-stack" },
+            list.map((skill) => renderSkillCard(skill)),
+          )
+        : empty({ title: t("common.empty") }),
+    ]);
+  }
+
+  function renderSkillCard(skill) {
+    const aliases = Array.isArray(skill?.aliases) ? skill.aliases : [];
+    return el("div", { class: "rule-card skill-rule-card" }, [
+      el("div", { class: "rule-card-head" }, [
+        el("div", {}, [
+          el("div", { class: "rule-card-title", text: skill.name || skill.id }),
+          el("div", { class: "rule-card-desc", text: skill.description || "" }),
+        ]),
+        el("div", { class: "row-tight" }, [
+          switchControl({
+            checked: !!skill.enabled,
+            onChange: (v) => toggle(skill.id, v),
+          }),
+          skill.deletable
+            ? el("button", {
                 type: "button",
                 class: "btn is-sm is-danger",
                 text: t("common.delete"),
                 onClick: () => removeSkill(skill.id),
-              }),
-            ]),
-          ]),
-            el("div", { class: "row" }, [
-              chip({ label: skill.id, variant: "outline" }),
-              skill.source_kind ? chip({ label: skill.source_kind, variant: "info" }) : null,
-              safeSourceLabel(skill.source)
-                ? chip({ label: safeSourceLabel(skill.source), variant: "outline" })
-                : null,
-              skill.command_dispatch === "tool"
-                ? chip({ label: `tool:${skill.command_tool || "unknown"}`, variant: "ok" })
-                : chip({ label: "prompt", variant: "outline" }),
-          ]),
-          Array.isArray(skill.triggers) && skill.triggers.length
-            ? el("div", { class: "skill-trigger-list" }, [
-                el("div", { class: "skill-trigger-label", text: t("skills.triggers") }),
-                el(
-                  "div",
-                  { class: "row" },
-                  skill.triggers.map((trigger) => chip({ label: trigger, variant: "outline" })),
-                ),
-              ])
+              })
             : null,
         ]),
-      ),
-    });
+      ]),
+      el("div", { class: "row" }, [
+        chip({ label: skill.id, variant: "outline" }),
+        skill.source_kind ? chip({ label: skill.source_kind, variant: "info" }) : null,
+        safeSourceLabel(skill.source)
+          ? chip({ label: safeSourceLabel(skill.source), variant: "outline" })
+          : null,
+        skill.directly_usable
+          ? chip({ label: "ready", variant: "ok" })
+          : chip({ label: "needs-setup", variant: "danger" }),
+        skill.auto_bound ? chip({ label: "auto-bound", variant: "info" }) : null,
+        skill.command_dispatch === "tool"
+          ? chip({ label: `tool:${skill.command_tool || "unknown"}`, variant: "ok" })
+          : chip({ label: copy("typePrompt"), variant: "outline" }),
+        skill.command_arg_mode && skill.command_dispatch === "tool"
+          ? chip({ label: `${copy("commandArgMode")}: ${skill.command_arg_mode}`, variant: "outline" })
+          : null,
+      ]),
+      Array.isArray(skill.triggers) && skill.triggers.length
+        ? el("div", { class: "skill-trigger-list" }, [
+            el("div", { class: "skill-trigger-label", text: t("skills.triggers") }),
+            el(
+              "div",
+              { class: "row" },
+              skill.triggers.map((trigger) => chip({ label: trigger, variant: "outline" })),
+            ),
+          ])
+        : null,
+      el("div", { class: "skill-trigger-list" }, [
+        el("div", { class: "skill-trigger-label", text: copy("aliases") }),
+        aliases.length
+          ? el(
+              "div",
+              { class: "row" },
+              aliases.map((alias) => chip({ label: alias, variant: "outline" })),
+            )
+          : chip({ label: copy("noAliases"), variant: "outline" }),
+      ]),
+    ]);
   }
 
   function renderToolsList() {
     const tools = panel?.tools?.items || [];
+    const safety = panel?.safety || {};
     if (!Array.isArray(tools) || !tools.length) {
       return card({
         title: t("skills.tools.title"),
@@ -216,18 +582,88 @@ export function mount(root) {
     return card({
       title: `${t("skills.tools.title")} (${tools.length})`,
       subtitle: t("skills.tools.desc"),
-      body: tools.map((tool) =>
-        el("div", { class: "rule-card skill-tool-card" }, [
-          el("div", { class: "rule-card-head" }, [
-            el("div", {}, [
-              el("div", { class: "rule-card-title", text: tool.name || tool.id }),
-              el("div", { class: "rule-card-desc", text: tool.description || "" }),
-            ]),
-            chip({ label: tool.id || "tool", variant: "info" }),
-          ]),
-        ]),
-      ),
+      body: [
+        renderSafetyBlock(safety),
+        ...tools.map((tool) => renderToolCard(tool)),
+      ],
     });
+  }
+
+  function renderSafetyBlock(safety) {
+    const allowlist = Array.isArray(safety?.exec_allowlist) ? safety.exec_allowlist : [];
+    return el("div", { class: "skill-safety-block" }, [
+      el("div", { class: "rule-card-title", text: copy("safetyTitle") }),
+      el("div", { class: "rule-card-desc", text: copy("safetyDesc") }),
+      el("div", { class: "row" }, [
+        chip({ label: `${copy("allowedRoots")}: ${(safety?.resolved_allowed_roots || []).length}`, variant: "outline" }),
+        chip({
+          label: `${copy("writeRoots")}: ${(safety?.resolved_write_allowed_roots || []).length}`,
+          variant: safety?.write_enabled ? "ok" : "danger",
+        }),
+        chip({
+          label: `${copy("execRoots")}: ${(safety?.resolved_exec_allowed_roots || []).length}`,
+          variant: safety?.exec_enabled ? "ok" : "danger",
+        }),
+      ]),
+      el("div", { class: "skill-meta-block" }, [
+        renderPathGroup(copy("allowedRoots"), safety?.resolved_allowed_roots || []),
+        renderPathGroup(copy("writeRoots"), safety?.resolved_write_allowed_roots || []),
+        renderPathGroup(copy("execRoots"), safety?.resolved_exec_allowed_roots || []),
+        el("div", { class: "skill-trigger-list" }, [
+          el("div", { class: "skill-trigger-label", text: copy("execAllowlist") }),
+          allowlist.length
+            ? el(
+                "div",
+                { class: "row" },
+                allowlist.map((item) => chip({ label: item, variant: "outline" })),
+              )
+            : chip({ label: copy("disabled"), variant: "danger" }),
+        ]),
+      ]),
+    ]);
+  }
+
+  function renderPathGroup(title, items) {
+    return el("div", { class: "skill-trigger-list" }, [
+      el("div", { class: "skill-trigger-label", text: title }),
+      items.length
+        ? el(
+            "div",
+            { class: "row" },
+            items.map((item) => chip({ label: item, variant: "outline" })),
+          )
+        : chip({ label: t("common.none"), variant: "outline" }),
+    ]);
+  }
+
+  function renderToolCard(tool) {
+    const aliases = Array.isArray(tool?.aliases) ? tool.aliases : [];
+    const restricted = panel?.tool_groups?.restricted?.some((item) => item?.id === tool?.id);
+    return el("div", { class: "rule-card skill-tool-card" }, [
+      el("div", { class: "rule-card-head" }, [
+        el("div", {}, [
+          el("div", { class: "rule-card-title", text: tool.name || tool.id }),
+          el("div", { class: "rule-card-desc", text: tool.description || "" }),
+        ]),
+        chip({ label: tool.id || "tool", variant: "info" }),
+      ]),
+      el("div", { class: "row" }, [
+        tool.model_callable
+          ? chip({ label: copy("modelCallable"), variant: "ok" })
+          : chip({ label: copy("manualOnly"), variant: "outline" }),
+        restricted ? chip({ label: copy("restricted"), variant: "danger" }) : null,
+        aliases.length
+          ? chip({ label: `${copy("aliases")}: ${aliases.length}`, variant: "outline" })
+          : chip({ label: copy("noAliases"), variant: "outline" }),
+      ]),
+      aliases.length
+        ? el(
+            "div",
+            { class: "row" },
+            aliases.map((alias) => chip({ label: alias, variant: "outline" })),
+          )
+        : null,
+    ]);
   }
 
   function renderMarketplace() {
@@ -265,7 +701,10 @@ export function mount(root) {
           el("div", { class: "rule-card skill-marketplace-card" }, [
             el("div", { class: "rule-card-head" }, [
               el("div", {}, [
-                el("div", { class: "rule-card-title", text: item.name || item.title || item.skill_id || "?" }),
+                el("div", {
+                  class: "rule-card-title",
+                  text: item.name || item.title || item.skill_id || "?",
+                }),
                 el("div", { class: "rule-card-desc", text: item.description || "" }),
               ]),
               el("button", {
@@ -275,12 +714,16 @@ export function mount(root) {
                 onClick: () =>
                   importFromResult(
                     item.source_id || sources[0]?.id || "",
-                    item.github_url || item.skill_url || item.raw_url || "",
+                    item.install_url || item.github_url || item.skill_url || item.raw_url || "",
                   ),
               }),
             ]),
             el("div", { class: "row" }, [
-              item.source_id ? chip({ label: item.source_id, variant: "info" }) : null,
+              item.source_name
+                ? chip({ label: item.source_name, variant: "info" })
+                : item.source_id
+                  ? chip({ label: item.source_id, variant: "info" })
+                  : null,
               item.author ? chip({ label: item.author, variant: "outline" }) : null,
             ]),
           ]),
@@ -293,12 +736,16 @@ export function mount(root) {
       subtitle: t("skills.section.resultsDesc"),
       body: [
         el("div", { class: "row-tight" }, [searchInput, searchBtn]),
-        el("div", { class: "row" }, sources.map((s) =>
-          chip({
-            label: `${s.name || s.source_id} ${s.enabled ? "on" : "off"}`,
-            variant: s.enabled ? "ok" : "outline",
-          }),
-        )),
+        el(
+          "div",
+          { class: "row" },
+          sources.map((source) =>
+            chip({
+              label: `${source.name || source.source_id} ${source.enabled ? "on" : "off"}`,
+              variant: source.enabled ? "ok" : "outline",
+            }),
+          ),
+        ),
         results.length
           ? chip({ label: `${t("skills.section.results")}: ${results.length}`, variant: "info" })
           : null,

@@ -2,6 +2,64 @@
   "service_name": "waifu-standalone",
   "image_command_prefix": "draw",
   "data_root": "data",
+  "marketplace": {
+    "enabled": true,
+    "default_query": "codex",
+    "sources": [
+      {
+        "source_id": "skillsmp",
+        "name": "SkillsMP",
+        "kind": "skillsmp",
+        "enabled": true,
+        "base_url": "https://skillsmp.com",
+        "search_path": "/api/v1/skills/search",
+        "browse_url": "https://skillsmp.com/zh",
+        "api_key": "",
+        "timeout_seconds": 10.0,
+        "max_results": 12
+      },
+      {
+        "source_id": "clawhub",
+        "name": "ClawHub",
+        "kind": "clawhub",
+        "enabled": true,
+        "base_url": "https://clawhub.ai",
+        "search_path": "/api/v1/search",
+        "browse_url": "https://clawhub.ai/skills",
+        "api_key": "",
+        "timeout_seconds": 10.0,
+        "max_results": 12
+      },
+      {
+        "source_id": "github",
+        "name": "GitHub Skills",
+        "kind": "github",
+        "enabled": true,
+        "base_url": "https://api.github.com",
+        "search_path": "/search/repositories",
+        "browse_url": "https://github.com/search?q=SKILL.md&type=repositories",
+        "api_key": "",
+        "timeout_seconds": 10.0,
+        "max_results": 8
+      }
+    ]
+  },
+  "claw_runtime": {
+    "enabled": true,
+    "mode": "managed",
+    "routing_mode": "hybrid",
+    "base_url": "",
+    "node_path": "node",
+    "runtime_root": "data/claw_runtime",
+    "acp_enabled": false,
+    "acp_default_command": "",
+    "acp_default_args": [],
+    "codex_harness_command": "",
+    "codex_harness_args": [],
+    "acp_session_timeout_seconds": 2.0,
+    "plugin_tools_mcp_bridge": false,
+    "startup_timeout_seconds": 10.0
+  },
   "qq_sidecar": {
     "mode": "onebot-http",
     "adapter_name": "napcat",

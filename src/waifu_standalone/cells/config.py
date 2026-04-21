@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from ..config import (
     AppConfig,
+    ClawRuntimeConfig,
     EmbeddingConfig,
     ImageGenerationConfig,
     LLMConfig,
@@ -15,6 +16,7 @@ from ..config import (
     MarketplaceSourceConfig,
     PluginsConfig,
     QQSidecarConfig,
+    ToolPolicyConfig,
 )
 
 
@@ -40,6 +42,8 @@ class ConfigManager:
         image_generation = ImageGenerationConfig(**raw.get("image_generation", {}))
         embedding = EmbeddingConfig(**raw.get("embedding", {}))
         marketplace = _load_marketplace(raw.get("marketplace"))
+        tool_policy = _load_tool_policy(raw.get("tool_policy"))
+        claw_runtime = _load_claw_runtime(raw.get("claw_runtime"))
         plugins = _load_plugins(raw.get("plugins"))
         config = AppConfig(
             service_name=str(raw.get("service_name", "waifu-standalone")),
@@ -89,6 +93,8 @@ class ConfigManager:
             image_generation=image_generation,
             embedding=embedding,
             marketplace=marketplace,
+            tool_policy=tool_policy,
+            claw_runtime=claw_runtime,
             plugins=plugins,
             qq_sidecar=qq_sidecar,
         )
@@ -148,6 +154,61 @@ def _load_plugins(raw_value: object) -> PluginsConfig:
     )
 
 
+def _load_claw_runtime(raw_value: object) -> ClawRuntimeConfig:
+    if not isinstance(raw_value, dict):
+        return ClawRuntimeConfig()
+    defaults = ClawRuntimeConfig()
+    return ClawRuntimeConfig(
+        enabled=bool(raw_value.get("enabled", defaults.enabled)),
+        mode=str(raw_value.get("mode", defaults.mode) or defaults.mode),
+        routing_mode=str(raw_value.get("routing_mode", defaults.routing_mode) or defaults.routing_mode),
+        base_url=str(raw_value.get("base_url", defaults.base_url) or ""),
+        node_path=str(raw_value.get("node_path", defaults.node_path) or defaults.node_path),
+        runtime_root=str(raw_value.get("runtime_root", defaults.runtime_root) or ""),
+        acp_enabled=bool(raw_value.get("acp_enabled", defaults.acp_enabled)),
+        acp_default_command=str(
+            raw_value.get("acp_default_command", defaults.acp_default_command) or ""
+        ),
+        acp_default_args=_load_str_list(
+            raw_value.get("acp_default_args"),
+            defaults.acp_default_args,
+        ),
+        codex_harness_command=str(
+            raw_value.get("codex_harness_command", defaults.codex_harness_command) or ""
+        ),
+        codex_harness_args=_load_str_list(
+            raw_value.get("codex_harness_args"),
+            defaults.codex_harness_args,
+        ),
+        acp_session_timeout_seconds=float(
+            raw_value.get("acp_session_timeout_seconds", defaults.acp_session_timeout_seconds)
+            or defaults.acp_session_timeout_seconds
+        ),
+        plugin_tools_mcp_bridge=bool(
+            raw_value.get("plugin_tools_mcp_bridge", defaults.plugin_tools_mcp_bridge)
+        ),
+        startup_timeout_seconds=float(
+            raw_value.get("startup_timeout_seconds", defaults.startup_timeout_seconds)
+            or defaults.startup_timeout_seconds
+        ),
+    )
+
+
+def _load_tool_policy(raw_value: object) -> ToolPolicyConfig:
+    if not isinstance(raw_value, dict):
+        return ToolPolicyConfig()
+    defaults = ToolPolicyConfig()
+    return ToolPolicyConfig(
+        enabled=bool(raw_value.get("enabled", defaults.enabled)),
+        allowed_roots=_load_str_list(raw_value.get("allowed_roots"), defaults.allowed_roots),
+        write_enabled=bool(raw_value.get("write_enabled", defaults.write_enabled)),
+        write_allowed_roots=_load_str_list(raw_value.get("write_allowed_roots"), defaults.write_allowed_roots),
+        exec_enabled=bool(raw_value.get("exec_enabled", defaults.exec_enabled)),
+        exec_allowed_roots=_load_str_list(raw_value.get("exec_allowed_roots"), defaults.exec_allowed_roots),
+        exec_allowlist=_load_str_list(raw_value.get("exec_allowlist"), defaults.exec_allowlist),
+    )
+
+
 def _coerce_story_style(raw_value: object) -> str:
     normalized = str(raw_value or "").strip().lower()
     if normalized == "subtle":
@@ -176,6 +237,87 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     disabled_names = os.getenv("OPENQQWAIFU_PLUGINS_DISABLED_NAMES")
     if disabled_names is not None:
         plugins.disabled_names = _load_str_list(disabled_names, [])
+
+    tool_policy = config.tool_policy
+    tool_policy.enabled = _env_bool("OPENQQWAIFU_TOOL_POLICY_ENABLED", tool_policy.enabled)
+    allowed_roots = os.getenv("OPENQQWAIFU_TOOL_POLICY_ALLOWED_ROOTS")
+    if allowed_roots is not None:
+        tool_policy.allowed_roots = _load_str_list(allowed_roots, tool_policy.allowed_roots)
+    tool_policy.write_enabled = _env_bool(
+        "OPENQQWAIFU_TOOL_POLICY_WRITE_ENABLED",
+        tool_policy.write_enabled,
+    )
+    write_allowed_roots = os.getenv("OPENQQWAIFU_TOOL_POLICY_WRITE_ALLOWED_ROOTS")
+    if write_allowed_roots is not None:
+        tool_policy.write_allowed_roots = _load_str_list(
+            write_allowed_roots,
+            tool_policy.write_allowed_roots,
+        )
+    tool_policy.exec_enabled = _env_bool(
+        "OPENQQWAIFU_TOOL_POLICY_EXEC_ENABLED",
+        tool_policy.exec_enabled,
+    )
+    exec_allowed_roots = os.getenv("OPENQQWAIFU_TOOL_POLICY_EXEC_ALLOWED_ROOTS")
+    if exec_allowed_roots is not None:
+        tool_policy.exec_allowed_roots = _load_str_list(
+            exec_allowed_roots,
+            tool_policy.exec_allowed_roots,
+        )
+    exec_allowlist = os.getenv("OPENQQWAIFU_TOOL_POLICY_EXEC_ALLOWLIST")
+    if exec_allowlist is not None:
+        tool_policy.exec_allowlist = _load_str_list(exec_allowlist, tool_policy.exec_allowlist)
+
+    claw_runtime = config.claw_runtime
+    claw_runtime.enabled = _env_bool("OPENQQWAIFU_CLAW_RUNTIME_ENABLED", claw_runtime.enabled)
+    claw_runtime.mode = _env_str("OPENQQWAIFU_CLAW_RUNTIME_MODE", claw_runtime.mode)
+    claw_runtime.routing_mode = _env_str(
+        "OPENQQWAIFU_CLAW_RUNTIME_ROUTING_MODE",
+        claw_runtime.routing_mode,
+    )
+    claw_runtime.base_url = _env_str("OPENQQWAIFU_CLAW_RUNTIME_BASE_URL", claw_runtime.base_url)
+    claw_runtime.node_path = _env_str("OPENQQWAIFU_CLAW_RUNTIME_NODE_PATH", claw_runtime.node_path)
+    runtime_root = _env_str("OPENQQWAIFU_CLAW_RUNTIME_ROOT", claw_runtime.runtime_root)
+    if runtime_root:
+        root = Path(runtime_root)
+        if not root.is_absolute() and config_path is not None:
+            root = (config_path.parent / root).resolve()
+        claw_runtime.runtime_root = str(root)
+    claw_runtime.acp_enabled = _env_bool(
+        "OPENQQWAIFU_CLAW_RUNTIME_ACP_ENABLED",
+        claw_runtime.acp_enabled,
+    )
+    claw_runtime.acp_default_command = _env_str(
+        "OPENQQWAIFU_CLAW_RUNTIME_ACP_DEFAULT_COMMAND",
+        claw_runtime.acp_default_command,
+    )
+    acp_default_args = os.getenv("OPENQQWAIFU_CLAW_RUNTIME_ACP_DEFAULT_ARGS")
+    if acp_default_args is not None:
+        claw_runtime.acp_default_args = _load_str_list(
+            acp_default_args,
+            claw_runtime.acp_default_args,
+        )
+    claw_runtime.codex_harness_command = _env_str(
+        "OPENQQWAIFU_CLAW_RUNTIME_CODEX_HARNESS_COMMAND",
+        claw_runtime.codex_harness_command,
+    )
+    codex_harness_args = os.getenv("OPENQQWAIFU_CLAW_RUNTIME_CODEX_HARNESS_ARGS")
+    if codex_harness_args is not None:
+        claw_runtime.codex_harness_args = _load_str_list(
+            codex_harness_args,
+            claw_runtime.codex_harness_args,
+        )
+    claw_runtime.acp_session_timeout_seconds = _env_float(
+        "OPENQQWAIFU_CLAW_RUNTIME_ACP_SESSION_TIMEOUT_SECONDS",
+        claw_runtime.acp_session_timeout_seconds,
+    )
+    claw_runtime.plugin_tools_mcp_bridge = _env_bool(
+        "OPENQQWAIFU_CLAW_RUNTIME_PLUGIN_TOOLS_MCP_BRIDGE",
+        claw_runtime.plugin_tools_mcp_bridge,
+    )
+    claw_runtime.startup_timeout_seconds = _env_float(
+        "OPENQQWAIFU_CLAW_RUNTIME_STARTUP_TIMEOUT_SECONDS",
+        claw_runtime.startup_timeout_seconds,
+    )
 
     qq_sidecar = config.qq_sidecar
     qq_sidecar.gateway_mode = _env_str(

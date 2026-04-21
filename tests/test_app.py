@@ -612,41 +612,42 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIn("42 港元", second.text)
 
     def test_handle_event_uses_async_search_context_when_available(self) -> None:
-        service, _ = build_default_service(AppConfig(search_enabled=True))
-        async_called = threading.Event()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(search_enabled=True, data_root=tmpdir))
+            async_called = threading.Event()
 
-        async def fake_abuild_context(event: InboundEvent) -> SearchContext:
-            async_called.set()
-            return SearchContext(
-                query="北京天气",
-                summary="北京天气：今天晴，最高温 26 度。",
-                results=[SearchResult(title="北京天气", snippet="今天晴，最高温 26 度。")],
-                fetched_at=time.time(),
-                reason="keyword-hit",
+            async def fake_abuild_context(event: InboundEvent) -> SearchContext:
+                async_called.set()
+                return SearchContext(
+                    query="北京天气",
+                    summary="北京天气：今天晴，最高温 26 度。",
+                    results=[SearchResult(title="北京天气", snippet="今天晴，最高温 26 度。")],
+                    fetched_at=time.time(),
+                    reason="keyword-hit",
+                )
+
+            def fail_build_context(event: InboundEvent) -> SearchContext:
+                raise AssertionError("sync build_context should not be used")
+
+            service.search.should_search = lambda event: True  # type: ignore[method-assign]
+            service.search.abuild_context = fake_abuild_context  # type: ignore[method-assign]
+            service.search.build_context = fail_build_context  # type: ignore[method-assign]
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="今天北京天气怎么样")],
+                )
             )
 
-        def fail_build_context(event: InboundEvent) -> SearchContext:
-            raise AssertionError("sync build_context should not be used")
-
-        service.search.should_search = lambda event: True  # type: ignore[method-assign]
-        service.search.abuild_context = fake_abuild_context  # type: ignore[method-assign]
-        service.search.build_context = fail_build_context  # type: ignore[method-assign]
-
-        reply = service.handle_event(
-            InboundEvent(
-                launcher_id="783190298",
-                launcher_type="person",
-                sender_id="783190298",
-                sender_name="tester",
-                segments=[MessageSegment(kind="text", text="今天北京天气怎么样")],
-            )
-        )
-
-        self.assertTrue(async_called.is_set())
-        self.assertIsNotNone(reply)
-        session = service.memory.load("783190298", "person")
-        last_search = session.metadata.get("last_search", {})
-        self.assertEqual(last_search.get("query"), "北京天气")
+            self.assertTrue(async_called.is_set())
+            self.assertIsNotNone(reply)
+            session = service.memory.load("783190298", "person")
+            last_search = session.metadata.get("last_search", {})
+            self.assertEqual(last_search.get("query"), "北京天气")
 
     def test_pending_search_clarification_extends_query_without_second_mention(self) -> None:
         config = AppConfig(

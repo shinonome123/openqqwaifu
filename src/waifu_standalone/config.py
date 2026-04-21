@@ -83,8 +83,72 @@ class MarketplaceConfig:
     sources: list[MarketplaceSourceConfig] = field(
         default_factory=lambda: [
             MarketplaceSourceConfig(),
+            MarketplaceSourceConfig(
+                source_id="clawhub",
+                name="ClawHub",
+                kind="clawhub",
+                enabled=True,
+                base_url="https://clawhub.ai",
+                search_path="/api/v1/search",
+                browse_url="https://clawhub.ai/skills",
+            ),
+            MarketplaceSourceConfig(
+                source_id="github",
+                name="GitHub Skills",
+                kind="github",
+                enabled=True,
+                base_url="https://api.github.com",
+                search_path="/search/repositories",
+                browse_url="https://github.com/search?q=SKILL.md&type=repositories",
+                max_results=8,
+            ),
         ]
     )
+
+
+@dataclass(slots=True)
+class ToolPolicyConfig:
+    enabled: bool = True
+    allowed_roots: list[str] = field(default_factory=lambda: [".", "data"])
+    write_enabled: bool = True
+    write_allowed_roots: list[str] = field(default_factory=lambda: [".", "data"])
+    exec_enabled: bool = True
+    exec_allowed_roots: list[str] = field(default_factory=lambda: ["."])
+    exec_allowlist: list[str] = field(
+        default_factory=lambda: [
+            "python",
+            "python3",
+            "py",
+            "uv",
+            "pytest",
+            "git",
+            "node",
+            "npm",
+            "npx",
+            "pnpm",
+            "yarn",
+            "docker",
+            "docker-compose",
+        ]
+    )
+
+
+@dataclass(slots=True)
+class ClawRuntimeConfig:
+    enabled: bool = False
+    mode: str = "managed"
+    routing_mode: str = "hybrid"
+    base_url: str = ""
+    node_path: str = "node"
+    runtime_root: str = ""
+    acp_enabled: bool = False
+    acp_default_command: str = ""
+    acp_default_args: list[str] = field(default_factory=list)
+    codex_harness_command: str = ""
+    codex_harness_args: list[str] = field(default_factory=list)
+    acp_session_timeout_seconds: float = 2.0
+    plugin_tools_mcp_bridge: bool = False
+    startup_timeout_seconds: float = 10.0
 
 
 @dataclass(slots=True)
@@ -136,5 +200,7 @@ class AppConfig:
     image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     marketplace: MarketplaceConfig = field(default_factory=MarketplaceConfig)
+    tool_policy: ToolPolicyConfig = field(default_factory=ToolPolicyConfig)
+    claw_runtime: ClawRuntimeConfig = field(default_factory=ClawRuntimeConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     qq_sidecar: QQSidecarConfig = field(default_factory=QQSidecarConfig)

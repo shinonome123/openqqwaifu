@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable
 
 from ..http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
 from ..observability import TransportMetricsScope
@@ -9,6 +10,30 @@ from ..observability import TransportMetricsScope
 
 class LLMClientError(RuntimeError):
     pass
+
+
+@dataclass(slots=True)
+class LLMToolCall:
+    call_id: str
+    tool_name: str
+    arguments: dict[str, object] = field(default_factory=dict)
+
+    def as_assistant_tool_call(self) -> dict[str, object]:
+        return {
+            "id": self.call_id,
+            "type": "function",
+            "function": {
+                "name": self.tool_name,
+                "arguments": json.dumps(self.arguments, ensure_ascii=False),
+            },
+        }
+
+
+@dataclass(slots=True)
+class LLMToolResponse:
+    text: str = ""
+    tool_calls: list[LLMToolCall] = field(default_factory=list)
+    assistant_message: dict[str, object] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -21,6 +46,10 @@ class LLMClient(Protocol):
     app_type: str
 
     @property
+    def supports_tool_calling(self) -> bool:
+        ...
+
+    @property
     def enabled(self) -> bool:
         ...
 
@@ -28,6 +57,24 @@ class LLMClient(Protocol):
         ...
 
     async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+        ...
+
+    def invoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        ...
+
+    async def ainvoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
         ...
 
 
@@ -56,6 +103,10 @@ class _BaseHTTPClient:
         )
         self._transport = SyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
         self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
+
+    @property
+    def supports_tool_calling(self) -> bool:
+        return False
 
     def _post_json(self, url: str, payload: dict[str, object], *, headers: dict[str, str]) -> str:
         try:
@@ -108,6 +159,54 @@ class _BaseHTTPClient:
             if text:
                 return text
         return ""
+
+    @staticmethod
+    def _coerce_message_content(content: object) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            blocks: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text", "") or "").strip()
+                if text:
+                    blocks.append(text)
+            return "\n".join(blocks).strip()
+        return str(content or "").strip()
+
+    @staticmethod
+    def _parse_tool_arguments(raw_arguments: object) -> dict[str, object]:
+        if isinstance(raw_arguments, dict):
+            return {str(key): value for key, value in raw_arguments.items()}
+        text = str(raw_arguments or "").strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {str(key): value for key, value in payload.items()}
+
+    def invoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        raise LLMClientError(f"{self.backend or 'llm'} client does not support tool calling")
+
+    async def ainvoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        raise LLMClientError(f"{self.backend or 'llm'} client does not support tool calling")
 
     def close(self) -> None:
         self._transport.close()
@@ -213,6 +312,10 @@ class OpenAILLMClient(_BaseHTTPClient):
     def enabled(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
 
+    @property
+    def supports_tool_calling(self) -> bool:
+        return self.enabled
+
     def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
         if not self.enabled:
             raise LLMClientError("openai-compatible client is not configured")
@@ -242,6 +345,77 @@ class OpenAILLMClient(_BaseHTTPClient):
             "user": user,
         }
 
+    def _tool_payload(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str,
+    ) -> dict[str, object]:
+        return {
+            "model": self.model,
+            "messages": self._normalize_tool_messages(messages),
+            "user": user,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": str(tool.get("name", "") or "").strip(),
+                        "description": str(tool.get("description", "") or "").strip(),
+                        "parameters": dict(tool.get("parameters", {}) or {"type": "object", "properties": {}}),
+                    },
+                }
+                for tool in tools
+                if str(tool.get("name", "") or "").strip()
+            ],
+            "tool_choice": "auto",
+        }
+ 
+    def _normalize_tool_messages(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        normalized: list[dict[str, object]] = []
+        for message in messages:
+            role = str(message.get("role", "") or "").strip().lower()
+            if role not in {"system", "user", "assistant", "tool"}:
+                continue
+            payload: dict[str, object] = {"role": role}
+            if role == "tool":
+                payload["tool_call_id"] = str(message.get("tool_call_id", "") or "").strip()
+                name = str(message.get("name", "") or "").strip()
+                if name:
+                    payload["name"] = name
+                payload["content"] = self._coerce_message_content(message.get("content"))
+                normalized.append(payload)
+                continue
+            content = message.get("content", "")
+            payload["content"] = self._coerce_message_content(content)
+            tool_calls = message.get("tool_calls", [])
+            if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+                sanitized_calls: list[dict[str, object]] = []
+                for item in tool_calls:
+                    if not isinstance(item, dict):
+                        continue
+                    tool_id = str(item.get("id", "") or "").strip()
+                    function_payload = item.get("function", {})
+                    function_payload = function_payload if isinstance(function_payload, dict) else {}
+                    function_name = str(function_payload.get("name", "") or "").strip()
+                    function_arguments = function_payload.get("arguments", "{}")
+                    if not tool_id or not function_name:
+                        continue
+                    sanitized_calls.append(
+                        {
+                            "id": tool_id,
+                            "type": "function",
+                            "function": {
+                                "name": function_name,
+                                "arguments": str(function_arguments or "{}"),
+                            },
+                        }
+                    )
+                if sanitized_calls:
+                    payload["tool_calls"] = sanitized_calls
+            normalized.append(payload)
+        return normalized
+
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -259,6 +433,76 @@ class OpenAILLMClient(_BaseHTTPClient):
             raise LLMClientError(f"llm returned empty content: {data}")
         return answer
 
+    def invoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        if not self.supports_tool_calling:
+            raise LLMClientError("openai-compatible client is not configured")
+        raw = self._post_json(
+            self._endpoint("chat/completions"),
+            self._tool_payload(messages, tools=tools, user=user),
+            headers=self._headers(),
+        )
+        return self._parse_tool_response(raw)
+
+    async def ainvoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        if not self.supports_tool_calling:
+            raise LLMClientError("openai-compatible client is not configured")
+        raw = await self._apost_json(
+            self._endpoint("chat/completions"),
+            self._tool_payload(messages, tools=tools, user=user),
+            headers=self._headers(),
+        )
+        return self._parse_tool_response(raw)
+
+    def _parse_tool_response(self, raw: str) -> LLMToolResponse:
+        data = json.loads(raw) if raw else {}
+        choices = data.get("choices", [])
+        if not isinstance(choices, list) or not choices:
+            raise LLMClientError(f"llm returned no choices: {data}")
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        message = message if isinstance(message, dict) else {}
+        text = self._extract_content_text(message.get("content"))
+        raw_tool_calls = message.get("tool_calls", [])
+        tool_calls: list[LLMToolCall] = []
+        assistant_tool_calls: list[dict[str, object]] = []
+        if isinstance(raw_tool_calls, list):
+            for item in raw_tool_calls:
+                if not isinstance(item, dict):
+                    continue
+                call_id = str(item.get("id", "") or "").strip()
+                function_payload = item.get("function", {})
+                function_payload = function_payload if isinstance(function_payload, dict) else {}
+                tool_name = str(function_payload.get("name", "") or "").strip()
+                if not call_id or not tool_name:
+                    continue
+                arguments = self._parse_tool_arguments(function_payload.get("arguments"))
+                call = LLMToolCall(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                )
+                tool_calls.append(call)
+                assistant_tool_calls.append(call.as_assistant_tool_call())
+        assistant_message: dict[str, object] = {"role": "assistant", "content": text}
+        if assistant_tool_calls:
+            assistant_message["tool_calls"] = assistant_tool_calls
+        return LLMToolResponse(
+            text=text,
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+        )
+
 
 class ClaudeLLMClient(_BaseHTTPClient):
     def __init__(self, *, base_url: str, api_key: str, model: str = "", timeout_seconds: float = 45.0, app_type: str = "chat"):
@@ -274,6 +518,10 @@ class ClaudeLLMClient(_BaseHTTPClient):
     @property
     def enabled(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
+
+    @property
+    def supports_tool_calling(self) -> bool:
+        return self.enabled
 
     def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
         if not self.enabled:
@@ -305,6 +553,96 @@ class ClaudeLLMClient(_BaseHTTPClient):
             "messages": [{"role": "user", "content": str(query or "")}],
         }
 
+    def _tool_payload(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str,
+    ) -> dict[str, object]:
+        system_blocks: list[str] = []
+        payload_messages: list[dict[str, object]] = []
+        for message in messages:
+            role = str(message.get("role", "") or "").strip().lower()
+            if role == "system":
+                text = self._coerce_message_content(message.get("content"))
+                if text:
+                    system_blocks.append(text)
+                continue
+            if role == "user":
+                payload_messages.append(
+                    {
+                        "role": "user",
+                        "content": self._coerce_message_content(message.get("content")),
+                    }
+                )
+                continue
+            if role == "assistant":
+                content_blocks: list[dict[str, object]] = []
+                text = self._coerce_message_content(message.get("content"))
+                if text:
+                    content_blocks.append({"type": "text", "text": text})
+                raw_tool_calls = message.get("tool_calls", [])
+                if isinstance(raw_tool_calls, list):
+                    for item in raw_tool_calls:
+                        if not isinstance(item, dict):
+                            continue
+                        tool_id = str(item.get("id", "") or "").strip()
+                        function_payload = item.get("function", {})
+                        function_payload = function_payload if isinstance(function_payload, dict) else {}
+                        tool_name = str(function_payload.get("name", "") or "").strip()
+                        if not tool_id or not tool_name:
+                            continue
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": tool_name,
+                                "input": self._parse_tool_arguments(function_payload.get("arguments")),
+                            }
+                        )
+                payload_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content_blocks or [{"type": "text", "text": text}],
+                    }
+                )
+                continue
+            if role == "tool":
+                tool_call_id = str(message.get("tool_call_id", "") or "").strip()
+                if not tool_call_id:
+                    continue
+                payload_messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_call_id,
+                                "content": self._coerce_message_content(message.get("content")),
+                            }
+                        ],
+                    }
+                )
+        payload: dict[str, object] = {
+            "model": self.model,
+            "max_tokens": 1024,
+            "metadata": {"user_id": user},
+            "messages": payload_messages or [{"role": "user", "content": ""}],
+            "tools": [
+                {
+                    "name": str(tool.get("name", "") or "").strip(),
+                    "description": str(tool.get("description", "") or "").strip(),
+                    "input_schema": dict(tool.get("parameters", {}) or {"type": "object", "properties": {}}),
+                }
+                for tool in tools
+                if str(tool.get("name", "") or "").strip()
+            ],
+        }
+        if system_blocks:
+            payload["system"] = "\n\n".join(block for block in system_blocks if block.strip())
+        return payload
+
     def _headers(self) -> dict[str, str]:
         return {
             "x-api-key": self.api_key,
@@ -319,8 +657,92 @@ class ClaudeLLMClient(_BaseHTTPClient):
             raise LLMClientError(f"claude returned empty content: {data}")
         return answer
 
+    def invoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        if not self.supports_tool_calling:
+            raise LLMClientError("claude client is not configured")
+        raw = self._post_json(
+            self._endpoint("messages", add_v1=True),
+            self._tool_payload(messages, tools=tools, user=user),
+            headers=self._headers(),
+        )
+        return self._parse_tool_response(raw)
+
+    async def ainvoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        if not self.supports_tool_calling:
+            raise LLMClientError("claude client is not configured")
+        raw = await self._apost_json(
+            self._endpoint("messages", add_v1=True),
+            self._tool_payload(messages, tools=tools, user=user),
+            headers=self._headers(),
+        )
+        return self._parse_tool_response(raw)
+
+    def _parse_tool_response(self, raw: str) -> LLMToolResponse:
+        data = json.loads(raw) if raw else {}
+        content = data.get("content", [])
+        content = content if isinstance(content, list) else []
+        text_blocks: list[str] = []
+        tool_calls: list[LLMToolCall] = []
+        assistant_tool_calls: list[dict[str, object]] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            block_type = str(item.get("type", "") or "").strip().lower()
+            if block_type == "text":
+                text = str(item.get("text", "") or "").strip()
+                if text:
+                    text_blocks.append(text)
+                continue
+            if block_type != "tool_use":
+                continue
+            call_id = str(item.get("id", "") or "").strip()
+            tool_name = str(item.get("name", "") or "").strip()
+            if not call_id or not tool_name:
+                continue
+            arguments = item.get("input", {})
+            arguments = arguments if isinstance(arguments, dict) else {}
+            call = LLMToolCall(
+                call_id=call_id,
+                tool_name=tool_name,
+                arguments={str(key): value for key, value in arguments.items()},
+            )
+            tool_calls.append(call)
+            assistant_tool_calls.append(call.as_assistant_tool_call())
+        text = "\n".join(text_blocks).strip()
+        assistant_message: dict[str, object] = {"role": "assistant", "content": text}
+        if assistant_tool_calls:
+            assistant_message["tool_calls"] = assistant_tool_calls
+        return LLMToolResponse(
+            text=text,
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+        )
+
 
 class UnifiedLLMClient(_BaseHTTPClient):
+    @property
+    def supports_tool_calling(self) -> bool:
+        return build_llm_client_from_values(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            backend=self.backend,
+            timeout_seconds=self.timeout_seconds,
+            app_type=self.app_type,
+        ).supports_tool_calling
+
     @property
     def enabled(self) -> bool:
         return build_llm_client_from_values(
@@ -353,6 +775,40 @@ class UnifiedLLMClient(_BaseHTTPClient):
             app_type=self.app_type,
         )
         return await client.ainvoke(query, user=user)
+
+    def invoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        client = build_llm_client_from_values(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            backend=self.backend,
+            timeout_seconds=self.timeout_seconds,
+            app_type=self.app_type,
+        )
+        return client.invoke_with_tools(messages, tools=tools, user=user)
+
+    async def ainvoke_with_tools(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]],
+        user: str = "waifu-standalone",
+    ) -> LLMToolResponse:
+        client = build_llm_client_from_values(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            backend=self.backend,
+            timeout_seconds=self.timeout_seconds,
+            app_type=self.app_type,
+        )
+        return await client.ainvoke_with_tools(messages, tools=tools, user=user)
 
     def close(self) -> None:
         super().close()

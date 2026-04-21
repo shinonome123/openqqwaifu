@@ -10,6 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from waifu_standalone.cells.skill_registry import SkillRegistry
 from waifu_standalone.cells.tool_registry import ToolInvocation, ToolRegistry
 from waifu_standalone.config import AppConfig
 from waifu_standalone.models import InboundEvent, MessageSegment, OutboundMessage, SessionMemory
@@ -27,9 +28,11 @@ class _FakeEntryPoint:
 
 
 def _build_context() -> PluginContext:
+    app_config = AppConfig()
     return PluginContext(
-        app_config=AppConfig(),
+        app_config=app_config,
         tool_registry=ToolRegistry(),
+        skill_registry=SkillRegistry(app_config),
         logger=logging.getLogger("waifu.plugins"),
         metrics=MetricsRegistry(service_name="test-waifu"),
     )
@@ -135,6 +138,70 @@ class PluginApiTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.text, "plugin:hello")
+
+    def test_plugin_can_register_runtime_skill_through_registry(self) -> None:
+        ctx = _build_context()
+
+        def register(plugin_ctx: PluginContext) -> None:
+            plugin_ctx.skill_registry.register_runtime_skill(
+                """---
+id: plugin-skill
+name: plugin_skill
+aliases: ["plugin-skill-alias"]
+description: plugin registered skill
+triggers: ["plugin skill"]
+mode: prefix
+---
+Use plugin tools carefully.
+""",
+                source_name="plugin://demo/plugin-skill",
+            )
+
+        loaded = load_tool_plugins(ctx, entry_points=[_FakeEntryPoint("plugin-skill", register)])
+        by_alias = ctx.skill_registry.find_by_name_or_id("plugin-skill-alias")
+
+        self.assertEqual(loaded, ["plugin-skill"])
+        self.assertIsNotNone(by_alias)
+        assert by_alias is not None
+        self.assertEqual(by_alias.skill_id, "plugin-skill")
+        self.assertEqual(by_alias.source_kind, "plugin")
+
+    def test_plugin_can_register_skill_tool_in_one_step(self) -> None:
+        ctx = _build_context()
+
+        def handler(invocation: ToolInvocation) -> OutboundMessage | None:
+            return OutboundMessage(
+                launcher_id=invocation.event.launcher_id,
+                launcher_type=invocation.event.launcher_type,
+                text=f"weather:{invocation.raw_args}",
+            )
+
+        registration = ctx.register_skill_tool(
+            "weather-tool",
+            name="Weather Tool",
+            description="fetches weather",
+            handler=handler,
+            triggers=["天气"],
+            aliases=["weather_lookup"],
+            priority=8,
+            body="Call the weather tool directly.",
+        )
+
+        result = ctx.tool_registry.execute("weather-tool", _build_invocation())
+        skill = ctx.skill_registry.get_skill("weather-tool")
+        by_alias = ctx.skill_registry.find_by_name_or_id("weather_lookup")
+
+        self.assertEqual(registration.tool.tool_id, "weather-tool")
+        self.assertEqual(registration.skill.skill_id, "weather-tool")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.text, "weather:hello")
+        self.assertIsNotNone(skill)
+        assert skill is not None
+        self.assertTrue(skill.dispatches_tool)
+        self.assertEqual(skill.command_tool, "weather-tool")
+        self.assertEqual(skill.triggers, ["天气"])
+        self.assertIsNotNone(by_alias)
 
 
 if __name__ == "__main__":

@@ -284,7 +284,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 self.assertEqual(body["assistant_name"], "Assistant")
                 self.assertEqual(body["session_count"], 1)
                 self.assertEqual(body["recent_outbound_count"], 1)
-                self.assertEqual(body["tools"]["count"], 5)
+                self.assertEqual(body["tools"]["count"], 13)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -539,7 +539,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 host, port = server.server_address
                 opener = self._build_auth_opener(host, port)
                 _, tools = self._open_json(opener, f"http://{host}:{port}/api/tools")
-                self.assertEqual(tools["count"], 5)
+                self.assertEqual(tools["count"], 13)
 
                 _, pack_template = self._open_json(opener, f"http://{host}:{port}/api/skill-packs/template")
                 self.assertEqual(pack_template["format"], "waifu-skill-pack")

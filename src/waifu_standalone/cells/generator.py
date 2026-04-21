@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..config import AppConfig
@@ -13,6 +13,13 @@ from .cards import CardManager, CharacterCard
 from .image_clients import ImageClient, ImageClientError, build_image_client
 from .llm_clients import LLMClient, LLMClientError, build_llm_client
 from .skill_registry import SkillSpec
+from .tool_registry import ToolInvocation, ToolRegistry
+
+
+@dataclass(slots=True)
+class GeneratedReply:
+    text: str = ""
+    images: list[str] = field(default_factory=list)
 
 
 class Generator:
@@ -29,6 +36,7 @@ class Generator:
         self._cards = CardManager(config)
         self._dify_client = llm_client or build_llm_client(config)
         self._image_client = image_client or build_image_client(config)
+        self._tools: ToolRegistry | None = None
 
     @property
     def llm_ready(self) -> bool:
@@ -37,6 +45,9 @@ class Generator:
     @property
     def _llm_client(self) -> LLMClient:
         return self._dify_client
+
+    def bind_tools(self, tools: ToolRegistry) -> None:
+        self._tools = tools
 
     @property
     def image_ready(self) -> bool:
@@ -183,7 +194,7 @@ class Generator:
             return self._fallback_analysis(event, latest_message, memory_hints, speaker_notes)
         return ""
 
-    def generate_reply(
+    def generate_reply_message(
         self,
         event: InboundEvent,
         session: SessionMemory,
@@ -200,7 +211,7 @@ class Generator:
         analysis_hint: str = "",
         active_skills: list[SkillSpec] | None = None,
         allow_fallback: bool = True,
-    ) -> str:
+    ) -> GeneratedReply:
         card = card_override or self._cards.load(event.launcher_type, session)
         resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
         card = self._card_with_assistant_name(card, resolved_assistant_name)
@@ -228,17 +239,83 @@ class Generator:
                 active_skills=active_skills,
             )
             try:
-                response = self._dify_client.invoke(
+                reply = self._generate_model_reply_message(
                     prompt,
+                    event=event,
+                    session=session,
+                    assistant_name=resolved_assistant_name,
+                    address=address,
+                    active_skills=active_skills,
                     user=self._llm_user_key(event, session, purpose="chat"),
                 )
-                cleaned = self._clean_response(response)
-                if cleaned:
-                    return cleaned
+                if reply.text.strip() or reply.images:
+                    return reply
             except LLMClientError:
                 pass
         if allow_fallback:
-            return self._fallback_reply(
+            return GeneratedReply(
+                text=self._fallback_reply(
+                    event,
+                    session,
+                    emotion,
+                    card=card,
+                    assistant_name=resolved_assistant_name,
+                    address=address,
+                    search_hint=search_hint,
+                    memory_hints=memory_hints,
+                    analysis_hint=analysis_hint,
+                )
+            )
+        return GeneratedReply()
+
+    async def agenerate_reply_message(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        emotion: EmotionState,
+        *,
+        assistant_name: str,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+        search_hint: str = "",
+        search_context: str = "",
+        conversation_view: str = "",
+        memory_hints: list[str] | None = None,
+        speaker_notes: list[str] | None = None,
+        analysis_hint: str = "",
+        active_skills: list[SkillSpec] | None = None,
+        allow_fallback: bool = True,
+    ) -> GeneratedReply:
+        if "generate_reply" in getattr(self, "__dict__", {}) and "agenerate_reply_message" not in getattr(self, "__dict__", {}):
+            result = await asyncio.to_thread(
+                self.generate_reply,
+                event,
+                session,
+                emotion,
+                assistant_name=assistant_name,
+                address_override=address_override,
+                card_override=card_override,
+                search_hint=search_hint,
+                search_context=search_context,
+                conversation_view=conversation_view,
+                memory_hints=memory_hints,
+                speaker_notes=speaker_notes,
+                analysis_hint=analysis_hint,
+                active_skills=active_skills,
+                allow_fallback=allow_fallback,
+            )
+            return self._coerce_generated_reply(result)
+        card = card_override or self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
+        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
+        latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
+        memory_hints = memory_hints or []
+        speaker_notes = speaker_notes or []
+        active_skills = active_skills or []
+
+        if self.llm_ready:
+            prompt = self._build_chat_query(
                 event,
                 session,
                 emotion,
@@ -246,10 +323,271 @@ class Generator:
                 assistant_name=resolved_assistant_name,
                 address=address,
                 search_hint=search_hint,
+                search_context=search_context,
+                conversation_view=conversation_view,
                 memory_hints=memory_hints,
+                speaker_notes=speaker_notes,
                 analysis_hint=analysis_hint,
+                latest_message=latest_message,
+                active_skills=active_skills,
             )
-        return ""
+            try:
+                reply = await self._agenerate_model_reply_message(
+                    prompt,
+                    event=event,
+                    session=session,
+                    assistant_name=resolved_assistant_name,
+                    address=address,
+                    active_skills=active_skills,
+                    user=self._llm_user_key(event, session, purpose="chat"),
+                )
+                if reply.text.strip() or reply.images:
+                    return reply
+            except LLMClientError:
+                pass
+        if allow_fallback:
+            return GeneratedReply(
+                text=self._fallback_reply(
+                    event,
+                    session,
+                    emotion,
+                    card=card,
+                    assistant_name=resolved_assistant_name,
+                    address=address,
+                    search_hint=search_hint,
+                    memory_hints=memory_hints,
+                    analysis_hint=analysis_hint,
+                )
+            )
+        return GeneratedReply()
+
+    @staticmethod
+    def _coerce_generated_reply(value: object) -> GeneratedReply:
+        if isinstance(value, GeneratedReply):
+            return value
+        if isinstance(value, dict):
+            return GeneratedReply(
+                text=str(value.get("text", "") or "").strip(),
+                images=[str(item) for item in value.get("images", []) if str(item).strip()]
+                if isinstance(value.get("images"), list)
+                else [],
+            )
+        return GeneratedReply(text=str(value or "").strip())
+
+    def _tool_calling_ready(self) -> bool:
+        return bool(
+            self.llm_ready
+            and self._tools is not None
+            and getattr(self._llm_client, "supports_tool_calling", False)
+            and self._tools.model_schemas()
+        )
+
+    def _generate_model_reply_message(
+        self,
+        prompt: str,
+        *,
+        event: InboundEvent,
+        session: SessionMemory,
+        assistant_name: str,
+        address: str,
+        active_skills: list[SkillSpec],
+        user: str,
+    ) -> GeneratedReply:
+        if self._tool_calling_ready():
+            try:
+                reply = self._invoke_reply_with_tools(
+                    prompt,
+                    event=event,
+                    session=session,
+                    assistant_name=assistant_name,
+                    address=address,
+                    active_skills=active_skills,
+                    user=user,
+                )
+                if reply.text.strip() or reply.images:
+                    return reply
+            except LLMClientError:
+                pass
+        response = self._dify_client.invoke(prompt, user=user)
+        cleaned = self._clean_response(response)
+        return GeneratedReply(text=cleaned)
+
+    async def _agenerate_model_reply_message(
+        self,
+        prompt: str,
+        *,
+        event: InboundEvent,
+        session: SessionMemory,
+        assistant_name: str,
+        address: str,
+        active_skills: list[SkillSpec],
+        user: str,
+    ) -> GeneratedReply:
+        if self._tool_calling_ready():
+            try:
+                reply = await self._ainvoke_reply_with_tools(
+                    prompt,
+                    event=event,
+                    session=session,
+                    assistant_name=assistant_name,
+                    address=address,
+                    active_skills=active_skills,
+                    user=user,
+                )
+                if reply.text.strip() or reply.images:
+                    return reply
+            except LLMClientError:
+                pass
+        response = await self._ainvoke_client(prompt, user=user)
+        cleaned = self._clean_response(response)
+        return GeneratedReply(text=cleaned)
+
+    def _invoke_reply_with_tools(
+        self,
+        prompt: str,
+        *,
+        event: InboundEvent,
+        session: SessionMemory,
+        assistant_name: str,
+        address: str,
+        active_skills: list[SkillSpec],
+        user: str,
+    ) -> GeneratedReply:
+        if self._tools is None:
+            raise LLMClientError("tool registry is not bound")
+        tools = self._tools.model_schemas()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
+                    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        images: list[str] = []
+        for _ in range(4):
+            response = self._llm_client.invoke_with_tools(messages, tools=tools, user=user)
+            if response.assistant_message:
+                messages.append(response.assistant_message)
+            if not response.tool_calls:
+                return GeneratedReply(text=self._clean_response(response.text), images=images)
+            for tool_call in response.tool_calls:
+                invocation = ToolInvocation(
+                    tool_id=tool_call.tool_name,
+                    raw_args=json.dumps(tool_call.arguments, ensure_ascii=False),
+                    event=event,
+                    session=session,
+                    address=address,
+                    assistant_name=assistant_name,
+                    active_skills=active_skills,
+                    arguments=tool_call.arguments,
+                )
+                result = self._tools.execute_model(tool_call.tool_name, invocation)
+                for image_ref in result.images:
+                    if image_ref not in images:
+                        images.append(image_ref)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.call_id,
+                        "name": tool_call.tool_name,
+                        "content": result.format_for_model(limit=4000),
+                    }
+                )
+        return GeneratedReply(images=images)
+
+    async def _ainvoke_reply_with_tools(
+        self,
+        prompt: str,
+        *,
+        event: InboundEvent,
+        session: SessionMemory,
+        assistant_name: str,
+        address: str,
+        active_skills: list[SkillSpec],
+        user: str,
+    ) -> GeneratedReply:
+        if self._tools is None:
+            raise LLMClientError("tool registry is not bound")
+        tools = self._tools.model_schemas()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
+                    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        images: list[str] = []
+        for _ in range(4):
+            response = await self._llm_client.ainvoke_with_tools(messages, tools=tools, user=user)
+            if response.assistant_message:
+                messages.append(response.assistant_message)
+            if not response.tool_calls:
+                return GeneratedReply(text=self._clean_response(response.text), images=images)
+            for tool_call in response.tool_calls:
+                invocation = ToolInvocation(
+                    tool_id=tool_call.tool_name,
+                    raw_args=json.dumps(tool_call.arguments, ensure_ascii=False),
+                    event=event,
+                    session=session,
+                    address=address,
+                    assistant_name=assistant_name,
+                    active_skills=active_skills,
+                    arguments=tool_call.arguments,
+                )
+                result = await self._tools.aexecute_model(tool_call.tool_name, invocation)
+                for image_ref in result.images:
+                    if image_ref not in images:
+                        images.append(image_ref)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.call_id,
+                        "name": tool_call.tool_name,
+                        "content": result.format_for_model(limit=4000),
+                    }
+                )
+        return GeneratedReply(images=images)
+
+    def generate_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        emotion: EmotionState,
+        *,
+        assistant_name: str,
+        address_override: str = "",
+        card_override: CharacterCard | None = None,
+        search_hint: str = "",
+        search_context: str = "",
+        conversation_view: str = "",
+        memory_hints: list[str] | None = None,
+        speaker_notes: list[str] | None = None,
+        analysis_hint: str = "",
+        active_skills: list[SkillSpec] | None = None,
+        allow_fallback: bool = True,
+    ) -> str:
+        return self.generate_reply_message(
+            event,
+            session,
+            emotion,
+            assistant_name=assistant_name,
+            address_override=address_override,
+            card_override=card_override,
+            search_hint=search_hint,
+            search_context=search_context,
+            conversation_view=conversation_view,
+            memory_hints=memory_hints,
+            speaker_notes=speaker_notes,
+            analysis_hint=analysis_hint,
+            active_skills=active_skills,
+            allow_fallback=allow_fallback,
+        ).text
 
     async def agenerate_reply(
         self,
@@ -269,73 +607,23 @@ class Generator:
         active_skills: list[SkillSpec] | None = None,
         allow_fallback: bool = True,
     ) -> str:
-        if "generate_reply" in getattr(self, "__dict__", {}) and "agenerate_reply" not in getattr(self, "__dict__", {}):
-            return await asyncio.to_thread(
-                self.generate_reply,
-                event,
-                session,
-                emotion,
-                assistant_name=assistant_name,
-                address_override=address_override,
-                card_override=card_override,
-                search_hint=search_hint,
-                search_context=search_context,
-                conversation_view=conversation_view,
-                memory_hints=memory_hints,
-                speaker_notes=speaker_notes,
-                analysis_hint=analysis_hint,
-                active_skills=active_skills,
-                allow_fallback=allow_fallback,
-            )
-        card = card_override or self._cards.load(event.launcher_type, session)
-        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
-        card = self._card_with_assistant_name(card, resolved_assistant_name)
-        address = str(address_override or "").strip() or self._resolve_address(event, session, card)
-        latest_message = event.command_text(self.config.bot_account_id).strip() or event.to_memory_text()
-        memory_hints = memory_hints or []
-        speaker_notes = speaker_notes or []
-        active_skills = active_skills or []
-
-        if self.llm_ready:
-            prompt = self._build_chat_query(
-                event,
-                session,
-                emotion,
-                card=card,
-                assistant_name=resolved_assistant_name,
-                address=address,
-                search_hint=search_hint,
-                search_context=search_context,
-                conversation_view=conversation_view,
-                memory_hints=memory_hints,
-                speaker_notes=speaker_notes,
-                analysis_hint=analysis_hint,
-                latest_message=latest_message,
-                active_skills=active_skills,
-            )
-            try:
-                response = await self._ainvoke_client(
-                    prompt,
-                    user=self._llm_user_key(event, session, purpose="chat"),
-                )
-                cleaned = self._clean_response(response)
-                if cleaned:
-                    return cleaned
-            except LLMClientError:
-                pass
-        if allow_fallback:
-            return self._fallback_reply(
-                event,
-                session,
-                emotion,
-                card=card,
-                assistant_name=resolved_assistant_name,
-                address=address,
-                search_hint=search_hint,
-                memory_hints=memory_hints,
-                analysis_hint=analysis_hint,
-            )
-        return ""
+        reply = await self.agenerate_reply_message(
+            event,
+            session,
+            emotion,
+            assistant_name=assistant_name,
+            address_override=address_override,
+            card_override=card_override,
+            search_hint=search_hint,
+            search_context=search_context,
+            conversation_view=conversation_view,
+            memory_hints=memory_hints,
+            speaker_notes=speaker_notes,
+            analysis_hint=analysis_hint,
+            active_skills=active_skills,
+            allow_fallback=allow_fallback,
+        )
+        return reply.text
 
     def summarize_history(
         self,

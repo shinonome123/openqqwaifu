@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import tempfile
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -18,9 +19,12 @@ from .cells.generator import Generator
 from .cells.image_clients import build_image_client
 from .cells.llm_clients import build_llm_client
 from .cells.marketplace import MarketplaceClient
+from .cells.skill_bundle import import_skill_bundle
 from .cells.skill_pack import build_skill_pack_template, export_skill_pack, import_skill_pack
 from .cells.skill_registry import SkillRegistry, SkillSpec, build_skill_markdown_template
+from .cells.tool_aliases import OPENCLAW_TOOL_ALIASES
 from .cells.tool_registry import ToolRegistry
+from .claw_runtime import ClawRuntimeBridge, build_claw_runtime_bridge
 from .console_panels import ConsolePanels
 from .config import AppConfig
 from .contracts import OutboundPort
@@ -60,7 +64,6 @@ _MASK_SENTINEL = "..."
 _BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openqqwaifu-bg")
 _ASYNC_RUNTIME = AsyncRuntime()
 _LOGGER = logging.getLogger(__name__)
-
 
 def _mask_key(key: str) -> str:
     """Return a masked version of a sensitive value (e.g. API key)."""
@@ -122,6 +125,7 @@ class WaifuService:
     marketplace: MarketplaceClient
     skills: SkillRegistry
     tools: ToolRegistry
+    claw_runtime: ClawRuntimeBridge
     state_store: Any
     outbound: OutboundPort
     reverse_ws_gateway: OneBotWsGateway | None = None
@@ -204,6 +208,8 @@ class WaifuService:
             return None
         if text and any(text.startswith(prefix) for prefix in self.config.ignore_prefixes):
             if self.onboarding.looks_like_naming_input(text):
+                pass
+            elif explicit_skill_request is not None:
                 pass
             else:
                 return None
@@ -365,7 +371,7 @@ class WaifuService:
             active_skills=active_skills,
             allow_fallback=not live_runtime,
         )
-        reply_text = await self.generator.agenerate_reply(
+        generated_reply = await self.generator.agenerate_reply_message(
             event,
             session,
             emotion,
@@ -380,7 +386,8 @@ class WaifuService:
             active_skills=active_skills,
             allow_fallback=not live_runtime,
         )
-        if live_runtime and not str(reply_text or "").strip():
+        reply_text = generated_reply.text
+        if live_runtime and not str(reply_text or "").strip() and not generated_reply.images:
             return None
         reply_text = await self.onboarding.amaybe_append_soft_ask(
             event,
@@ -394,6 +401,7 @@ class WaifuService:
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
             text=reply_text,
+            images=list(generated_reply.images),
         )
         emitted = await self.emitter.aemit(
             event,
@@ -556,6 +564,7 @@ class WaifuService:
             self.generator,
             self.search,
             self.marketplace,
+            self.claw_runtime,
             self.outbound,
             self.napcat_login,
             self.state_store,
@@ -908,6 +917,59 @@ class WaifuService:
     def get_skills_panel(self) -> dict[str, object]:
         return self.console.get_skills_panel()
 
+    def get_claw_runtime_panel(self, *, refresh: bool = False) -> dict[str, object]:
+        panel = self.claw_runtime.describe(refresh=refresh)
+        if refresh and self.config.claw_runtime.enabled:
+            sync_result = self._sync_claw_runtime_workspace_bundles()
+            if sync_result["imported_count"] or sync_result["errors"]:
+                panel["workspace_sync"] = sync_result
+            try:
+                plugins = self.claw_runtime.list_plugins()
+            except Exception as exc:
+                panel["plugins"] = {"items": [], "summary": {}, "error": str(exc)}
+            else:
+                panel["plugins"] = plugins
+            try:
+                tools = self.claw_runtime.list_tools()
+            except Exception as exc:
+                panel["tools"] = {"items": [], "error": str(exc)}
+            else:
+                panel["tools"] = tools
+        return panel
+
+    def list_claw_plugins(self) -> dict[str, object]:
+        self._sync_claw_runtime_workspace_bundles()
+        return self.claw_runtime.list_plugins()
+
+    def inspect_claw_plugin(self, plugin_id: str) -> dict[str, object] | None:
+        return self.claw_runtime.inspect_plugin(plugin_id)
+
+    def check_claw_plugins(self) -> dict[str, object]:
+        self._sync_claw_runtime_workspace_bundles()
+        return self.claw_runtime.check_plugins()
+
+    def update_claw_plugin(self, plugin_id: str) -> dict[str, object]:
+        detail = self.inspect_claw_plugin(plugin_id)
+        if detail is None:
+            raise ValueError("claw plugin not found")
+        source_id = str(detail.get("source_id", "") or "").strip()
+        source_url = str(detail.get("source_url", "") or "").strip()
+        if not source_id or not source_url:
+            raise ValueError("claw plugin is missing marketplace source metadata")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prepared = self.marketplace.prepare_skill_bundle(source_id, source_url, tmpdir)
+            return self.import_skill_bundle(
+                prepared["path"],
+                overwrite=True,
+                source_metadata={
+                    "source_id": source_id,
+                    "source_url": prepared.get("source_url", source_url),
+                    "bundle_url": prepared.get("bundle_url", ""),
+                    "page_url": prepared.get("page_url", ""),
+                    "plugin_id": str(detail.get("id", plugin_id) or plugin_id),
+                },
+            )
+
     def search_marketplace(self, query: str, *, source_id: str = "", limit: int = 12) -> dict[str, object]:
         return self.console.search_marketplace(query, source_id=source_id, limit=limit)
 
@@ -972,6 +1034,33 @@ class WaifuService:
         overwrite: bool = True,
     ) -> dict[str, object]:
         return import_skill_pack(self.skills, payload, overwrite=overwrite)
+
+    def import_skill_bundle(
+        self,
+        source: str | Path,
+        *,
+        overwrite: bool = True,
+        source_metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        result = import_skill_bundle(self.skills, source, overwrite=overwrite)
+        if self.config.claw_runtime.enabled:
+            try:
+                plugin = self.claw_runtime.install_plugin(
+                    source,
+                    overwrite=overwrite,
+                    metadata=source_metadata or {},
+                )
+            except Exception as exc:
+                result["claw_runtime"] = {
+                    "status": "error",
+                    "reason": str(exc),
+                }
+            else:
+                result["claw_runtime"] = {
+                    "status": "ok",
+                    "plugin": plugin,
+                }
+        return result
 
     def get_skill_detail(self, skill_id: str) -> dict[str, object] | None:
         skill = self.skills.get_skill(skill_id)
@@ -1095,12 +1184,18 @@ class WaifuService:
                 "recent_behavior": behavior,
                 "active_followups": active,
                 "total_events": self._event_counter,
+                "claw_runtime": self.claw_runtime.describe(refresh=False),
             }
 
     def _persist_config(self) -> None:
         if not self.config.config_path:
             return
         ConfigManager().save(self.config)
+
+    def _sync_claw_runtime_workspace_bundles(self) -> dict[str, object]:
+        if not self.config.claw_runtime.enabled:
+            return {"items": [], "imported_count": 0, "skipped_count": 0, "errors": []}
+        return self.claw_runtime.sync_workspace_bundles(self.skills.workspace_root, overwrite=False)
 
     def _adopt_login_info(self, login_info: object) -> None:
         if not isinstance(login_info, dict):
@@ -1154,7 +1249,11 @@ class WaifuService:
         self.proactive = ProactivePlanner(self.config)
         self.marketplace = MarketplaceClient(self.config.marketplace)
         self.skills.config = self.config
+        old_claw_runtime = self.claw_runtime
+        self.claw_runtime = build_claw_runtime_bridge(self.config.claw_runtime, data_root=self.config.data_root)
         self.napcat_login = _build_napcat_login_bridge(self.config)
+        if old_claw_runtime is not self.claw_runtime:
+            _close_component(old_claw_runtime)
         if hasattr(self.state_store, "set_default_character"):
             self.state_store.set_default_character(self._active_character_id())
         if hasattr(self.state_store, "set_embedder"):
@@ -1607,11 +1706,13 @@ def _build_service(
     cards = generator._cards
     skills = SkillRegistry(app_config)
     tools = ToolRegistry()
+    claw_runtime = build_claw_runtime_bridge(app_config.claw_runtime, data_root=app_config.data_root)
     if app_config.plugins.enabled:
         load_tool_plugins(
             PluginContext(
                 app_config=app_config,
                 tool_registry=tools,
+                skill_registry=skills,
                 logger=logging.getLogger("waifu.plugins"),
                 metrics=metrics,
             ),
@@ -1633,6 +1734,7 @@ def _build_service(
         marketplace=MarketplaceClient(app_config.marketplace),
         skills=skills,
         tools=tools,
+        claw_runtime=claw_runtime,
         state_store=state_store,
         outbound=outbound,
         reverse_ws_gateway=reverse_ws_gateway,
@@ -1653,6 +1755,15 @@ def _build_service(
         description="调用图像生成能力并返回图文消息。",
         handler=service.dispatcher.run_image_tool,
         async_handler=service.dispatcher.arun_image_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "要生成图片的提示词。"},
+            },
+            "required": ["prompt"],
+        },
+        model_handler=service.dispatcher.use_image_tool,
+        async_model_handler=service.dispatcher.ause_image_tool,
     )
     tools.register(
         "search",
@@ -1660,6 +1771,15 @@ def _build_service(
         description="执行联网检索并把摘要整理成回复。",
         handler=service.dispatcher.run_search_tool,
         async_handler=service.dispatcher.arun_search_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "要搜索的关键词。"},
+            },
+            "required": ["query"],
+        },
+        model_handler=service.dispatcher.use_search_tool,
+        async_model_handler=service.dispatcher.ause_search_tool,
     )
     tools.register(
         "summary",
@@ -1667,6 +1787,9 @@ def _build_service(
         description="总结最近会话并提取重点标签。",
         handler=service.dispatcher.run_summary_tool,
         async_handler=service.dispatcher.arun_summary_tool,
+        parameters={"type": "object", "properties": {}},
+        model_handler=service.dispatcher.use_summary_tool,
+        async_model_handler=service.dispatcher.ause_summary_tool,
     )
     tools.register(
         "skill-list",
@@ -1674,6 +1797,9 @@ def _build_service(
         description="列出当前所有已启用的技能及其触发方式。",
         handler=service.dispatcher.run_skill_list_tool,
         async_handler=service.dispatcher.arun_skill_list_tool,
+        parameters={"type": "object", "properties": {}},
+        model_handler=service.dispatcher.use_skill_list_tool,
+        async_model_handler=service.dispatcher.ause_skill_list_tool,
     )
     tools.register(
         "summarize",
@@ -1681,5 +1807,161 @@ def _build_service(
         description="调用 summarize CLI 总结 URL、视频或本地文件。",
         handler=service.dispatcher.run_summarize_tool,
         async_handler=service.dispatcher.arun_summarize_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "要总结的 URL 或文件路径。"},
+            },
+            "required": ["target"],
+        },
+        model_handler=service.dispatcher.use_summarize_tool,
+        async_model_handler=service.dispatcher.ause_summarize_tool,
     )
+    tools.register(
+        "weather",
+        name="天气查询",
+        description="查询指定城市或地区的当前天气和近两天天气趋势，不需要额外 API key。",
+        handler=service.dispatcher.run_weather_tool,
+        async_handler=service.dispatcher.arun_weather_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "要查询天气的城市、地区或地名。"},
+            },
+            "required": ["location"],
+        },
+        model_handler=service.dispatcher.use_weather_tool,
+        async_model_handler=service.dispatcher.ause_weather_tool,
+    )
+    tools.register(
+        "search-links",
+        name="搜索来源链接",
+        description="返回最近一次搜索或指定查询对应的来源链接。",
+        handler=service.dispatcher.run_search_links_tool,
+        async_handler=service.dispatcher.arun_search_links_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "可选。如果提供则先执行搜索再返回来源链接。"},
+            },
+        },
+        model_handler=service.dispatcher.use_search_links_tool,
+        async_model_handler=service.dispatcher.ause_search_links_tool,
+    )
+    tools.register(
+        "image-caption",
+        name="生图交付文案",
+        description="为刚生成的图片生成一句交付文案。",
+        handler=service.dispatcher.run_image_caption_tool,
+        async_handler=service.dispatcher.arun_image_caption_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "图片生成时使用的提示词。"},
+            },
+            "required": ["prompt"],
+        },
+        model_handler=service.dispatcher.use_image_caption_tool,
+        async_model_handler=service.dispatcher.ause_image_caption_tool,
+        model_callable=False,
+    )
+    tools.register(
+        "web-fetch",
+        name="网页抓取",
+        description="抓取指定 URL 的正文文本。",
+        handler=service.dispatcher.run_web_fetch_tool,
+        async_handler=service.dispatcher.arun_web_fetch_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "要抓取的 http 或 https 链接。"},
+                "max_chars": {"type": "integer", "description": "返回文本的最大字符数。"},
+            },
+            "required": ["url"],
+        },
+        model_handler=service.dispatcher.use_web_fetch_tool,
+        async_model_handler=service.dispatcher.ause_web_fetch_tool,
+    )
+    tools.register(
+        "read-file",
+        name="读取文件",
+        description="读取工作区或数据目录内的本地文本文件。",
+        handler=service.dispatcher.run_read_file_tool,
+        async_handler=service.dispatcher.arun_read_file_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件路径。"},
+                "max_chars": {"type": "integer", "description": "返回内容的最大字符数。"},
+            },
+            "required": ["path"],
+        },
+        model_handler=service.dispatcher.use_read_file_tool,
+        async_model_handler=service.dispatcher.ause_read_file_tool,
+    )
+    tools.register(
+        "list-files",
+        name="列出文件",
+        description="列出工作区或数据目录内的目录内容。",
+        handler=service.dispatcher.run_list_files_tool,
+        async_handler=service.dispatcher.arun_list_files_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "目录路径。"},
+                "recursive": {"type": "boolean", "description": "是否递归列出子目录。"},
+                "limit": {"type": "integer", "description": "最多返回多少条路径。"},
+            },
+        },
+        model_handler=service.dispatcher.use_list_files_tool,
+        async_model_handler=service.dispatcher.ause_list_files_tool,
+    )
+    tools.register(
+        "write-file",
+        name="写入文件",
+        description="向工作区或数据目录内的文件写入文本内容。",
+        handler=service.dispatcher.run_write_file_tool,
+        async_handler=service.dispatcher.arun_write_file_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "要写入的文件路径。"},
+                "content": {"type": "string", "description": "要写入的文本。"},
+                "append": {"type": "boolean", "description": "是否追加写入。"},
+            },
+            "required": ["path", "content"],
+        },
+        model_handler=service.dispatcher.use_write_file_tool,
+        async_model_handler=service.dispatcher.ause_write_file_tool,
+        model_callable=False,
+    )
+    tools.register(
+        "exec-command",
+        name="执行命令",
+        description="在允许目录内执行非 shell 的本地命令。",
+        handler=service.dispatcher.run_exec_command_tool,
+        async_handler=service.dispatcher.arun_exec_command_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "命令字符串。"},
+                "argv": {"type": "array", "items": {"type": "string"}, "description": "结构化参数数组。"},
+                "cwd": {"type": "string", "description": "执行目录。"},
+                "timeout_seconds": {"type": "number", "description": "超时时间。"},
+            },
+        },
+        model_handler=service.dispatcher.use_exec_command_tool,
+        async_model_handler=service.dispatcher.ause_exec_command_tool,
+        model_callable=False,
+    )
+    _register_tool_aliases(tools)
+    generator.bind_tools(tools)
     return service, outbound
+
+
+def _register_tool_aliases(tools: ToolRegistry) -> None:
+    for alias, target in OPENCLAW_TOOL_ALIASES.items():
+        try:
+            tools.register_alias(alias, target)
+        except ValueError:
+            _LOGGER.debug("skipping unresolved tool alias %s -> %s", alias, target)

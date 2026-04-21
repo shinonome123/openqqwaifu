@@ -181,6 +181,8 @@ class _AioHttpDispatcher:
             "/api/panels/abilities": self._get_abilities_panel,
             "/api/panels/proactive": self._get_proactive_panel,
             "/api/panels/skills": self._get_skills_panel,
+            "/api/claw/runtime": self._get_claw_runtime_panel,
+            "/api/claw/plugins": self._get_claw_plugins,
             "/api/panels/sidecar": self._get_sidecar_panel,
             "/api/panels/qq-login": self._get_qq_login_panel,
             "/api/qq-login/qrcode-image": self._get_qq_login_qrcode_image,
@@ -237,7 +239,10 @@ class _AioHttpDispatcher:
             "/api/marketplace/import": self._post_marketplace_import,
             "/api/skill-packs/export": self._post_skill_pack_export,
             "/api/skill-packs/import": self._post_skill_pack_import,
+            "/api/skill-bundles/import-local": self._post_skill_bundle_import_local,
             "/api/skills/install": self._post_skill_install,
+            "/api/claw/plugins/check": self._post_claw_plugins_check,
+            "/api/claw/plugins/update": self._post_claw_plugin_update,
         }
         handler = routes.get(request.path)
         if handler is not None:
@@ -305,6 +310,20 @@ class _AioHttpDispatcher:
             except ValueError as exc:
                 return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
             detail = await self._call_api_in_thread(self.api.get_skill_detail, skill_id)
+            if detail is None:
+                return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+            return _json_response(HTTPStatus.OK, detail)
+
+        if request.path.startswith("/api/claw/plugins/"):
+            parts = [unquote(part) for part in request.path.split("/") if part]
+            if len(parts) != 4:
+                return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
+            try:
+                _, _, _, plugin_id = parts
+                plugin_id = _validate_route_segment(plugin_id, name="plugin_id")
+            except ValueError as exc:
+                return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+            detail = await self._call_api_in_thread(self.api.inspect_claw_plugin, plugin_id)
             if detail is None:
                 return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found"})
             return _json_response(HTTPStatus.OK, detail)
@@ -517,6 +536,16 @@ class _AioHttpDispatcher:
 
     async def _get_skills_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.get_skills_panel))
+
+    async def _get_claw_runtime_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        refresh = str(request.query.get("refresh", "0")).lower() in {"1", "true", "yes"}
+        return _json_response(
+            HTTPStatus.OK,
+            await self._call_api_in_thread(self.api.get_claw_runtime_panel, refresh=refresh),
+        )
+
+    async def _get_claw_plugins(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.list_claw_plugins))
 
     async def _get_sidecar_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         refresh = str(request.query.get("refresh", "0")).lower() in {"1", "true", "yes"}
@@ -822,7 +851,7 @@ class _AioHttpDispatcher:
             )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-        return _json_response(HTTPStatus.OK, {"status": "ok", "skill": detail})
+        return _json_response(HTTPStatus.OK, {"status": "ok", "bundle": detail})
 
     async def _post_skill_pack_export(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request, allow_empty=True)
@@ -859,6 +888,27 @@ class _AioHttpDispatcher:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, {"status": "ok", "pack": result})
 
+    async def _post_skill_bundle_import_local(
+        self,
+        request: web.Request,
+        current_user: dict[str, Any] | None,
+    ) -> web.Response:
+        payload, response = await _read_json_body(request)
+        if response is not None:
+            return response
+        source_path = str((payload or {}).get("path", "") or "").strip()
+        if not source_path:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "path is required"})
+        try:
+            result = await self._call_api_in_thread(
+                self.api.import_skill_bundle,
+                source_path,
+                overwrite=bool((payload or {}).get("overwrite", True)),
+            )
+        except ValueError as exc:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, {"status": "ok", "bundle": result})
+
     async def _post_skill_install(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
         if response is not None:
@@ -876,6 +926,33 @@ class _AioHttpDispatcher:
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
         return _json_response(HTTPStatus.OK, {"status": "ok", "skill": detail})
+
+    async def _post_claw_plugins_check(
+        self,
+        request: web.Request,
+        current_user: dict[str, Any] | None,
+    ) -> web.Response:
+        _, response = await _read_json_body(request, allow_empty=True)
+        if response is not None:
+            return response
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.check_claw_plugins))
+
+    async def _post_claw_plugin_update(
+        self,
+        request: web.Request,
+        current_user: dict[str, Any] | None,
+    ) -> web.Response:
+        payload, response = await _read_json_body(request)
+        if response is not None:
+            return response
+        plugin_id = str((payload or {}).get("plugin_id", "") or "").strip()
+        if not plugin_id:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": "plugin_id is required"})
+        try:
+            detail = await self._call_api_in_thread(self.api.update_claw_plugin, plugin_id)
+        except ValueError as exc:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, {"status": "ok", "bundle": detail})
 
     def _session_token(self, request: web.Request) -> str | None:
         cookies = _parse_cookie_header(request.headers.get("Cookie", ""))
