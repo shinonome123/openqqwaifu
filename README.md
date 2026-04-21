@@ -191,4 +191,10 @@ python run_cli.py import-skill-bundle --config data/config.json --input C:\path\
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=shinonome123/openqqwaifu&type=Date)](https://www.star-history.com/#shinonome123/openqqwaifu&Date)
+<a href="https://www.star-history.com/?type=date&repos=shinonome123%2Fopenqqwaifu">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=shinonome123/openqqwaifu&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=shinonome123/openqqwaifu&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=shinonome123/openqqwaifu&type=date&legend=top-left" />
+ </picture>
+</a>
