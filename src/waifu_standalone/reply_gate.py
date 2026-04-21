@@ -59,8 +59,6 @@ class ReplyGate:
         if bot_account_id and event.has_bot_mention(bot_account_id):
             self.refresh_follow_up_window(event)
             return True
-        if service.onboarding.looks_like_naming_input(latest_message):
-            return True
         if not service.config.group_reply_requires_mention:
             return True
         if not bot_account_id:

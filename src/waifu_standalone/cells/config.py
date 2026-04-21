@@ -33,9 +33,7 @@ class ConfigManager:
             return _normalize_webui_fields(config)
 
         raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
-        data_root = str(raw.get("data_root", "data"))
-        if not Path(data_root).is_absolute():
-            data_root = str((self.path.parent / data_root).resolve())
+        data_root = _resolve_config_path(raw.get("data_root", "data"), config_path=self.path)
 
         qq_sidecar = QQSidecarConfig(**raw.get("qq_sidecar", {}))
         llm = LLMConfig(**raw.get("llm", {}))
@@ -43,7 +41,7 @@ class ConfigManager:
         embedding = EmbeddingConfig(**raw.get("embedding", {}))
         marketplace = _load_marketplace(raw.get("marketplace"))
         tool_policy = _load_tool_policy(raw.get("tool_policy"))
-        claw_runtime = _load_claw_runtime(raw.get("claw_runtime"))
+        claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
         config = AppConfig(
             service_name=str(raw.get("service_name", "waifu-standalone")),
@@ -154,7 +152,17 @@ def _load_plugins(raw_value: object) -> PluginsConfig:
     )
 
 
-def _load_claw_runtime(raw_value: object) -> ClawRuntimeConfig:
+def _resolve_config_path(raw_value: object, *, config_path: Path | None = None) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    root = Path(value)
+    if not root.is_absolute() and config_path is not None:
+        root = (config_path.parent / root).resolve()
+    return str(root)
+
+
+def _load_claw_runtime(raw_value: object, *, config_path: Path | None = None) -> ClawRuntimeConfig:
     if not isinstance(raw_value, dict):
         return ClawRuntimeConfig()
     defaults = ClawRuntimeConfig()
@@ -164,7 +172,10 @@ def _load_claw_runtime(raw_value: object) -> ClawRuntimeConfig:
         routing_mode=str(raw_value.get("routing_mode", defaults.routing_mode) or defaults.routing_mode),
         base_url=str(raw_value.get("base_url", defaults.base_url) or ""),
         node_path=str(raw_value.get("node_path", defaults.node_path) or defaults.node_path),
-        runtime_root=str(raw_value.get("runtime_root", defaults.runtime_root) or ""),
+        runtime_root=_resolve_config_path(
+            raw_value.get("runtime_root", defaults.runtime_root),
+            config_path=config_path,
+        ),
         acp_enabled=bool(raw_value.get("acp_enabled", defaults.acp_enabled)),
         acp_default_command=str(
             raw_value.get("acp_default_command", defaults.acp_default_command) or ""
@@ -278,10 +289,7 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     claw_runtime.node_path = _env_str("OPENQQWAIFU_CLAW_RUNTIME_NODE_PATH", claw_runtime.node_path)
     runtime_root = _env_str("OPENQQWAIFU_CLAW_RUNTIME_ROOT", claw_runtime.runtime_root)
     if runtime_root:
-        root = Path(runtime_root)
-        if not root.is_absolute() and config_path is not None:
-            root = (config_path.parent / root).resolve()
-        claw_runtime.runtime_root = str(root)
+        claw_runtime.runtime_root = _resolve_config_path(runtime_root, config_path=config_path)
     claw_runtime.acp_enabled = _env_bool(
         "OPENQQWAIFU_CLAW_RUNTIME_ACP_ENABLED",
         claw_runtime.acp_enabled,

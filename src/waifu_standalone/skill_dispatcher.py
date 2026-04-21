@@ -736,6 +736,8 @@ class SkillDispatcher:
     # ------------------------------------------------------------------
     def run_image_tool(self, invocation: ToolInvocation) -> OutboundMessage:
         service = self._service
+        if service.generator.llm_ready:
+            return self._emit_tool_execution_result(invocation, self.use_image_tool(invocation))
         prompt = invocation.raw_args or self.extract_image_prompt(
             invocation.event.command_text(service.config.bot_account_id)
         )
@@ -761,6 +763,9 @@ class SkillDispatcher:
 
     async def arun_image_tool(self, invocation: ToolInvocation) -> OutboundMessage:
         service = self._service
+        if service.generator.llm_ready:
+            result = await self.ause_image_tool(invocation)
+            return await self._aemit_tool_execution_result(invocation, result)
         prompt = invocation.raw_args or self.extract_image_prompt(
             invocation.event.command_text(service.config.bot_account_id)
         )
@@ -786,6 +791,8 @@ class SkillDispatcher:
 
     def run_search_tool(self, invocation: ToolInvocation) -> OutboundMessage:
         service = self._service
+        if service.generator.llm_ready:
+            return self._emit_tool_execution_result(invocation, self.use_search_tool(invocation))
         query = (
             invocation.raw_args.strip()
             or invocation.event.command_text(service.config.bot_account_id).strip()
@@ -800,6 +807,9 @@ class SkillDispatcher:
 
     async def arun_search_tool(self, invocation: ToolInvocation) -> OutboundMessage:
         service = self._service
+        if service.generator.llm_ready:
+            result = await self.ause_search_tool(invocation)
+            return await self._aemit_tool_execution_result(invocation, result)
         query = (
             invocation.raw_args.strip()
             or invocation.event.command_text(service.config.bot_account_id).strip()
@@ -813,6 +823,8 @@ class SkillDispatcher:
         )
 
     def run_summary_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        if self._service.generator.llm_ready:
+            return self._emit_tool_execution_result(invocation, self.use_summary_tool(invocation))
         return self.handle_summary_request(
             invocation.event,
             invocation.session,
@@ -821,6 +833,9 @@ class SkillDispatcher:
         )
 
     async def arun_summary_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        if self._service.generator.llm_ready:
+            result = await self.ause_summary_tool(invocation)
+            return await self._aemit_tool_execution_result(invocation, result)
         return await self.ahandle_summary_request(
             invocation.event,
             invocation.session,
@@ -829,6 +844,8 @@ class SkillDispatcher:
         )
 
     def run_skill_list_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        if self._service.generator.llm_ready:
+            return self._emit_tool_execution_result(invocation, self.use_skill_list_tool(invocation))
         return self.handle_skill_list_request(
             invocation.event,
             address=invocation.address,
@@ -836,6 +853,9 @@ class SkillDispatcher:
         )
 
     async def arun_skill_list_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        if self._service.generator.llm_ready:
+            result = await self.ause_skill_list_tool(invocation)
+            return await self._aemit_tool_execution_result(invocation, result)
         return await self.ahandle_skill_list_request(
             invocation.event,
             address=invocation.address,
@@ -843,6 +863,8 @@ class SkillDispatcher:
         )
 
     def run_summarize_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        if self._service.generator.llm_ready:
+            return self._emit_tool_execution_result(invocation, self.use_summarize_tool(invocation))
         service = self._service
         target = self._extract_summarize_target(
             invocation.raw_args or invocation.event.command_text(service.config.bot_account_id)
@@ -885,6 +907,9 @@ class SkillDispatcher:
         )
 
     async def arun_summarize_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        if self._service.generator.llm_ready:
+            result = await self.ause_summarize_tool(invocation)
+            return await self._aemit_tool_execution_result(invocation, result)
         return await asyncio.to_thread(self.run_summarize_tool, invocation)
 
     def run_weather_tool(self, invocation: ToolInvocation) -> OutboundMessage:
@@ -961,6 +986,7 @@ class SkillDispatcher:
             text=f"已生成图片，prompt: {image.prompt}",
             images=[image.image_ref],
             metadata={"prompt": image.prompt, "image_ref": image.image_ref},
+            display_mode="media",
         )
 
     async def ause_image_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -981,6 +1007,7 @@ class SkillDispatcher:
             text=f"已生成图片，prompt: {image.prompt}",
             images=[image.image_ref],
             metadata={"prompt": image.prompt, "image_ref": image.image_ref},
+            display_mode="media",
         )
 
     def use_search_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1012,6 +1039,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(lines).strip() or search_context.summary,
             metadata=search_context.as_dict(),
+            display_mode="inline",
         )
 
     async def ause_search_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1043,6 +1071,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(lines).strip() or search_context.summary,
             metadata=search_context.as_dict(),
+            display_mode="inline",
         )
 
     def use_summary_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1056,7 +1085,11 @@ class SkillDispatcher:
         text = summary
         if tags:
             text += "\n标签：" + "、".join(tags[:4])
-        return ToolExecutionResult(text=text, metadata={"summary": summary, "tags": tags[:4]})
+        return ToolExecutionResult(
+            text=text,
+            metadata={"summary": summary, "tags": tags[:4]},
+            display_mode="inline",
+        )
 
     async def ause_summary_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
         service = self._service
@@ -1072,7 +1105,11 @@ class SkillDispatcher:
         text = summary
         if tags:
             text += "\n标签：" + "、".join(tags[:4])
-        return ToolExecutionResult(text=text, metadata={"summary": summary, "tags": tags[:4]})
+        return ToolExecutionResult(
+            text=text,
+            metadata={"summary": summary, "tags": tags[:4]},
+            display_mode="inline",
+        )
 
     def use_skill_list_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
         skills = [
@@ -1097,6 +1134,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(lines),
             metadata={"count": len(items), "skills": items},
+            display_mode="raw_block",
         )
 
     async def ause_skill_list_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1115,6 +1153,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text=self._format_summarize_reply(payload, address=invocation.address or "你"),
             metadata=payload,
+            display_mode="inline",
         )
 
     async def ause_summarize_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1145,6 +1184,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text=self._format_weather_reply(payload, address=invocation.address or "你"),
             metadata=payload,
+            display_mode="inline",
         )
 
     async def ause_weather_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1172,6 +1212,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text=self._format_weather_reply(payload, address=invocation.address or "你"),
             metadata=payload,
+            display_mode="inline",
         )
 
     def use_search_links_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1200,6 +1241,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(lines),
             metadata={"query": query_text, "sources": [{"title": title, "url": url} for title, url in sources[:5]]},
+            display_mode="raw_block",
         )
 
     async def ause_search_links_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1228,6 +1270,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(lines),
             metadata={"query": query_text, "sources": [{"title": title, "url": url} for title, url in sources[:5]]},
+            display_mode="raw_block",
         )
 
     def use_image_caption_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1242,7 +1285,11 @@ class SkillDispatcher:
             assistant_name=invocation.assistant_name,
             active_skills=invocation.active_skills,
         )
-        return ToolExecutionResult(text=text, metadata={"prompt": prompt})
+        return ToolExecutionResult(
+            text=text,
+            metadata={"prompt": prompt, "already_persona": True},
+            display_mode="inline",
+        )
 
     async def ause_image_caption_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
         prompt = str(invocation.argument("prompt") or invocation.raw_args or "").strip()
@@ -1256,7 +1303,11 @@ class SkillDispatcher:
             assistant_name=invocation.assistant_name,
             active_skills=invocation.active_skills,
         )
-        return ToolExecutionResult(text=text, metadata={"prompt": prompt})
+        return ToolExecutionResult(
+            text=text,
+            metadata={"prompt": prompt, "already_persona": True},
+            display_mode="inline",
+        )
 
     def use_web_fetch_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
         url = self._normalized_tool_text(invocation.argument("url") or invocation.raw_args)
@@ -1289,6 +1340,7 @@ class SkillDispatcher:
                 "status_code": response.status_code,
                 "content_type": response.headers.get("content-type", ""),
             },
+            display_mode="raw_block",
         )
 
     async def ause_web_fetch_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1322,6 +1374,7 @@ class SkillDispatcher:
                 "status_code": response.status_code,
                 "content_type": response.headers.get("content-type", ""),
             },
+            display_mode="raw_block",
         )
 
     def use_read_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1343,6 +1396,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text=f"path: {path}\n{clipped}".strip(),
             metadata={"path": str(path), "size": path.stat().st_size},
+            display_mode="raw_block",
         )
 
     async def ause_read_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1367,6 +1421,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(entries),
             metadata={"path": str(root), "recursive": recursive, "entries": entries},
+            display_mode="raw_block",
         )
 
     async def ause_list_files_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1404,6 +1459,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text=f"已写入文件：{path}",
             metadata={"path": str(path), "append": append, "chars": len(content)},
+            display_mode="inline",
         )
 
     async def ause_write_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1471,6 +1527,7 @@ class SkillDispatcher:
                 "returncode": completed.returncode,
             },
             error="" if completed.returncode == 0 else f"command exited with {completed.returncode}",
+            display_mode="raw_block",
         )
 
     async def ause_exec_command_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1516,11 +1573,13 @@ class SkillDispatcher:
         invocation: ToolInvocation,
         result: ToolExecutionResult,
     ) -> OutboundMessage:
+        reply = self._service.generator.generate_tool_reply_message(invocation, result)
+        text = self._compose_tool_display_text(reply.text, result)
         message = OutboundMessage(
             launcher_id=invocation.event.launcher_id,
             launcher_type=invocation.event.launcher_type,
-            text=str(result.text or result.error or "工具没有返回内容。").strip(),
-            images=list(result.images),
+            text=text,
+            images=list(reply.images or result.images),
         )
         return self._service.emitter.emit(
             invocation.event,
@@ -1533,17 +1592,30 @@ class SkillDispatcher:
         invocation: ToolInvocation,
         result: ToolExecutionResult,
     ) -> OutboundMessage:
+        reply = await self._service.generator.agenerate_tool_reply_message(invocation, result)
+        text = self._compose_tool_display_text(reply.text, result)
         message = OutboundMessage(
             launcher_id=invocation.event.launcher_id,
             launcher_type=invocation.event.launcher_type,
-            text=str(result.text or result.error or "工具没有返回内容。").strip(),
-            images=list(result.images),
+            text=text,
+            images=list(reply.images or result.images),
         )
         return await self._service.emitter.aemit(
             invocation.event,
             message,
             assistant_name=invocation.assistant_name,
         )
+
+    @staticmethod
+    def _compose_tool_display_text(prefix: str, result: ToolExecutionResult) -> str:
+        lead = str(prefix or "").strip()
+        payload = str(result.text or result.error or "工具没有返回内容。").strip()
+        if result.display_mode != "raw_block":
+            return lead or payload
+        block = "```text\n" + payload + "\n```"
+        if not lead:
+            return block
+        return lead + "\n" + block
 
     def _claw_runtime_allows_execution(self) -> bool:
         config = self._service.config.claw_runtime

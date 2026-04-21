@@ -13,7 +13,7 @@ from .cards import CardManager, CharacterCard
 from .image_clients import ImageClient, ImageClientError, build_image_client
 from .llm_clients import LLMClient, LLMClientError, build_llm_client
 from .skill_registry import SkillSpec
-from .tool_registry import ToolInvocation, ToolRegistry
+from .tool_registry import ToolExecutionResult, ToolInvocation, ToolRegistry
 
 
 @dataclass(slots=True)
@@ -1038,6 +1038,252 @@ class Generator:
         except LLMClientError:
             return self._empty_preferred_name_hint()
 
+    def resolve_skill_intent(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        address: str,
+        latest_message: str,
+        candidate_skills: list[dict[str, object]],
+    ) -> dict[str, Any]:
+        if not self.llm_ready or not candidate_skills:
+            return self._empty_intent_route()
+        card = self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
+        prompt = self._build_intent_router_query(
+            event,
+            session,
+            card=card,
+            assistant_name=resolved_assistant_name,
+            address=address,
+            latest_message=latest_message,
+            candidate_skills=candidate_skills,
+        )
+        try:
+            response = self._dify_client.invoke(
+                prompt,
+                user=self._llm_user_key(event, session, purpose="intent-router"),
+            )
+            return self._parse_intent_route_payload(response)
+        except LLMClientError:
+            return self._empty_intent_route()
+
+    def resolve_naming_intent(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        latest_message: str,
+        onboarding_status: str,
+        preferred_name: str,
+        passive_capture_allowed: bool,
+    ) -> dict[str, Any]:
+        if not self.llm_ready:
+            return self._empty_naming_intent_route()
+        card = self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
+        prompt = self._build_naming_intent_router_query(
+            event,
+            session,
+            card=card,
+            assistant_name=resolved_assistant_name,
+            latest_message=latest_message,
+            onboarding_status=onboarding_status,
+            preferred_name=preferred_name,
+            passive_capture_allowed=passive_capture_allowed,
+        )
+        try:
+            response = self._dify_client.invoke(
+                prompt,
+                user=self._llm_user_key(event, session, purpose="naming-intent-router"),
+            )
+            return self._parse_naming_intent_route_payload(response)
+        except LLMClientError:
+            return self._empty_naming_intent_route()
+
+    async def aresolve_naming_intent(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        latest_message: str,
+        onboarding_status: str,
+        preferred_name: str,
+        passive_capture_allowed: bool,
+    ) -> dict[str, Any]:
+        if "resolve_naming_intent" in getattr(self, "__dict__", {}) and "aresolve_naming_intent" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.resolve_naming_intent,
+                event,
+                session,
+                assistant_name=assistant_name,
+                latest_message=latest_message,
+                onboarding_status=onboarding_status,
+                preferred_name=preferred_name,
+                passive_capture_allowed=passive_capture_allowed,
+            )
+        if not self.llm_ready:
+            return self._empty_naming_intent_route()
+        card = self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
+        prompt = self._build_naming_intent_router_query(
+            event,
+            session,
+            card=card,
+            assistant_name=resolved_assistant_name,
+            latest_message=latest_message,
+            onboarding_status=onboarding_status,
+            preferred_name=preferred_name,
+            passive_capture_allowed=passive_capture_allowed,
+        )
+        try:
+            response = await self._ainvoke_client(
+                prompt,
+                user=self._llm_user_key(event, session, purpose="naming-intent-router"),
+            )
+            return self._parse_naming_intent_route_payload(response)
+        except LLMClientError:
+            return self._empty_naming_intent_route()
+
+    async def aresolve_skill_intent(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        assistant_name: str,
+        address: str,
+        latest_message: str,
+        candidate_skills: list[dict[str, object]],
+    ) -> dict[str, Any]:
+        if "resolve_skill_intent" in getattr(self, "__dict__", {}) and "aresolve_skill_intent" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.resolve_skill_intent,
+                event,
+                session,
+                assistant_name=assistant_name,
+                address=address,
+                latest_message=latest_message,
+                candidate_skills=candidate_skills,
+            )
+        if not self.llm_ready or not candidate_skills:
+            return self._empty_intent_route()
+        card = self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
+        prompt = self._build_intent_router_query(
+            event,
+            session,
+            card=card,
+            assistant_name=resolved_assistant_name,
+            address=address,
+            latest_message=latest_message,
+            candidate_skills=candidate_skills,
+        )
+        try:
+            response = await self._ainvoke_client(
+                prompt,
+                user=self._llm_user_key(event, session, purpose="intent-router"),
+            )
+            return self._parse_intent_route_payload(response)
+        except LLMClientError:
+            return self._empty_intent_route()
+
+    def generate_tool_reply_message(
+        self,
+        invocation: ToolInvocation,
+        result: ToolExecutionResult,
+        *,
+        allow_fallback: bool = True,
+    ) -> GeneratedReply:
+        event = invocation.event
+        session = invocation.session
+        card = self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = invocation.assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
+        address = str(invocation.address or "").strip() or self._resolve_address(event, session, card)
+        if self.llm_ready and not result.metadata.get("already_persona"):
+            prompt = self._build_tool_render_query(
+                invocation,
+                result,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=address,
+            )
+            try:
+                response = self._dify_client.invoke(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose=f"tool-render-{invocation.tool_id}"),
+                )
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return GeneratedReply(text=cleaned, images=list(result.images))
+            except LLMClientError:
+                pass
+        if allow_fallback:
+            return self._fallback_tool_reply(
+                invocation,
+                result,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=address,
+            )
+        return GeneratedReply(images=list(result.images))
+
+    async def agenerate_tool_reply_message(
+        self,
+        invocation: ToolInvocation,
+        result: ToolExecutionResult,
+        *,
+        allow_fallback: bool = True,
+    ) -> GeneratedReply:
+        if "generate_tool_reply_message" in getattr(self, "__dict__", {}) and "agenerate_tool_reply_message" not in getattr(self, "__dict__", {}):
+            return await asyncio.to_thread(
+                self.generate_tool_reply_message,
+                invocation,
+                result,
+                allow_fallback=allow_fallback,
+            )
+        event = invocation.event
+        session = invocation.session
+        card = self._cards.load(event.launcher_type, session)
+        resolved_assistant_name = invocation.assistant_name or card.assistant_name or self.config.assistant_name
+        card = self._card_with_assistant_name(card, resolved_assistant_name)
+        address = str(invocation.address or "").strip() or self._resolve_address(event, session, card)
+        if self.llm_ready and not result.metadata.get("already_persona"):
+            prompt = self._build_tool_render_query(
+                invocation,
+                result,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=address,
+            )
+            try:
+                response = await self._ainvoke_client(
+                    prompt,
+                    user=self._llm_user_key(event, session, purpose=f"tool-render-{invocation.tool_id}"),
+                )
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return GeneratedReply(text=cleaned, images=list(result.images))
+            except LLMClientError:
+                pass
+        if allow_fallback:
+            return self._fallback_tool_reply(
+                invocation,
+                result,
+                card=card,
+                assistant_name=resolved_assistant_name,
+                address=address,
+            )
+        return GeneratedReply(images=list(result.images))
+
     def _build_analysis_query(
         self,
         event: InboundEvent,
@@ -1251,6 +1497,158 @@ class Generator:
         if conversation_view:
             lines.append("[Recent conversation]\n" + conversation_view)
         return "\n\n".join(lines)
+
+    def _build_intent_router_query(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+        latest_message: str,
+        candidate_skills: list[dict[str, object]],
+    ) -> str:
+        conversation_view = self._conversation_excerpt(session.history, assistant_name=assistant_name, limit=6)
+        lines = [
+            "[Intent Router]",
+            "你是技能路由器，不要扮演角色本人，也不要输出对白。",
+            "你的任务是判断：这句消息是否应该触发技能、触发哪个技能，还是应该先澄清。",
+            "Return JSON only.",
+            (
+                'Schema: {"mode":"activate_only|dispatch|clarify|none",'
+                '"active_skill_ids":["..."],'
+                '"dispatch_skill_id":"...",'
+                '"raw_args":"...",'
+                '"clarification_text":"..."}'
+            ),
+            "规则：",
+            "- `dispatch` 只在用户明显要你直接执行某个技能时使用，而且 `dispatch_skill_id` 必须来自候选列表里的 dispatchable 技能。",
+            "- `activate_only` 只在需要启用风格/约束类技能，但不需要立即执行工具时使用。",
+            "- `clarify` 用在你觉得像技能请求，但目标技能或参数还不够明确的时候。",
+            "- `none` 用在普通聊天，不需要技能的时候。",
+            "- 如果是带链接、视频、网页、文件的“总结/看看/过一遍/讲什么”，优先考虑外部内容总结类技能，而不是对话总结。",
+            "- 如果只有“总结一下”这类模糊说法，没有明确对象，优先 `clarify`，不要自己猜。",
+            "- `active_skill_ids` 只放额外要启用的技能，不要把 `dispatch_skill_id` 重复放进去。",
+            f"当前角色：{assistant_name}",
+            f"角色语言：{card.language or '简体中文'}",
+            f"对方当前称呼：{address}",
+            f"会话类型：{event.launcher_type}",
+            f"最新消息：{latest_message or '(empty)'}",
+        ]
+        profile_lines = [line for line in card.profile[:3] if str(line or "").strip()]
+        if profile_lines:
+            lines.append("角色摘要：" + " | ".join(profile_lines))
+        if conversation_view:
+            lines.append("[Recent conversation]\n" + conversation_view)
+        lines.append("[Candidate skills]\n" + json.dumps(candidate_skills, ensure_ascii=False, indent=2))
+        return "\n\n".join(lines)
+
+    def _build_naming_intent_router_query(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        latest_message: str,
+        onboarding_status: str,
+        preferred_name: str,
+        passive_capture_allowed: bool,
+    ) -> str:
+        conversation_view = self._conversation_excerpt(session.history, assistant_name=assistant_name, limit=6)
+        lines = [
+            "[Naming Intent Router]",
+            "你是称呼路由器，不要扮演角色本人，也不要输出对白。",
+            "你的任务是判断：这句消息是不是在定义用户称呼、给机器人起别名、越权替别人命名、询问命名规则，还是普通聊天。",
+            "Return JSON only.",
+            (
+                'Schema: {"mode":"set_preferred_name|set_assistant_alias|reject_third_party_naming|clarify_naming_intent|none",'
+                '"preferred_name":"...",'
+                '"assistant_alias":"...",'
+                '"clarification_text":"user_name|assistant_alias|",'
+                '"reason":"..."}'
+            ),
+            "规则：",
+            "- `set_preferred_name` 只在说话人是在定义“你以后怎么称呼我”时使用。",
+            "- `set_assistant_alias` 只在说话人是在定义“我以后怎么叫你”时使用。",
+            "- `reject_third_party_naming` 用于说话人试图替第三方决定称呼边界时。",
+            "- `clarify_naming_intent` 用于命名相关问题，但这句话本身还没有正式定义名字。",
+            "- `none` 用于普通聊天，不要为了勉强命中而乱选。",
+            "- `preferred_name` 和 `assistant_alias` 只能提取短称呼本身，不要复制整句，不要带标点。",
+            "- 如果 `passive_capture_allowed` 是 false，就不要把裸词、模糊跟进或含糊自我介绍当成正式命名，除非这句话本身已经非常明确。",
+            "- 如果 `clarify_naming_intent`，`clarification_text` 只能填写 `user_name` 或 `assistant_alias`。",
+            f"当前角色：{assistant_name}",
+            f"角色语言：{card.language or '简体中文'}",
+            f"会话类型：{event.launcher_type}",
+            f"当前 onboarding 状态：{onboarding_status or 'new'}",
+            f"当前已保存的 preferred_name：{preferred_name or '(none)'}",
+            f"passive_capture_allowed：{'true' if passive_capture_allowed else 'false'}",
+            f"最新消息：{latest_message or '(empty)'}",
+        ]
+        profile_lines = [line for line in card.profile[:3] if str(line or "").strip()]
+        if profile_lines:
+            lines.append("角色摘要：" + " | ".join(profile_lines))
+        if conversation_view:
+            lines.append("[Recent conversation]\n" + conversation_view)
+        return "\n\n".join(lines)
+
+    def _build_tool_render_query(
+        self,
+        invocation: ToolInvocation,
+        result: ToolExecutionResult,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+    ) -> str:
+        latest_message = invocation.event.command_text(self.config.bot_account_id).strip() or invocation.event.to_memory_text()
+        system_prompt = card.system_prompt(
+            launcher_type=invocation.event.launcher_type,
+            address=address,
+            memories=[],
+            emotion=EmotionState(),
+            search_hint="",
+            conversation_view="",
+            speaker_notes=[],
+            latest_message=latest_message,
+        )
+        preview = self._clip(result.text or result.error or "", limit=1200)
+        metadata_preview = self._clip(
+            json.dumps(result.metadata, ensure_ascii=False, default=str) if result.metadata else "",
+            limit=800,
+        )
+        lines = [
+            system_prompt,
+            "[Tool Result Render]",
+            f"你现在不是自由聊天，而是在把工具结果整理成给用户的一条最终回复。当前角色名：{assistant_name}。",
+            f"用户称呼：{address}",
+            f"工具 ID：{invocation.tool_id}",
+            f"展示模式：{result.display_mode or 'inline'}",
+            f"执行状态：{'error' if result.error else 'ok'}",
+        ]
+        if invocation.raw_args:
+            lines.append(f"工具输入：{self._clip(invocation.raw_args, limit=400)}")
+        if preview:
+            lines.append("[Tool output preview]\n" + preview)
+        if metadata_preview:
+            lines.append("[Tool metadata preview]\n" + metadata_preview)
+        skill_block = self._format_skill_block(invocation.active_skills)
+        if skill_block:
+            lines.append(skill_block)
+        lines.extend(
+            [
+                "硬性要求：",
+                "- 必须使用角色语言和人物卡语气。",
+                "- 不允许伪造工具没有返回的事实。",
+                "- 如果工具失败，要明确承认失败，并保留真实失败原因，不许假装成功。",
+                "- 如果展示模式是 raw_block 或 media，你只输出一两句简短承接语，不要输出代码块、列表、链接清单、命令结果，也不要复述整段原始内容。",
+                "- 如果展示模式是 inline，你直接输出最终给用户看的完整回复。",
+                "- 不要输出英文解释，不要提提示词，不要说自己在渲染工具结果。",
+                "只输出最终要发给用户的那一句或那一小段话。",
+            ]
+        )
+        return "\n\n".join(part for part in lines if part.strip())
 
     def _build_summary_query(self, history_lines: list[str], *, assistant_name: str) -> str:
         payload = "\n".join(history_lines)
@@ -1627,6 +2025,68 @@ class Generator:
             "is_self_intro": False,
         }
 
+    @staticmethod
+    def _empty_intent_route() -> dict[str, Any]:
+        return {
+            "mode": "none",
+            "active_skill_ids": [],
+            "dispatch_skill_id": "",
+            "raw_args": "",
+            "clarification_text": "",
+        }
+
+    @staticmethod
+    def _empty_naming_intent_route() -> dict[str, Any]:
+        return {
+            "mode": "none",
+            "preferred_name": "",
+            "assistant_alias": "",
+            "clarification_text": "",
+            "reason": "",
+        }
+
+    def _parse_intent_route_payload(self, response: str) -> dict[str, Any]:
+        payload = self._extract_json_payload(response)
+        if not payload:
+            return self._empty_intent_route()
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return self._empty_intent_route()
+        if not isinstance(decoded, dict):
+            return self._empty_intent_route()
+        raw_active = decoded.get("active_skill_ids", [])
+        active_skill_ids = (
+            [str(item).strip() for item in raw_active if str(item).strip()]
+            if isinstance(raw_active, list)
+            else []
+        )
+        return {
+            "mode": str(decoded.get("mode", "") or "none").strip().lower() or "none",
+            "active_skill_ids": active_skill_ids,
+            "dispatch_skill_id": str(decoded.get("dispatch_skill_id", "") or "").strip(),
+            "raw_args": str(decoded.get("raw_args", "") or "").strip(),
+            "clarification_text": str(decoded.get("clarification_text", "") or "").strip(),
+        }
+
+    def _parse_naming_intent_route_payload(self, response: str) -> dict[str, Any]:
+        payload = self._extract_json_payload(response)
+        if not payload:
+            return self._empty_naming_intent_route()
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            return self._empty_naming_intent_route()
+        if not isinstance(decoded, dict):
+            return self._empty_naming_intent_route()
+        return {
+            "mode": str(decoded.get("mode", "") or "none").strip().lower() or "none",
+            "preferred_name": str(decoded.get("preferred_name", "") or "").strip(),
+            "assistant_alias": str(decoded.get("assistant_alias", "") or "").strip(),
+            "clarification_text": str(decoded.get("clarification_text", "") or "").strip(),
+            "reason": str(decoded.get("reason", "") or "").strip(),
+        }
+
     def _parse_preferred_name_hint_payload(self, response: str) -> dict[str, Any]:
         payload = self._extract_json_block(response)
         if not payload:
@@ -1803,6 +2263,59 @@ class Generator:
             "entries": entries[: max(1, int(max_entries))],
             "profile_summary": "; ".join(profile_parts[:2]),
         }
+
+    def _fallback_tool_reply(
+        self,
+        invocation: ToolInvocation,
+        result: ToolExecutionResult,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+    ) -> GeneratedReply:
+        del card, assistant_name
+        payload = str(result.text or result.error or "工具没有返回内容。").strip()
+        tool_id = str(invocation.tool_id or "").strip().lower()
+        if result.display_mode == "media":
+            if result.error:
+                return GeneratedReply(
+                    text=f"{address}，这次没成功，原因是：{result.error or payload}",
+                    images=list(result.images),
+                )
+            prompt = str(result.metadata.get("prompt", "") or "").strip()
+            if prompt:
+                return GeneratedReply(
+                    text=f"{address}要的内容我已经准备好了，主题是“{self._clip(prompt, limit=36)}”。",
+                    images=list(result.images),
+                )
+            return GeneratedReply(
+                text=f"{address}，我已经处理好了，结果在这里。",
+                images=list(result.images),
+            )
+        if result.display_mode == "raw_block":
+            if result.error:
+                return GeneratedReply(
+                    text=f"{address}，这次没跑成，我把真实结果原样贴给你。",
+                    images=list(result.images),
+                )
+            prefix = f"{address}，我先把结果整理给你。"
+            if tool_id == "skill-list":
+                prefix = f"{address}，我先把现在能用的技能整理给你。"
+            return GeneratedReply(text=prefix, images=list(result.images))
+        if result.error:
+            return GeneratedReply(
+                text=f"{address}，这次没成功，原因是：{result.error or payload}",
+                images=list(result.images),
+            )
+        if tool_id == "search":
+            return GeneratedReply(text=f"{address}，我帮你查了一下。\n{payload}".strip(), images=list(result.images))
+        if tool_id == "summary":
+            return GeneratedReply(text=f"{address}，我先帮你收一下重点：{payload}".strip(), images=list(result.images))
+        if tool_id == "weather":
+            return GeneratedReply(text=payload, images=list(result.images))
+        if tool_id == "summarize":
+            return GeneratedReply(text=payload, images=list(result.images))
+        return GeneratedReply(text=payload, images=list(result.images))
 
     def _normalize_knowledge_item(self, item: Any) -> dict[str, Any] | None:
         if not isinstance(item, dict):

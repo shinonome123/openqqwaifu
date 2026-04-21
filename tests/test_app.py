@@ -1222,7 +1222,10 @@ class WaifuServiceTests(unittest.TestCase):
                 launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="叫我爷爷")],
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 叫我爷爷"),
+                ],
             )
         )
 
@@ -1233,6 +1236,52 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIsNotNone(member)
         assert member is not None
         self.assertEqual(member["preferred_name"], "爷爷")
+        self.assertEqual(member["onboarding_status"], "ready")
+        self.assertEqual(len(outbound.sent), 1)
+
+    def test_group_onboarding_ignores_unmentioned_self_intro_without_prompt(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="我是马云的狗")],
+            )
+        )
+
+        self.assertIsNone(result)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNone(member)
+        self.assertEqual(len(outbound.sent), 0)
+
+    def test_group_onboarding_accepts_mentioned_self_intro(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 我是阿狗"),
+                ],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("我叫你阿狗", result.text)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "阿狗")
         self.assertEqual(member["onboarding_status"], "ready")
         self.assertEqual(len(outbound.sent), 1)
 
@@ -1259,7 +1308,10 @@ class WaifuServiceTests(unittest.TestCase):
                 launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="luna")],
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" luna"),
+                ],
             )
         )
 
@@ -1299,7 +1351,10 @@ class WaifuServiceTests(unittest.TestCase):
                 launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="以后就这么叫吧")],
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 以后就这么叫吧"),
+                ],
             )
         )
 
@@ -1321,7 +1376,10 @@ class WaifuServiceTests(unittest.TestCase):
                 launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="叫他爷爷")],
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 叫他爷爷"),
+                ],
             )
         )
 
@@ -1346,7 +1404,10 @@ class WaifuServiceTests(unittest.TestCase):
                 launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="你该叫我什么")],
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 你该叫我什么"),
+                ],
             )
         )
 
@@ -1371,7 +1432,10 @@ class WaifuServiceTests(unittest.TestCase):
                 launcher_type="group",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="以后就叫你阿璃")],
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 以后就叫你阿璃"),
+                ],
             )
         )
 
@@ -1398,7 +1462,7 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIn("阿璃", private_result.text)
         self.assertEqual(len(outbound.sent), 2)
 
-    def test_group_address_command_works_without_mention(self) -> None:
+    def test_group_address_command_requires_mention(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
 
@@ -1412,13 +1476,100 @@ class WaifuServiceTests(unittest.TestCase):
             )
         )
 
-        self.assertIsNotNone(result)
+        self.assertIsNone(result)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNone(member)
+        self.assertEqual(len(outbound.sent), 0)
+
+    def test_group_onboarding_requires_mention_even_after_soft_ask(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+        service.generator.generate_reply = lambda *args, **kwargs: "normal-reply"  # type: ignore[method-assign]
+
+        first = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+        )
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="luna")],
+            )
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second.text, "normal-reply")
         member = service.state_store.get_member(group_id="612475113", user_id="783190298")
         self.assertIsNotNone(member)
         assert member is not None
-        self.assertEqual(member["preferred_name"], "爸爸")
+        self.assertEqual(member["preferred_name"], "")
+        self.assertEqual(member["onboarding_status"], "asked_once")
+        self.assertEqual(len(outbound.sent), 2)
+
+    def test_group_onboarding_accepts_llm_naming_route_for_vague_follow_up_with_mention(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+        service.generator.generate_reply = lambda *args, **kwargs: "normal-reply"  # type: ignore[method-assign]
+
+        service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" hello"),
+                ],
+            )
+        )
+        service.naming_router._routing_ready = lambda: True  # type: ignore[method-assign]
+
+        async def fake_route(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "mode": "set_preferred_name",
+                "preferred_name": "小满",
+                "assistant_alias": "",
+                "clarification_text": "",
+                "reason": "follow-up naming",
+            }
+
+        service.generator.aresolve_naming_intent = fake_route  # type: ignore[method-assign]
+        second = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 那你以后就这么叫我吧"),
+                ],
+            )
+        )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertIn("我叫你小满", second.text)
+        member = service.state_store.get_member(group_id="612475113", user_id="783190298")
+        self.assertIsNotNone(member)
+        assert member is not None
+        self.assertEqual(member["preferred_name"], "小满")
         self.assertEqual(member["onboarding_status"], "ready")
-        self.assertEqual(len(outbound.sent), 1)
+        self.assertEqual(len(outbound.sent), 2)
 
     def test_group_reply_does_not_leak_other_members_name_into_speaker_notes(self) -> None:
         config = AppConfig(group_reply_requires_mention=False)

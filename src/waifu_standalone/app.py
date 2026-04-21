@@ -30,6 +30,7 @@ from .config import AppConfig
 from .contracts import OutboundPort
 from .knowledge_curator import KnowledgeCurator
 from .legacy_migrator import LegacyMigrator
+from .intent_router import IntentRouter
 from .gateways.napcat_login import (
     NapCatLoginBridge,
     NapCatLoginError,
@@ -47,6 +48,7 @@ from .organs.memories import Memory
 from .organs.proactive import ProactivePlanner
 from .organs.thoughts import Thoughts
 from .member_onboarding import MemberOnboarding
+from .naming_intent_router import NamingIntentRouter
 from .outbound_emitter import OutboundEmitter
 from .observability import MetricsRegistry, logging_is_configured, set_active_metrics_registry
 from .persona_guard import PersonaGuard
@@ -151,6 +153,8 @@ class WaifuService:
     migrator: LegacyMigrator = field(init=False, repr=False)
     persona: PersonaGuard = field(init=False, repr=False)
     dispatcher: SkillDispatcher = field(init=False, repr=False)
+    intent_router: IntentRouter = field(init=False, repr=False)
+    naming_router: NamingIntentRouter = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         set_active_metrics_registry(self.metrics)
@@ -159,6 +163,8 @@ class WaifuService:
         self.notice = NoticeDispatcher(self)
         self.gate = ReplyGate(self)
         self.dispatcher = SkillDispatcher(self)
+        self.intent_router = IntentRouter(self)
+        self.naming_router = NamingIntentRouter(self)
         self.emitter = OutboundEmitter(self)
         self.onboarding = MemberOnboarding(self)
         self.migrator = LegacyMigrator(self)
@@ -275,8 +281,8 @@ class WaifuService:
                 ),
             )
 
-        active_skills = self.skills.match(latest_message)
         if explicit_skill_request is not None:
+            active_skills = self.skills.match(latest_message)
             skill, raw_args = explicit_skill_request
             if all(existing.skill_id != skill.skill_id for existing in active_skills):
                 active_skills = [skill, *active_skills][: max(1, self.config.max_active_skills)]
@@ -290,16 +296,63 @@ class WaifuService:
                 assistant_name=assistant_name,
                 active_skills=active_skills,
             )
-        await self._store_active_skills_async(session, active_skills)
 
-        dispatch = self.skills.resolve_dispatch(latest_message)
-        if dispatch is None:
-            dispatch = self.dispatcher.resolve_builtin_dispatch(latest_message)
-            if dispatch is not None:
-                skill, _ = dispatch
+        routed_skills: list[SkillSpec] = []
+        route = await self.intent_router.aroute(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            address=address,
+        )
+        for skill_id in route.active_skill_ids:
+            skill = self.skills.get_skill(skill_id)
+            if skill is None:
+                continue
+            routed_skills.append(skill)
+
+        if route.mode == "clarify":
+            clarification = OutboundMessage(
+                launcher_id=event.launcher_id,
+                launcher_type=event.launcher_type,
+                text=route.clarification_text or "你是想让我直接跑一个技能，还是先正常聊这个话题？",
+            )
+            return await self.emitter.aemit(event, clarification, assistant_name=assistant_name)
+
+        if route.mode == "dispatch":
+            skill = self.skills.get_skill(route.dispatch_skill_id)
+            if skill is not None:
+                active_skills = list(routed_skills)
                 if all(existing.skill_id != skill.skill_id for existing in active_skills):
-                    active_skills = [*active_skills, skill]
-                    await self._store_active_skills_async(session, active_skills)
+                    active_skills = [skill, *active_skills][: max(1, self.config.max_active_skills)]
+                await self._store_active_skills_async(session, active_skills)
+                return await self.dispatcher.adispatch_skill(
+                    event,
+                    session,
+                    skill=skill,
+                    raw_args=route.raw_args,
+                    address=address,
+                    assistant_name=assistant_name,
+                    active_skills=active_skills,
+                )
+
+        if route.mode == "activate_only":
+            active_skills = list(routed_skills)
+            await self._store_active_skills_async(session, active_skills)
+        else:
+            active_skills = self.skills.match(latest_message)
+            await self._store_active_skills_async(session, active_skills)
+
+        dispatch = None
+        if route.mode == "none":
+            dispatch = self.skills.resolve_dispatch(latest_message)
+            if dispatch is None:
+                dispatch = self.dispatcher.resolve_builtin_dispatch(latest_message)
+                if dispatch is not None:
+                    skill, _ = dispatch
+                    if all(existing.skill_id != skill.skill_id for existing in active_skills):
+                        active_skills = [*active_skills, skill]
+                        await self._store_active_skills_async(session, active_skills)
         if dispatch is not None:
             skill, raw_args = dispatch
             return await self.dispatcher.adispatch_skill(
