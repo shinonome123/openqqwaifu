@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ from waifu_standalone.cells.skill_registry import (
     parse_skill_file,
 )
 from waifu_standalone.cells.tool_registry import ToolExecutionResult
-from waifu_standalone.config import AppConfig, ToolPolicyConfig
+from waifu_standalone.config import AppConfig, LLMConfig, ToolPolicyConfig
 from waifu_standalone.http_transport import HttpResponse
 from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment, SessionMemory
 from waifu_standalone.systems.searching import SearchResult
@@ -416,6 +417,165 @@ Use summarize for URLs.
             assert reply is not None
             self.assertTrue(reply.text)
             self.assertIn("掌握的技能", reply.text, msg=text)
+
+    def test_intent_router_dispatches_skill_list_and_keeps_raw_block(self) -> None:
+        class _FakeIntentClient:
+            enabled = True
+            supports_tool_calling = False
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "intent-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                if "[Intent Router]" in query:
+                    return json.dumps(
+                        {
+                            "mode": "dispatch",
+                            "dispatch_skill_id": "skill-list-command",
+                            "raw_args": "",
+                            "active_skill_ids": [],
+                            "clarification_text": "",
+                        },
+                        ensure_ascii=False,
+                    )
+                if "[Tool Result Render]" in query:
+                    return "好呀，我把现在能做的事情摊开给你看。"
+                return ""
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return self.invoke(query, user=user)
+
+        service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
+        service.generator._dify_client = _FakeIntentClient()  # type: ignore[assignment]
+
+        reply = service.handle_event(
+            InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="列出技能")],
+            )
+        )
+
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn("摊开给你看", reply.text)
+        self.assertIn("```text", reply.text)
+        self.assertIn("直接生图", reply.text)
+
+    def test_intent_router_prefers_summarize_for_url_summary(self) -> None:
+        class _FakeIntentClient:
+            enabled = True
+            supports_tool_calling = False
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "intent-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                if "[Intent Router]" in query:
+                    return json.dumps(
+                        {
+                            "mode": "dispatch",
+                            "dispatch_skill_id": "summarize-command",
+                            "raw_args": "https://example.com/post",
+                            "active_skill_ids": [],
+                            "clarification_text": "",
+                        },
+                        ensure_ascii=False,
+                    )
+                if "[Tool Result Render]" in query:
+                    return "我已经替你看过这个网页了，核心意思是：这是网页内容摘要。"
+                return ""
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return self.invoke(query, user=user)
+
+        service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
+        service.generator._dify_client = _FakeIntentClient()  # type: ignore[assignment]
+        service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
+            {
+                "summary": "这是网页内容摘要。",
+                "extracted": {"title": "测试网页标题"},
+            },
+            "",
+        )
+
+        reply = service.handle_event(
+            InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[
+                    MessageSegment(
+                        kind="text",
+                        text="总结一下这个网页：https://example.com/post",
+                    )
+                ],
+            )
+        )
+
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn("替你看过这个网页", reply.text)
+        self.assertIn("这是网页内容摘要", reply.text)
+        session = service.memory.load("783190298", "person")
+        active_skills = session.metadata.get("active_skills", [])
+        self.assertTrue(active_skills)
+        self.assertEqual(active_skills[0]["id"], "summarize-command")
+
+    def test_intent_router_clarifies_ambiguous_skill_request(self) -> None:
+        class _FakeIntentClient:
+            enabled = True
+            supports_tool_calling = False
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "intent-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                if "[Intent Router]" in query:
+                    return json.dumps(
+                        {
+                            "mode": "clarify",
+                            "dispatch_skill_id": "",
+                            "raw_args": "",
+                            "active_skill_ids": [],
+                            "clarification_text": "你是想让我总结刚才的对话，还是总结一个链接或视频？",
+                        },
+                        ensure_ascii=False,
+                    )
+                return ""
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return self.invoke(query, user=user)
+
+        service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
+        service.generator._dify_client = _FakeIntentClient()  # type: ignore[assignment]
+
+        reply = service.handle_event(
+            InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="总结一下")],
+            )
+        )
+
+        self.assertIsNotNone(reply)
+        assert reply is not None
+        self.assertIn("总结刚才的对话", reply.text)
+        self.assertIn("链接或视频", reply.text)
 
     def test_generator_injects_only_prompt_visible_skills(self) -> None:
         generator = Generator(AppConfig())

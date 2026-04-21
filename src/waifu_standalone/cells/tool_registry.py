@@ -34,9 +34,11 @@ class ToolExecutionResult:
     images: list[str] = field(default_factory=list)
     metadata: dict[str, object] = field(default_factory=dict)
     error: str = ""
+    display_mode: str = "inline"
 
     def format_for_model(self, *, limit: int = 6000) -> str:
         lines = [f"status: {'error' if self.error else 'ok'}"]
+        lines.append(f"display_mode: {self.display_mode or 'inline'}")
         if self.error:
             lines.append(f"error: {self.error}")
         if self.text:

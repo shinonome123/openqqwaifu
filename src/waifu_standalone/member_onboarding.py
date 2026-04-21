@@ -181,14 +181,21 @@ class MemberOnboarding:
     def looks_like_address_command(self, text: str) -> bool:
         return bool(self.extract_command_preferred_name(text))
 
-    def looks_like_naming_input(self, text: str) -> bool:
+    def looks_like_direct_group_naming_request(self, text: str) -> bool:
         return any(
             (
                 bool(self.extract_command_preferred_name(text)),
                 bool(self.extract_assistant_alias_command(text)),
-                bool(self.extract_explicit_preferred_name(text)),
                 self._is_third_party_naming_request(text),
                 bool(self._clarify_naming_intent(text)),
+            )
+        )
+
+    def looks_like_naming_input(self, text: str) -> bool:
+        return any(
+            (
+                self.looks_like_direct_group_naming_request(text),
+                bool(self.extract_explicit_preferred_name(text)),
             )
         )
 
@@ -251,6 +258,8 @@ class MemberOnboarding:
         assistant_name: str,
         member: dict[str, Any],
     ) -> OutboundMessage | None:
+        if not self._is_naming_route_eligible(event):
+            return None
         allow_fallback = True
         action, payload = self._resolve_naming_action(
             event,
@@ -259,7 +268,7 @@ class MemberOnboarding:
             assistant_name=assistant_name,
             member=member,
         )
-        if action == "confirm_name" and payload:
+        if action == "set_preferred_name" and payload:
             return self._confirm_preferred_name(
                 event,
                 session,
@@ -268,7 +277,7 @@ class MemberOnboarding:
                 member=member,
                 allow_fallback=allow_fallback,
             )
-        if action == "confirm_assistant_alias" and payload:
+        if action == "set_assistant_alias" and payload:
             return self._confirm_assistant_alias(
                 event,
                 session,
@@ -304,6 +313,8 @@ class MemberOnboarding:
         assistant_name: str,
         member: dict[str, Any],
     ) -> OutboundMessage | None:
+        if not self._is_naming_route_eligible(event):
+            return None
         allow_fallback = True
         action, payload = await self._aresolve_naming_action(
             event,
@@ -312,7 +323,7 @@ class MemberOnboarding:
             assistant_name=assistant_name,
             member=member,
         )
-        if action == "confirm_name" and payload:
+        if action == "set_preferred_name" and payload:
             return await self._aconfirm_preferred_name(
                 event,
                 session,
@@ -321,7 +332,7 @@ class MemberOnboarding:
                 member=member,
                 allow_fallback=allow_fallback,
             )
-        if action == "confirm_assistant_alias" and payload:
+        if action == "set_assistant_alias" and payload:
             return await self._aconfirm_assistant_alias(
                 event,
                 session,
@@ -436,40 +447,22 @@ class MemberOnboarding:
         assistant_name: str,
         member: dict[str, Any],
     ) -> tuple[str, str]:
-        command_candidate = self.extract_command_preferred_name(latest_message)
-        if command_candidate:
-            return "confirm_name", command_candidate
-
-        assistant_candidate = self.extract_assistant_alias_command(latest_message)
-        if assistant_candidate:
-            return "confirm_assistant_alias", assistant_candidate
-
-        if self._is_third_party_naming_request(latest_message):
-            return "reject_third_party_naming", ""
-
-        clarify_hint = self._clarify_naming_intent(latest_message)
-        if clarify_hint:
-            return "clarify_naming_intent", clarify_hint
-
-        explicit_candidate = self.extract_explicit_preferred_name(latest_message)
-        if explicit_candidate:
-            return "confirm_name", explicit_candidate
-
-        if not self._allows_passive_capture(member):
-            return "", ""
-
-        passive_candidate = self.extract_preferred_name(latest_message)
-        if passive_candidate:
-            return "confirm_name", passive_candidate
-        inferred_candidate = self._infer_preferred_name_candidate(
+        routed_action, routed_payload = self._resolve_routed_naming_action(
             event,
             session,
             latest_message=latest_message,
             assistant_name=assistant_name,
+            member=member,
         )
-        if inferred_candidate:
-            return "confirm_name", inferred_candidate
-        return "", ""
+        if routed_action:
+            return routed_action, routed_payload
+        return self._fallback_naming_action(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            member=member,
+        )
 
     async def _aresolve_naming_action(
         self,
@@ -480,13 +473,110 @@ class MemberOnboarding:
         assistant_name: str,
         member: dict[str, Any],
     ) -> tuple[str, str]:
+        routed_action, routed_payload = await self._aresolve_routed_naming_action(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            member=member,
+        )
+        if routed_action:
+            return routed_action, routed_payload
+        return await self._afallback_naming_action(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            member=member,
+        )
+
+    def _resolve_routed_naming_action(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> tuple[str, str]:
+        status = str(member.get("onboarding_status", "") or "").strip() or "new"
+        preferred_name = str(member.get("preferred_name", "") or "").strip()
+        passive_capture_allowed = self._allows_passive_capture(member)
+        route = self._service.naming_router.route(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            onboarding_status=status,
+            preferred_name=preferred_name,
+            passive_capture_allowed=passive_capture_allowed,
+        )
+        return self._normalize_routed_naming_action(route.mode, route.preferred_name, route.assistant_alias, route.clarification_text)
+
+    async def _aresolve_routed_naming_action(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> tuple[str, str]:
+        status = str(member.get("onboarding_status", "") or "").strip() or "new"
+        preferred_name = str(member.get("preferred_name", "") or "").strip()
+        passive_capture_allowed = self._allows_passive_capture(member)
+        route = await self._service.naming_router.aroute(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+            onboarding_status=status,
+            preferred_name=preferred_name,
+            passive_capture_allowed=passive_capture_allowed,
+        )
+        return self._normalize_routed_naming_action(route.mode, route.preferred_name, route.assistant_alias, route.clarification_text)
+
+    def _normalize_routed_naming_action(
+        self,
+        mode: str,
+        preferred_name: str,
+        assistant_alias: str,
+        clarification_text: str,
+    ) -> tuple[str, str]:
+        if mode == "set_preferred_name":
+            candidate = self._normalize_name_candidate(preferred_name)
+            if self._looks_like_general_name(candidate):
+                return "set_preferred_name", candidate
+            return "", ""
+        if mode == "set_assistant_alias":
+            candidate = self._normalize_name_candidate(assistant_alias)
+            if self._looks_like_general_name(candidate):
+                return "set_assistant_alias", candidate
+            return "", ""
+        if mode == "reject_third_party_naming":
+            return "reject_third_party_naming", ""
+        if mode == "clarify_naming_intent":
+            hint = self._normalize_clarification_hint(clarification_text)
+            if hint:
+                return "clarify_naming_intent", hint
+        return "", ""
+
+    def _fallback_naming_action(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> tuple[str, str]:
         command_candidate = self.extract_command_preferred_name(latest_message)
         if command_candidate:
-            return "confirm_name", command_candidate
+            return "set_preferred_name", command_candidate
 
         assistant_candidate = self.extract_assistant_alias_command(latest_message)
         if assistant_candidate:
-            return "confirm_assistant_alias", assistant_candidate
+            return "set_assistant_alias", assistant_candidate
 
         if self._is_third_party_naming_request(latest_message):
             return "reject_third_party_naming", ""
@@ -496,15 +586,59 @@ class MemberOnboarding:
             return "clarify_naming_intent", clarify_hint
 
         explicit_candidate = self.extract_explicit_preferred_name(latest_message)
-        if explicit_candidate:
-            return "confirm_name", explicit_candidate
+        if explicit_candidate and self._allows_unsolicited_explicit_name(event, member):
+            return "set_preferred_name", explicit_candidate
 
         if not self._allows_passive_capture(member):
             return "", ""
 
         passive_candidate = self.extract_preferred_name(latest_message)
         if passive_candidate:
-            return "confirm_name", passive_candidate
+            return "set_preferred_name", passive_candidate
+        inferred_candidate = self._infer_preferred_name_candidate(
+            event,
+            session,
+            latest_message=latest_message,
+            assistant_name=assistant_name,
+        )
+        if inferred_candidate:
+            return "set_preferred_name", inferred_candidate
+        return "", ""
+
+    async def _afallback_naming_action(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        latest_message: str,
+        assistant_name: str,
+        member: dict[str, Any],
+    ) -> tuple[str, str]:
+        command_candidate = self.extract_command_preferred_name(latest_message)
+        if command_candidate:
+            return "set_preferred_name", command_candidate
+
+        assistant_candidate = self.extract_assistant_alias_command(latest_message)
+        if assistant_candidate:
+            return "set_assistant_alias", assistant_candidate
+
+        if self._is_third_party_naming_request(latest_message):
+            return "reject_third_party_naming", ""
+
+        clarify_hint = self._clarify_naming_intent(latest_message)
+        if clarify_hint:
+            return "clarify_naming_intent", clarify_hint
+
+        explicit_candidate = self.extract_explicit_preferred_name(latest_message)
+        if explicit_candidate and self._allows_unsolicited_explicit_name(event, member):
+            return "set_preferred_name", explicit_candidate
+
+        if not self._allows_passive_capture(member):
+            return "", ""
+
+        passive_candidate = self.extract_preferred_name(latest_message)
+        if passive_candidate:
+            return "set_preferred_name", passive_candidate
         inferred_candidate = await self._ainfer_preferred_name_candidate(
             event,
             session,
@@ -512,7 +646,7 @@ class MemberOnboarding:
             assistant_name=assistant_name,
         )
         if inferred_candidate:
-            return "confirm_name", inferred_candidate
+            return "set_preferred_name", inferred_candidate
         return "", ""
 
     @classmethod
@@ -551,6 +685,22 @@ class MemberOnboarding:
             return False
         status = str(member.get("onboarding_status", "") or "").strip() or "new"
         return status in self._PASSIVE_CAPTURE_STATUSES
+
+    def _allows_unsolicited_explicit_name(
+        self,
+        event: InboundEvent,
+        member: dict[str, Any],
+    ) -> bool:
+        if event.launcher_type != "group":
+            return True
+        bot_account_id = str(self._service.config.bot_account_id or "").strip()
+        return bool(bot_account_id and event.has_bot_mention(bot_account_id))
+
+    def _is_naming_route_eligible(self, event: InboundEvent) -> bool:
+        if event.launcher_type != "group":
+            return True
+        bot_account_id = str(self._service.config.bot_account_id or "").strip()
+        return bool(bot_account_id and event.has_bot_mention(bot_account_id))
 
     def _candidate_from_hint(self, hint: object) -> str:
         if not isinstance(hint, dict):
@@ -636,6 +786,21 @@ class MemberOnboarding:
             return "assistant_alias"
         if "callyou" in lowered and lowered.endswith("?"):
             return "assistant_alias"
+        return ""
+
+    @staticmethod
+    def _normalize_clarification_hint(text: str) -> str:
+        compact = str(text or "").strip().lower()
+        if not compact:
+            return ""
+        if compact == "assistant_alias":
+            return "assistant_alias"
+        if compact == "user_name":
+            return "user_name"
+        if "assistant" in compact or "alias" in compact or "叫你" in compact or "别人都叫你" in compact:
+            return "assistant_alias"
+        if "user" in compact or "callme" in compact or "叫我" in compact:
+            return "user_name"
         return ""
 
     def _member_payload(
