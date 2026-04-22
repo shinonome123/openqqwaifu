@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import threading
@@ -161,9 +162,49 @@ class WaifuServiceTests(unittest.TestCase):
         result = self.service.handle_event(event)
 
         self.assertIsNotNone(result)
+        assert result is not None
         self.assertEqual(result.images, ["generated://catgirl under sunlight"])
         self.assertIn("图片生成好了", result.text)
         self.assertEqual(len(self.outbound.sent), 1)
+        self.assertEqual(self.outbound.sent[0].images, ["generated://catgirl under sunlight"])
+        self.assertIn("图片生成好了", self.outbound.sent[0].text)
+
+    def test_async_image_request_acknowledges_before_background_delivery(self) -> None:
+        event = InboundEvent(
+            launcher_id="783190298",
+            launcher_type="person",
+            sender_id="783190298",
+            sender_name="tester",
+            segments=[MessageSegment(kind="text", text="draw: catgirl under sunlight")],
+        )
+
+        async def slow_generate(prompt: str) -> GeneratedImage:
+            await asyncio.sleep(0.05)
+            return GeneratedImage(prompt=prompt.strip(), image_ref="generated://catgirl under sunlight")
+
+        async def caption(prompt: str, **kwargs: object) -> str:
+            return "图片生成好了。"
+
+        self.service.generator.agenerate_image = slow_generate  # type: ignore[method-assign]
+        self.service.generator.agenerate_image_caption = caption  # type: ignore[method-assign]
+
+        async def run_flow() -> OutboundMessage | None:
+            task = asyncio.create_task(self.service.handle_event_async(event))
+            deadline = time.monotonic() + 0.3
+            while len(self.outbound.sent) < 1 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            self.assertGreaterEqual(len(self.outbound.sent), 1)
+            self.assertIn("我先去画", self.outbound.sent[0].text)
+            return await task
+
+        result = asyncio.run(run_flow())
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("我先去画", result.text)
+        self.service.flush_background_tasks(timeout=1.0)
+        self.assertEqual(len(self.outbound.sent), 2)
+        self.assertEqual(self.outbound.sent[1].images, ["generated://catgirl under sunlight"])
+        self.assertIn("图片生成好了", self.outbound.sent[1].text)
 
     def test_extract_image_prompt_accepts_fullwidth_colon(self) -> None:
         prompt = self.service.dispatcher.extract_image_prompt("生图：生成一个晴朗的天空")
@@ -1420,6 +1461,69 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(member["preferred_name"], "")
         self.assertEqual(member["onboarding_status"], "new")
         self.assertEqual(len(outbound.sent), 1)
+
+    def test_group_question_about_assistant_name_does_not_trigger_naming_clarify(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, outbound = build_default_service(config)
+        service.generator.generate_reply = lambda *args, **kwargs: "我叫极光。"  # type: ignore[method-assign]
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="财政部长资本狗",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 你叫什么名字？"),
+                ],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.text.startswith("我叫极光。"))
+        self.assertEqual(len(outbound.sent), 1)
+
+    def test_group_onboarding_stage_reply_uses_saved_preferred_name_as_address(self) -> None:
+        config = AppConfig(bot_account_id="3518944354")
+        service, _ = build_default_service(config)
+        service.state_store.save_member(
+            {
+                "group_id": "612475113",
+                "user_id": "783190298",
+                "qq_nickname": "财政部长资本狗",
+                "preferred_name": "爸爸",
+                "onboarding_status": "ready",
+            }
+        )
+        captured: dict[str, object] = {}
+
+        def fake_onboarding_reply(*args, **kwargs):  # type: ignore[no-untyped-def]
+            captured["address_override"] = kwargs.get("address_override", "")
+            captured["stage"] = kwargs.get("stage", "")
+            return "不能替别人决定怎么叫哦。"
+
+        service.generator.generate_onboarding_reply = fake_onboarding_reply  # type: ignore[method-assign]
+
+        result = service.handle_event(
+            InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="财政部长资本狗",
+                segments=[
+                    MessageSegment(kind="mention", mention_target="3518944354"),
+                    MessageSegment(kind="text", text=" 叫他爷爷"),
+                ],
+            )
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.text, "不能替别人决定怎么叫哦。")
+        self.assertEqual(captured["stage"], "reject_third_party_naming")
+        self.assertEqual(captured["address_override"], "爸爸")
 
     def test_group_assistant_alias_command_persists_for_same_character(self) -> None:
         config = AppConfig(bot_account_id="3518944354")

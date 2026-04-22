@@ -20,6 +20,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -206,6 +207,7 @@ class SkillDispatcher:
         address: str,
         assistant_name: str,
         active_skills: list[SkillSpec],
+        background_image_delivery: bool = True,
     ) -> OutboundMessage | None:
         service = self._service
         invocation = self._build_tool_invocation(
@@ -217,6 +219,8 @@ class SkillDispatcher:
             assistant_name=assistant_name,
             active_skills=active_skills,
         )
+        if skill.command_tool == "image":
+            invocation.arguments["background_delivery"] = bool(background_image_delivery)
         message = await service.tools.aexecute(skill.command_tool, invocation)
         if message is not None:
             return message
@@ -240,6 +244,7 @@ class SkillDispatcher:
         address: str,
         assistant_name: str,
         active_skills: list[SkillSpec],
+        background_image_delivery: bool = True,
     ) -> OutboundMessage | None:
         service = self._service
         tool_id = self._explicit_tool_id(skill)
@@ -254,6 +259,8 @@ class SkillDispatcher:
                 active_skills=active_skills,
                 tool_id=tool_id,
             )
+            if tool_id == "image":
+                invocation.arguments["background_delivery"] = bool(background_image_delivery)
             message = await service.tools.aexecute(tool_id, invocation)
             if message is not None:
                 return message
@@ -271,6 +278,8 @@ class SkillDispatcher:
                 active_skills=active_skills,
                 tool_id=skill.command_tool,
             )
+            if skill.command_tool == "image":
+                invocation.arguments["background_delivery"] = bool(background_image_delivery)
             runtime_message = await self._atry_emit_claw_runtime_tool(invocation)
             if runtime_message is not None:
                 return runtime_message
@@ -384,7 +393,77 @@ class SkillDispatcher:
         assistant_name: str,
         prompt: str,
         active_skills: list[SkillSpec],
+        background_delivery: bool = True,
     ) -> OutboundMessage:
+        service = self._service
+        if not background_delivery:
+            try:
+                image = await service.generator.agenerate_image(prompt)
+                caption_result = await self.ause_image_caption_tool(
+                    ToolInvocation(
+                        tool_id="image-caption",
+                        raw_args=image.prompt,
+                        event=event,
+                        session=session,
+                        address=address,
+                        assistant_name=assistant_name,
+                        active_skills=active_skills,
+                        arguments={"prompt": image.prompt},
+                    )
+                )
+                text = caption_result.text or "图片已经准备好了。"
+                message = OutboundMessage(
+                    launcher_id=event.launcher_id,
+                    launcher_type=event.launcher_type,
+                    text=text,
+                    images=[image.image_ref],
+                )
+            except Exception:
+                message = OutboundMessage(
+                    launcher_id=event.launcher_id,
+                    launcher_type=event.launcher_type,
+                    text="呜，这次图片没有画好，稍后再试一次吧。",
+                )
+            return await service.emitter.aemit(event, message, assistant_name=assistant_name)
+
+        event_copy = deepcopy(event)
+        session_copy = SessionMemory(
+            launcher_id=session.launcher_id,
+            launcher_type=session.launcher_type,
+            character_id=session.character_id,
+            history=list(session.history),
+            preferred_name=session.preferred_name,
+            metadata=deepcopy(session.metadata),
+        )
+        active_skills_copy = list(active_skills)
+        service._submit_background_coro(
+            "image_generation",
+            self._adeliver_generated_image(
+                event_copy,
+                session_copy,
+                address=address,
+                assistant_name=assistant_name,
+                prompt=prompt,
+                active_skills=active_skills_copy,
+            ),
+        )
+        ack = OutboundMessage(
+            launcher_id=event.launcher_id,
+            launcher_type=event.launcher_type,
+            text=f"{address}，我先去画，画好就马上发你。",
+        )
+        return await service.emitter.aemit(event, ack, assistant_name=assistant_name)
+
+    async def _adeliver_generated_image(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        address: str,
+        assistant_name: str,
+        prompt: str,
+        active_skills: list[SkillSpec],
+    ) -> None:
         service = self._service
         try:
             image = await service.generator.agenerate_image(prompt)
@@ -407,13 +486,13 @@ class SkillDispatcher:
                 text=text,
                 images=[image.image_ref],
             )
-        except Exception:
+        except Exception as exc:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text="呜，这次图片没有画好，稍后再试一次吧。",
+                text=f"{address}，这次图没画成，原因是：{str(exc) or '生成失败'}",
             )
-        return await service.emitter.aemit(event, message, assistant_name=assistant_name)
+        await service.emitter.aemit(event, message, assistant_name=assistant_name)
 
     def handle_search_link_request(
         self,
@@ -787,6 +866,7 @@ class SkillDispatcher:
             assistant_name=invocation.assistant_name,
             prompt=prompt,
             active_skills=invocation.active_skills,
+            background_delivery=bool(invocation.argument("background_delivery", True)),
         )
 
     def run_search_tool(self, invocation: ToolInvocation) -> OutboundMessage:

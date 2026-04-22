@@ -1552,24 +1552,30 @@ def _probe_http_endpoint(base_url: str, api_key: str) -> dict[str, Any]:
         with urllib.request.urlopen(request, timeout=6.0) as response:
             latency = time.monotonic() - started
             return {
+                "ok": True,
                 "status": "ok",
                 "http_status": int(response.status),
+                "elapsed_ms": int(latency * 1000),
                 "latency_ms": int(latency * 1000),
                 "reachable": True,
             }
     except urllib.error.HTTPError as exc:
         latency = time.monotonic() - started
         return {
+            "ok": True,
             "status": "ok",
             "http_status": int(exc.code),
+            "elapsed_ms": int(latency * 1000),
             "latency_ms": int(latency * 1000),
             "reachable": True,
             "note": "endpoint responded with non-2xx; service is reachable",
         }
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         return {
+            "ok": False,
             "status": "error",
             "reachable": False,
+            "error": str(exc),
             "reason": str(exc),
         }
 

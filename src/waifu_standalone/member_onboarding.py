@@ -182,6 +182,8 @@ class MemberOnboarding:
         return bool(self.extract_command_preferred_name(text))
 
     def looks_like_direct_group_naming_request(self, text: str) -> bool:
+        if self._asks_for_assistant_name(text):
+            return False
         return any(
             (
                 bool(self.extract_command_preferred_name(text)),
@@ -192,6 +194,8 @@ class MemberOnboarding:
         )
 
     def looks_like_naming_input(self, text: str) -> bool:
+        if self._asks_for_assistant_name(text):
+            return False
         return any(
             (
                 self.looks_like_direct_group_naming_request(text),
@@ -380,11 +384,13 @@ class MemberOnboarding:
         status = str(member.get("onboarding_status", "") or "").strip() or "new"
         if status != "new":
             return cleaned_reply
+        address = self._resolved_address(event, session, member=member)
         soft_ask = self._service.generator.generate_onboarding_reply(
             event,
             session,
             assistant_name=assistant_name,
             stage="soft_ask_name",
+            address_override=address,
             allow_fallback=True,
         )
         if not soft_ask:
@@ -419,11 +425,13 @@ class MemberOnboarding:
         status = str(member.get("onboarding_status", "") or "").strip() or "new"
         if status != "new":
             return cleaned_reply
+        address = self._resolved_address(event, session, member=member)
         soft_ask = await self._service.generator.agenerate_onboarding_reply(
             event,
             session,
             assistant_name=assistant_name,
             stage="soft_ask_name",
+            address_override=address,
             allow_fallback=True,
         )
         if not soft_ask:
@@ -765,6 +773,8 @@ class MemberOnboarding:
         lowered = compact.casefold()
         if not compact:
             return ""
+        if self._asks_for_assistant_name(compact):
+            return ""
         user_name_markers = (
             "\u4F60\u8BE5\u53EB\u6211\u4EC0\u4E48",
             "\u4F60\u60F3\u600E\u4E48\u53EB\u6211",
@@ -787,6 +797,28 @@ class MemberOnboarding:
         if "callyou" in lowered and lowered.endswith("?"):
             return "assistant_alias"
         return ""
+
+    @staticmethod
+    def _asks_for_assistant_name(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or "")).strip()
+        lowered = compact.casefold()
+        if not compact:
+            return False
+        markers = (
+            "\u4F60\u53EB\u4EC0\u4E48",
+            "\u4F60\u53EB\u5565",
+            "\u4F60\u53EB\u5565\u540D\u5B57",
+            "\u4F60\u53EB\u4EC0\u4E48\u540D\u5B57",
+            "\u4F60\u662F\u8C01",
+        )
+        if any(marker in compact for marker in markers):
+            return True
+        return lowered in {
+            "whatisyourname",
+            "what'syourname",
+            "whatisurname",
+            "whoareyou",
+        }
 
     @staticmethod
     def _normalize_clarification_hint(text: str) -> str:
@@ -899,12 +931,14 @@ class MemberOnboarding:
         candidate: str,
         allow_fallback: bool,
     ) -> OutboundMessage | None:
+        address = self._resolved_address(event, session)
         reply_text = self._service.generator.generate_onboarding_reply(
             event,
             session,
             assistant_name=assistant_name,
             stage="confirm_assistant_alias",
             candidate_name=candidate,
+            address_override=address,
             allow_fallback=allow_fallback,
         )
         if not reply_text:
@@ -930,12 +964,14 @@ class MemberOnboarding:
         candidate: str,
         allow_fallback: bool,
     ) -> OutboundMessage | None:
+        address = await asyncio.to_thread(self._resolved_address, event, session)
         reply_text = await self._service.generator.agenerate_onboarding_reply(
             event,
             session,
             assistant_name=assistant_name,
             stage="confirm_assistant_alias",
             candidate_name=candidate,
+            address_override=address,
             allow_fallback=allow_fallback,
         )
         if not reply_text:
@@ -963,6 +999,7 @@ class MemberOnboarding:
         allow_fallback: bool,
         intent_hint: str = "",
     ) -> OutboundMessage | None:
+        address = self._resolved_address(event, session)
         reply_text = self._service.generator.generate_onboarding_reply(
             event,
             session,
@@ -970,6 +1007,7 @@ class MemberOnboarding:
             stage=stage,
             allow_fallback=allow_fallback,
             intent_hint=intent_hint,
+            address_override=address,
         )
         if not reply_text:
             return None
@@ -990,6 +1028,7 @@ class MemberOnboarding:
         allow_fallback: bool,
         intent_hint: str = "",
     ) -> OutboundMessage | None:
+        address = await asyncio.to_thread(self._resolved_address, event, session)
         reply_text = await self._service.generator.agenerate_onboarding_reply(
             event,
             session,
@@ -997,6 +1036,7 @@ class MemberOnboarding:
             stage=stage,
             allow_fallback=allow_fallback,
             intent_hint=intent_hint,
+            address_override=address,
         )
         if not reply_text:
             return None
@@ -1016,3 +1056,20 @@ class MemberOnboarding:
         if not base:
             return extra
         return f"{base}\n{extra}"
+
+    def _resolved_address(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        *,
+        member: dict[str, Any] | None = None,
+    ) -> str:
+        record = member if member is not None else self._current_member(event)
+        preferred_name = str((record or {}).get("preferred_name", "") or "").strip()
+        if preferred_name:
+            return preferred_name
+        if event.launcher_type == "person":
+            user_name = str(self._service.cards.load(event.launcher_type, session).user_name or "").strip()
+            if user_name:
+                return user_name
+        return event.sender_name or "你"

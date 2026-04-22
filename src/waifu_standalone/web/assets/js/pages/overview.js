@@ -111,7 +111,7 @@ function renderContent(container, { dash, runtime, events }) {
   container.appendChild(kpis);
 
   container.appendChild(
-    el("div", { class: "overview-split" }, [
+    el("div", { class: "overview-split is-balanced" }, [
       renderIdentity(dash),
       renderProviders(dash),
     ]),
@@ -121,51 +121,57 @@ function renderContent(container, { dash, runtime, events }) {
 }
 
 function renderIdentity(dash) {
+  const replyMode = dash?.group_reply_requires_mention
+    ? t("overview.message.mentionRequired")
+    : t("overview.message.openGroups");
+  const utilityChips = [
+    dash?.search_enabled ? chip({ label: t("overview.flag.search"), variant: "ok" }) : null,
+    dash?.multimodal_enabled ? chip({ label: t("overview.message.multimodal"), variant: "info" }) : null,
+    Number(dash?.repeat_trigger_count ?? 0) > 0
+      ? chip({
+          label: t("overview.message.repeat", { count: dash?.repeat_trigger_count ?? 0 }),
+          variant: "warn",
+        })
+      : null,
+  ].filter(Boolean);
   return card({
     title: t("overview.identity.title"),
     subtitle: t("overview.identity.desc"),
     body: [
-      el("div", { class: "profile-header" }, [
-        el("div", { class: "portrait", text: initialsOf(dash?.assistant_name || "W") }),
-        el("div", {}, [
-          el("div", { class: "profile-name", text: dash?.assistant_name || "-" }),
-          el("div", { class: "profile-handle", text: `@${dash?.bot_account_id || "unset"}` }),
-          el("div", { class: "muted text-sm", text: `${dash?.character || "default"}` }),
+      el("div", { class: "overview-identity-shell" }, [
+        el("div", { class: "profile-header" }, [
+          el("div", { class: "portrait", text: initialsOf(dash?.assistant_name || "W") }),
+          el("div", {}, [
+            el("div", { class: "profile-name", text: dash?.assistant_name || "-" }),
+            el("div", { class: "profile-handle", text: `@${dash?.bot_account_id || "unset"}` }),
+            el("div", { class: "muted text-sm", text: `${dash?.character || "default"}` }),
+          ]),
         ]),
-      ]),
-      el("div", { class: "row" }, [
-        chip({ label: dash?.service_name || "-", variant: "outline" }),
-        dash?.thinking_mode ? chip({ label: t("overview.flag.thinking"), variant: "accent" }) : null,
-        dash?.summarization_mode ? chip({ label: t("overview.flag.summarize"), variant: "info" }) : null,
-        dash?.search_enabled ? chip({ label: t("overview.flag.search"), variant: "ok" }) : null,
-      ]),
-      el("div", { class: "row" }, [
-        chip({
-          label: dash?.group_reply_requires_mention
-            ? t("overview.message.mentionRequired")
-            : t("overview.message.openGroups"),
-          variant: "outline",
-        }),
-        chip({
-          label: t("overview.message.followup", { seconds: dash?.reply_window_seconds ?? 0 }),
-          variant: "outline",
-        }),
-        chip({
-          label: t("overview.message.delay", { seconds: dash?.group_response_delay_seconds ?? 0 }),
-          variant: "outline",
-        }),
-        dash?.multimodal_enabled
-          ? chip({ label: t("overview.message.multimodal"), variant: "info" })
-          : null,
-        Number(dash?.repeat_trigger_count ?? 0) > 0
-          ? chip({
-              label: t("overview.message.repeat", { count: dash?.repeat_trigger_count ?? 0 }),
-              variant: "warn",
-            })
-          : null,
+        el("div", { class: "overview-fact-grid" }, [
+          overviewFact(t("character.field.character"), dash?.character || t("common.none")),
+          overviewFact(t("character.field.serviceName"), dash?.service_name || t("common.none")),
+          overviewFact(
+            t("character.field.botId"),
+            dash?.bot_account_id ? `@${dash.bot_account_id}` : t("common.none"),
+          ),
+          overviewFact(t("character.field.groupReplyRequiresMention"), replyMode),
+          overviewFact(t("character.pipeline.followup"), `${dash?.reply_window_seconds ?? 0}s`),
+          overviewFact(
+            t("character.field.groupReplyDelay"),
+            `${dash?.group_response_delay_seconds ?? 0}s`,
+          ),
+        ]),
+        utilityChips.length ? el("div", { class: "row overview-identity-tags" }, utilityChips) : null,
       ]),
     ],
   });
+}
+
+function overviewFact(label, value) {
+  return el("div", { class: "overview-fact" }, [
+    el("div", { class: "overview-fact-label", text: label }),
+    el("div", { class: "overview-fact-value", text: value || t("common.none") }),
+  ]);
 }
 
 function renderProviders(dash) {

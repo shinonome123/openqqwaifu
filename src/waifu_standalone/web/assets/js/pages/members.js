@@ -146,51 +146,12 @@ export function mount(root) {
         syncGroupId = value;
       },
     });
-    const tbody = el("tbody");
-    members.forEach((member) => {
-      const active = memberKey(member) === selectedKey;
-      const displayName = member.preferred_name || member.group_card || member.qq_nickname || member.user_id;
-      tbody.appendChild(
-        el(
-          "tr",
-          {
-            style: {
-              cursor: "pointer",
-              background: active ? "var(--accent-subtle)" : "transparent",
-            },
-            onClick: () => {
-              selectMember(member);
-              render();
-            },
-          },
-          [
-            el("td", {}, [
-              el("div", { text: displayName }),
-              el("div", { class: "session-id", text: `${member.group_id || "person"}:${member.user_id}` }),
-            ]),
-            el("td", {}, [chip({ label: onboardingLabel(member.onboarding_status), variant: member.preferred_name ? "ok" : "outline" })]),
-            el("td", {}, [chip({ label: member.membership_status || "active", variant: (member.membership_status || "active") === "active" ? "ok" : "outline" })]),
-            el("td", { class: "session-meta", text: `${Number(member.affinity_score || 0).toFixed(2)} / ${bondStage(member.affinity_score)}` }),
-            el("td", { class: "session-meta", text: formatDateTime(member.last_seen_at) }),
-          ],
-        ),
-      );
-    });
     const table = members.length
-      ? el("div", { class: "table-wrap" }, [
-          el("table", { class: "table session-table" }, [
-            el("thead", {}, [
-              el("tr", {}, [
-                el("th", { text: t("user.directory.member") }),
-                el("th", { text: t("user.directory.status") }),
-                el("th", { text: t("user.directory.membershipStatus") }),
-                el("th", { text: t("user.directory.affinity") }),
-                el("th", { text: t("user.directory.lastSeen") }),
-              ]),
-            ]),
-            tbody,
-          ]),
-        ])
+      ? el(
+          "div",
+          { class: "member-group-stack" },
+          groupMembersByGroup(members).map((section) => renderMemberGroup(section)),
+        )
       : empty({ title: t("user.directory.empty") });
 
     return card({
@@ -209,6 +170,123 @@ export function mount(root) {
         table,
       ],
     });
+  }
+
+  function renderMemberGroup(section) {
+    const title = section.group_id
+      ? `${t("character.preview.mode.group")} ${section.group_id}`
+      : t("character.preview.mode.person");
+    const subtitle = `${section.members.length} ${t("user.directory.member")}`;
+    return el("div", { class: "member-group-section" }, [
+      el("div", { class: "member-group-header" }, [
+        el("div", { class: "member-group-title-wrap" }, [
+          el("div", { class: "member-group-title", text: title }),
+          el("div", { class: "member-group-subtitle", text: subtitle }),
+        ]),
+        chip({ label: String(section.members.length), variant: "outline" }),
+      ]),
+      renderMemberTable(section.members),
+    ]);
+  }
+
+  function renderMemberTable(groupMembers) {
+    const tbody = el("tbody");
+    groupMembers.forEach((member) => {
+      const active = memberKey(member) === selectedKey;
+      const displayName =
+        member.preferred_name || member.group_card || member.qq_nickname || member.user_id;
+      tbody.appendChild(
+        el(
+          "tr",
+          {
+            style: {
+              cursor: "pointer",
+              background: active ? "var(--accent-subtle)" : "transparent",
+            },
+            onClick: () => {
+              selectMember(member);
+              render();
+            },
+          },
+          [
+            el("td", {}, [
+              el("div", { text: displayName }),
+              el("div", {
+                class: "session-id",
+                text: `${member.group_id || "person"}:${member.user_id}`,
+              }),
+            ]),
+            el("td", {}, [
+              chip({
+                label: onboardingLabel(member.onboarding_status),
+                variant: member.preferred_name ? "ok" : "outline",
+              }),
+            ]),
+            el("td", {}, [
+              chip({
+                label: member.membership_status || "active",
+                variant:
+                  (member.membership_status || "active") === "active" ? "ok" : "outline",
+              }),
+            ]),
+            el("td", {
+              class: "session-meta",
+              text: `${Number(member.affinity_score || 0).toFixed(2)} / ${bondStage(member.affinity_score)}`,
+            }),
+            el("td", {
+              class: "session-meta",
+              text: formatDateTime(member.last_seen_at),
+            }),
+          ],
+        ),
+      );
+    });
+    return el("div", { class: "table-wrap" }, [
+      el("table", { class: "table session-table" }, [
+        el("thead", {}, [
+          el("tr", {}, [
+            el("th", { text: t("user.directory.member") }),
+            el("th", { text: t("user.directory.status") }),
+            el("th", { text: t("user.directory.membershipStatus") }),
+            el("th", { text: t("user.directory.affinity") }),
+            el("th", { text: t("user.directory.lastSeen") }),
+          ]),
+        ]),
+        tbody,
+      ]),
+    ]);
+  }
+
+  function groupMembersByGroup(members) {
+    const grouped = new Map();
+    members.forEach((member) => {
+      const key = String(member?.group_id || "");
+      const list = grouped.get(key) || [];
+      list.push(member);
+      grouped.set(key, list);
+    });
+    return Array.from(grouped.entries())
+      .sort(([leftGroup], [rightGroup]) => {
+        if (!leftGroup && rightGroup) return 1;
+        if (leftGroup && !rightGroup) return -1;
+        return leftGroup.localeCompare(rightGroup, "zh-Hans-CN", { numeric: true });
+      })
+      .map(([group_id, sectionMembers]) => ({
+        group_id,
+        members: sectionMembers.sort((left, right) => {
+          const leftName =
+            left.preferred_name ||
+            left.group_card ||
+            left.qq_nickname ||
+            String(left.user_id || "");
+          const rightName =
+            right.preferred_name ||
+            right.group_card ||
+            right.qq_nickname ||
+            String(right.user_id || "");
+          return leftName.localeCompare(rightName, "zh-Hans-CN", { numeric: true });
+        }),
+      }));
   }
 
   function renderMemberEditor() {

@@ -193,14 +193,23 @@ class WaifuService:
         lock = self._session_lock_for(event)
         await asyncio.to_thread(lock.acquire)
         try:
-            return await self._handle_event_async_locked(event)
+            return await self._handle_event_async_locked(
+                event, background_image_delivery=True
+            )
         finally:
             lock.release()
 
     def _handle_event_locked(self, event: InboundEvent) -> OutboundMessage | None:
-        return _ASYNC_RUNTIME.submit(self._handle_event_async_locked(event)).result()
+        return _ASYNC_RUNTIME.submit(
+            self._handle_event_async_locked(event, background_image_delivery=False)
+        ).result()
 
-    async def _handle_event_async_locked(self, event: InboundEvent) -> OutboundMessage | None:
+    async def _handle_event_async_locked(
+        self,
+        event: InboundEvent,
+        *,
+        background_image_delivery: bool,
+    ) -> OutboundMessage | None:
         self._ensure_character_scope_bound()
         current_character = self._active_character_id()
         text = event.command_text(self.config.bot_account_id)
@@ -295,6 +304,7 @@ class WaifuService:
                 address=address,
                 assistant_name=assistant_name,
                 active_skills=active_skills,
+                background_image_delivery=background_image_delivery,
             )
 
         routed_skills: list[SkillSpec] = []
@@ -334,6 +344,7 @@ class WaifuService:
                     address=address,
                     assistant_name=assistant_name,
                     active_skills=active_skills,
+                    background_image_delivery=background_image_delivery,
                 )
 
         if route.mode == "activate_only":
@@ -363,6 +374,7 @@ class WaifuService:
                 address=address,
                 assistant_name=assistant_name,
                 active_skills=active_skills,
+                background_image_delivery=background_image_delivery,
             )
 
         image_prompt = None if self.skills.has_dispatch_tool("image") else self.dispatcher.extract_image_prompt(text)
@@ -374,6 +386,7 @@ class WaifuService:
                 assistant_name=assistant_name,
                 prompt=image_prompt,
                 active_skills=active_skills,
+                background_delivery=background_image_delivery,
             )
 
         emotion = self.emotions.analyze(event, session)

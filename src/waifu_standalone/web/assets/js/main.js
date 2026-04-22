@@ -21,6 +21,7 @@ import * as advanced from "./pages/advanced.js";
 import * as userPage from "./pages/user.js";
 import * as members from "./pages/members.js";
 
+const PREFS_KEY = "waifu:prefs";
 const ROUTES = [
   {
     id: "overview",
@@ -116,6 +117,22 @@ const ROUTES = [
 ];
 const NON_ADMIN_ROUTE_IDS = new Set(["user"]);
 
+function readPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_KEY) || "{}");
+  } catch (err) {
+    return {};
+  }
+}
+
+function writePrefs(next) {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(next));
+  } catch (err) {
+    /* ignore */
+  }
+}
+
 function iconPath(d) {
   return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}" /></svg>`;
 }
@@ -154,8 +171,17 @@ function buildNav(routes, onNavigate, currentId) {
       btn.type = "button";
       btn.className = `nav-item${route.id === currentId ? " is-active" : ""}`;
       btn.dataset.route = route.id;
+      btn.title = t(route.labelKey);
       btn.innerHTML = `<span class="nav-icon">${route.icon}</span><span class="nav-item-label" data-i18n="${route.labelKey}">${t(route.labelKey)}</span>`;
-      btn.addEventListener("click", () => onNavigate(route.id));
+      btn.addEventListener("click", () => {
+        const sidebar = document.getElementById("sidebar");
+        const scrim = document.getElementById("sidebar-scrim");
+        if (window.matchMedia("(max-width: 900px)").matches) {
+          sidebar?.classList.remove("is-open");
+          scrim?.classList.remove("is-visible");
+        }
+        onNavigate(route.id);
+      });
       section.appendChild(btn);
     });
 
@@ -193,10 +219,47 @@ async function pollHealth() {
 
 function initSidebarToggle() {
   const mobileToggle = document.getElementById("sidebar-toggle");
+  const desktopToggle = document.getElementById("sidebar-collapse");
   const app = document.getElementById("app");
   const sidebar = document.getElementById("sidebar");
   const scrim = document.getElementById("sidebar-scrim");
   if (!app || !sidebar || !scrim) return;
+  const mediaQuery = window.matchMedia("(max-width: 900px)");
+
+  function syncLabels() {
+    if (mobileToggle) {
+      const label = t("sidebar.action.open");
+      mobileToggle.setAttribute("aria-label", label);
+      mobileToggle.setAttribute("title", label);
+    }
+    if (desktopToggle) {
+      const collapsed = app.classList.contains("sidebar-collapsed");
+      const label = t(collapsed ? "sidebar.action.expand" : "sidebar.action.collapse");
+      desktopToggle.setAttribute("aria-label", label);
+      desktopToggle.setAttribute("title", label);
+      desktopToggle.classList.toggle("is-active", collapsed);
+    }
+  }
+
+  function setDesktopCollapsed(collapsed) {
+    const prefs = readPrefs();
+    prefs.sidebarCollapsed = !!collapsed;
+    writePrefs(prefs);
+    app.classList.toggle("sidebar-collapsed", !!collapsed && !mediaQuery.matches);
+    syncLabels();
+  }
+
+  function syncResponsiveState() {
+    if (mediaQuery.matches) {
+      app.classList.remove("sidebar-collapsed");
+      sidebar.classList.remove("is-open");
+      scrim.classList.remove("is-visible");
+    } else {
+      const prefs = readPrefs();
+      app.classList.toggle("sidebar-collapsed", !!prefs.sidebarCollapsed);
+    }
+    syncLabels();
+  }
 
   if (mobileToggle) {
     mobileToggle.addEventListener("click", () => {
@@ -204,10 +267,21 @@ function initSidebarToggle() {
       scrim.classList.toggle("is-visible");
     });
   }
+  if (desktopToggle) {
+    desktopToggle.addEventListener("click", () => {
+      setDesktopCollapsed(!app.classList.contains("sidebar-collapsed"));
+    });
+  }
   scrim.addEventListener("click", () => {
     sidebar.classList.remove("is-open");
     scrim.classList.remove("is-visible");
   });
+  if (typeof mediaQuery.addEventListener === "function") {
+    mediaQuery.addEventListener("change", syncResponsiveState);
+  } else if (typeof mediaQuery.addListener === "function") {
+    mediaQuery.addListener(syncResponsiveState);
+  }
+  syncResponsiveState();
 }
 
 function initLangPicker() {
@@ -342,9 +416,28 @@ function mountConsole(currentUser) {
     document.querySelectorAll(".nav-item-label").forEach((node) => {
       if (node.dataset.i18n) node.textContent = t(node.dataset.i18n);
     });
+    document.querySelectorAll(".nav-item").forEach((node) => {
+      const routeId = node.dataset.route;
+      const route = ROUTES.find((item) => item.id === routeId);
+      if (route) node.title = t(route.labelKey);
+    });
     const topbarUser = document.getElementById("topbar-user");
     if (topbarUser && currentUser) {
       topbarUser.textContent = `${currentUser.username} | ${roleLabel(currentUser.role)}`;
+    }
+    const mobileToggle = document.getElementById("sidebar-toggle");
+    if (mobileToggle) {
+      const label = t("sidebar.action.open");
+      mobileToggle.setAttribute("aria-label", label);
+      mobileToggle.setAttribute("title", label);
+    }
+    const desktopToggle = document.getElementById("sidebar-collapse");
+    const app = document.getElementById("app");
+    if (desktopToggle && app) {
+      const collapsed = app.classList.contains("sidebar-collapsed");
+      const label = t(collapsed ? "sidebar.action.expand" : "sidebar.action.collapse");
+      desktopToggle.setAttribute("aria-label", label);
+      desktopToggle.setAttribute("title", label);
     }
   });
 

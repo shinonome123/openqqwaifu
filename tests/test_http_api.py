@@ -18,7 +18,7 @@ if str(SRC) not in sys.path:
 from waifu_standalone.app import build_default_service
 from waifu_standalone.cells.skill_registry import build_skill_markdown_template
 from waifu_standalone.config import AppConfig, ClawRuntimeConfig
-from waifu_standalone.http_api import HttpApi, RequestTooLarge, _read_chunked_body, parse_onebot_event
+from waifu_standalone.http_api import HttpApi, RequestTooLarge, _probe_http_endpoint, _read_chunked_body, parse_onebot_event
 
 
 class _BrokenService:
@@ -517,6 +517,37 @@ class HttpApiTests(unittest.TestCase):
 
         with self.assertRaises(RequestTooLarge):
             _read_chunked_body(handler)  # type: ignore[arg-type]
+
+    def test_probe_http_endpoint_success_payload_matches_frontend_expectations(self) -> None:
+        class _OkResponse:
+            status = 204
+
+            def __enter__(self):  # type: ignore[no-untyped-def]
+                return self
+
+            def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+                return False
+
+        with patch("waifu_standalone.http_api.urllib.request.urlopen", return_value=_OkResponse()):
+            result = _probe_http_endpoint("https://example.com/v1", "secret")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["http_status"], 204)
+        self.assertIn("elapsed_ms", result)
+        self.assertTrue(result["reachable"])
+
+    def test_probe_http_endpoint_network_failure_exposes_ok_false(self) -> None:
+        with patch(
+            "waifu_standalone.http_api.urllib.request.urlopen",
+            side_effect=OSError("connection refused"),
+        ):
+            result = _probe_http_endpoint("https://example.com/v1", "secret")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "error")
+        self.assertFalse(result["reachable"])
+        self.assertIn("connection refused", result["error"])
 
 
 if __name__ == "__main__":

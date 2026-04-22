@@ -559,6 +559,7 @@
 
 .list-item {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
   padding: 10px 12px;
   border-radius: var(--radius-md);
@@ -572,17 +573,20 @@
 }
 
 .list-item-icon {
-  width: 22px;
-  height: 22px;
+  min-width: 42px;
+  height: 24px;
+  padding: 0 8px;
   border-radius: var(--radius-full);
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--accent-foreground);
   background: var(--accent);
-  margin-top: 2px;
+  margin-top: 1px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .list-item-icon.is-inbound {
