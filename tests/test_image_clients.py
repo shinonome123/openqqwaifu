@@ -22,6 +22,8 @@ _PNG_BYTES = b"\x89PNG\r\n\x1a\nfakepng"
 
 class _ImageHandler(BaseHTTPRequestHandler):
     requests: list[dict[str, object]] = []
+    generation_path = "/images/generations"
+    generation_body = None
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -33,7 +35,18 @@ class _ImageHandler(BaseHTTPRequestHandler):
                 "payload": payload,
             }
         )
-        raw = json.dumps({"data": [{"b64_json": base64.b64encode(_PNG_BYTES).decode("ascii")}]}).encode("utf-8")
+        if self.path != self.__class__.generation_path:
+            self.send_response(HTTPStatus.OK)
+            body = b"<!doctype html><html><body>homepage</body></html>"
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        image_payload = self.__class__.generation_body
+        if image_payload is None:
+            image_payload = base64.b64encode(_PNG_BYTES).decode("ascii")
+        raw = json.dumps({"data": [{"b64_json": image_payload}]}).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
@@ -57,6 +70,8 @@ class _ImageHandler(BaseHTTPRequestHandler):
 class ImageClientTests(unittest.TestCase):
     def setUp(self) -> None:
         _ImageHandler.requests = []
+        _ImageHandler.generation_path = "/images/generations"
+        _ImageHandler.generation_body = None
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _ImageHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -85,6 +100,26 @@ class ImageClientTests(unittest.TestCase):
         self.assertEqual(record["payload"]["model"], "grok-imagine-image-pro")
         self.assertEqual(record["payload"]["aspect_ratio"], "16:9")
         self.assertEqual(record["headers"]["Authorization"], "Bearer secret")
+
+    def test_build_image_client_retries_v1_when_root_returns_html(self) -> None:
+        _ImageHandler.generation_path = "/v1/images/generations"
+        _ImageHandler.generation_body = f"data:image/png;base64,{base64.b64encode(_PNG_BYTES).decode('ascii')}"
+        config = AppConfig()
+        config.image_generation.enabled = True
+        config.image_generation.base_url = self.base_url
+        config.image_generation.api_key = "secret"
+        config.image_generation.model = "gpt-image-2"
+
+        client = build_image_client(config)
+        image_ref = client.generate("sunset")
+        image_bytes, content_type = client.resolve_image(image_ref)
+
+        self.assertTrue(image_ref.startswith("base64://"))
+        self.assertNotIn("data:image", image_ref)
+        self.assertEqual(image_bytes, _PNG_BYTES)
+        self.assertEqual(content_type, "image/png")
+        self.assertEqual(_ImageHandler.requests[0]["path"], "/images/generations")
+        self.assertEqual(_ImageHandler.requests[-1]["path"], "/v1/images/generations")
 
     def test_image_client_resolves_remote_images(self) -> None:
         config = AppConfig()

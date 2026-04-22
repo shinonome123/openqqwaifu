@@ -53,6 +53,9 @@ const EN = {
   "sidebar.health.unknown": "Checking health...",
   "sidebar.health.ok": "Service healthy",
   "sidebar.health.down": "Service unavailable",
+  "sidebar.action.open": "Open navigation",
+  "sidebar.action.collapse": "Collapse navigation",
+  "sidebar.action.expand": "Expand navigation",
 
   "page.overview.title": "Overview",
   "page.overview.desc": "Runtime pulse, providers and recent traffic.",
@@ -393,6 +396,9 @@ const ZH = {
   "sidebar.health.unknown": "正在检查服务状态...",
   "sidebar.health.ok": "服务运行正常",
   "sidebar.health.down": "服务不可用",
+  "sidebar.action.open": "打开导航",
+  "sidebar.action.collapse": "收起侧栏",
+  "sidebar.action.expand": "展开侧栏",
 
   "page.overview.title": "总览",
   "page.overview.desc": "查看运行脉搏、模型接入和最近流量。",
