@@ -14,10 +14,69 @@ if str(SRC) not in sys.path:
 
 from waifu_standalone.app import build_default_service
 from waifu_standalone.config import AppConfig, ClawRuntimeConfig
+from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
 from waifu_standalone.models import InboundEvent, MessageSegment
 
 
 class ClawRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def _install_tool_client(service, *, tool_name: str, arguments: dict[str, object], final_text: str):  # type: ignore[no-untyped-def]
+        class _SingleToolClient:
+            enabled = True
+            supports_tool_calling = True
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "tool-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            def invoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                return self._next_response()
+
+            async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                return self._next_response()
+
+            def _next_response(self):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMToolResponse(
+                        tool_calls=[
+                            LLMToolCall(
+                                call_id="call_1",
+                                tool_name=tool_name,
+                                arguments=dict(arguments),
+                            )
+                        ],
+                        assistant_message={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": tool_name, "arguments": json.dumps(arguments)},
+                                }
+                            ],
+                        },
+                    )
+                return LLMToolResponse(
+                    text=final_text,
+                    assistant_message={"role": "assistant", "content": final_text},
+                )
+
+        service.config.llm.enabled = True
+        service.generator._dify_client = _SingleToolClient()  # type: ignore[assignment]
+
     @staticmethod
     def _write_mcp_echo_server(path: Path) -> None:
         path.write_text(
@@ -319,6 +378,12 @@ Use the runtime echo tool.
             try:
                 result = service.import_skill_bundle(bundle_root)
                 self.assertEqual(result["claw_runtime"]["status"], "ok")
+                self._install_tool_client(
+                    service,
+                    tool_name="echo-server__echo_text",
+                    arguments={"input": "hello runtime"},
+                    final_text="echo:hello runtime",
+                )
 
                 reply = service.handle_event(
                     InboundEvent(

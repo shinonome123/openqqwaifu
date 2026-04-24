@@ -19,6 +19,7 @@ from waifu_standalone.app import build_default_service
 from waifu_standalone.cells.skill_registry import build_skill_markdown_template
 from waifu_standalone.config import AppConfig, ClawRuntimeConfig
 from waifu_standalone.http_api import HttpApi, RequestTooLarge, _probe_http_endpoint, _read_chunked_body, parse_onebot_event
+from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
 
 
 class _BrokenService:
@@ -65,6 +66,72 @@ class HttpApiTests(unittest.TestCase):
         self.service, self.outbound = build_default_service()
         self.api = HttpApi(self.service)
 
+    def _install_tool_client(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, object],
+        final_text: str,
+    ) -> None:
+        class _SingleToolClient:
+            enabled = True
+            supports_tool_calling = True
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "tool-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            def invoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                return self._next_response()
+
+            async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                return self._next_response()
+
+            def _next_response(self):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMToolResponse(
+                        tool_calls=[
+                            LLMToolCall(
+                                call_id="call_1",
+                                tool_name=tool_name,
+                                arguments=dict(arguments),
+                            )
+                        ],
+                        assistant_message={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                return LLMToolResponse(
+                    text=final_text,
+                    assistant_message={"role": "assistant", "content": final_text},
+                )
+
+        self.service.config.llm.enabled = True
+        self.service.generator._dify_client = _SingleToolClient()  # type: ignore[assignment]
+
     def test_message_payload_is_accepted(self) -> None:
         payload = {
             "post_type": "message",
@@ -98,6 +165,11 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["reply"]["launcher_id"], "612475113")
 
     def test_string_message_payload_is_accepted(self) -> None:
+        self._install_tool_client(
+            tool_name="image",
+            arguments={"prompt": "catgirl"},
+            final_text="图片生成好了。",
+        )
         payload = {
             "message_type": "group",
             "group_id": 1,
@@ -265,7 +337,7 @@ class HttpApiTests(unittest.TestCase):
     def test_tool_listing_is_available(self) -> None:
         tools = self.api.list_tools()
 
-        self.assertEqual(tools["count"], 13)
+        self.assertEqual(tools["count"], 17)
 
     def test_skills_panel_includes_normalized_capabilities_and_safety(self) -> None:
         panel = self.api.get_skills_panel()

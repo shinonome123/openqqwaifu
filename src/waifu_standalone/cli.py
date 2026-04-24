@@ -5,15 +5,15 @@ import json
 import logging
 from pathlib import Path
 
-from .app import build_default_service, build_runtime_service
-from .cells.config import ConfigManager
 from .config import AppConfig
 from .gateways.onebot_actions import OneBotActionClient
-from .http_api import HttpApi, run_server
 from .memory import FileMemoryStore
-from .migration import WaifuDataImporter
-from .observability import configure_logging
-from .services import CapturingOutboundPort
+from .infra import configure_logging
+from .runtime.facade import build_default_service, build_runtime_service
+from .runtime.testing import CapturingOutboundPort
+from .runtime.waifu_importer import WaifuDataImporter
+from .settings_admin.config_manager import ConfigManager
+from .web import HttpApi, run_server
 
 
 def main() -> None:

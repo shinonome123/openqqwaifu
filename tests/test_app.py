@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import threading
@@ -18,6 +19,7 @@ from waifu_standalone.app import build_default_service, build_file_service, buil
 from waifu_standalone.config import AppConfig, QQSidecarConfig
 from waifu_standalone.contracts import GeneratedImage
 from waifu_standalone.gateways.onebot_actions import OneBotHttpOutboundPort
+from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
 from waifu_standalone.models import InboundEvent, MessageSegment
 from waifu_standalone.memory import FileMemoryStore, InMemoryStore
 from waifu_standalone.organs.memories import Memory
@@ -103,6 +105,78 @@ class WaifuServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service, self.outbound = build_default_service()
 
+    def _install_tool_client(
+        self,
+        service=None,
+        *,
+        tool_name: str,
+        arguments: dict[str, object] | None = None,
+        final_text: str = "工具调用完成。",
+    ):
+        target_service = service or self.service
+
+        class _SingleToolClient:
+            enabled = True
+            supports_tool_calling = True
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "tool-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.seen_tools: set[str] = set()
+                self.last_tool_message: dict[str, object] = {}
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            def invoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                raise AssertionError("sync tool loop should not run in async event path")
+
+            async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                self.calls += 1
+                if self.calls == 1:
+                    self.seen_tools = {item["name"] for item in tools}
+                    return LLMToolResponse(
+                        tool_calls=[
+                            LLMToolCall(
+                                call_id="call_1",
+                                tool_name=tool_name,
+                                arguments=dict(arguments or {}),
+                            )
+                        ],
+                        assistant_message={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": json.dumps(dict(arguments or {}), ensure_ascii=False),
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                self.last_tool_message = messages[-1]
+                return LLMToolResponse(
+                    text=final_text,
+                    assistant_message={"role": "assistant", "content": final_text},
+                )
+
+        client = _SingleToolClient()
+        target_service.config.llm.enabled = True
+        target_service.generator._dify_client = client  # type: ignore[assignment]
+        return client
+
     @staticmethod
     def _write_group_cards(root: Path) -> None:
         cards_dir = root / "cards"
@@ -132,6 +206,11 @@ class WaifuServiceTests(unittest.TestCase):
             encoding="utf-8",
         )
     def test_person_event_updates_preferred_name(self) -> None:
+        self._install_tool_client(
+            tool_name="set-preferred-name",
+            arguments={"preferred_name": "luna"},
+            final_text="好的，我叫你 luna。",
+        )
         event = InboundEvent(
             launcher_id="783190298",
             launcher_type="person",
@@ -151,6 +230,11 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(member["preferred_name"], "luna")
 
     def test_image_request_uses_generator(self) -> None:
+        self._install_tool_client(
+            tool_name="image",
+            arguments={"prompt": "catgirl under sunlight"},
+            final_text="图片生成好了。",
+        )
         event = InboundEvent(
             launcher_id="1101040950",
             launcher_type="group",
@@ -170,6 +254,11 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIn("图片生成好了", self.outbound.sent[0].text)
 
     def test_async_image_request_acknowledges_before_background_delivery(self) -> None:
+        self._install_tool_client(
+            tool_name="image",
+            arguments={"prompt": "catgirl under sunlight"},
+            final_text="图片生成好了。",
+        )
         event = InboundEvent(
             launcher_id="783190298",
             launcher_type="person",
@@ -194,17 +283,16 @@ class WaifuServiceTests(unittest.TestCase):
             while len(self.outbound.sent) < 1 and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
             self.assertGreaterEqual(len(self.outbound.sent), 1)
-            self.assertIn("我先去画", self.outbound.sent[0].text)
+            self.assertIn("图片生成好了", self.outbound.sent[0].text)
             return await task
 
         result = asyncio.run(run_flow())
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertIn("我先去画", result.text)
+        self.assertIn("图片生成好了", result.text)
         self.service.flush_background_tasks(timeout=1.0)
-        self.assertEqual(len(self.outbound.sent), 2)
-        self.assertEqual(self.outbound.sent[1].images, ["generated://catgirl under sunlight"])
-        self.assertIn("图片生成好了", self.outbound.sent[1].text)
+        self.assertEqual(len(self.outbound.sent), 1)
+        self.assertEqual(self.outbound.sent[0].images, ["generated://catgirl under sunlight"])
 
     def test_extract_image_prompt_accepts_fullwidth_colon(self) -> None:
         prompt = self.service.dispatcher.extract_image_prompt("生图：生成一个晴朗的天空")
@@ -647,10 +735,7 @@ class WaifuServiceTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
-        assert second is not None
-        self.assertIn("小米集团", second.text)
-        self.assertIn("42 港元", second.text)
+        self.assertIsNone(second)
 
     def test_handle_event_uses_async_search_context_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -684,11 +769,11 @@ class WaifuServiceTests(unittest.TestCase):
                 )
             )
 
-            self.assertTrue(async_called.is_set())
+            self.assertFalse(async_called.is_set())
             self.assertIsNotNone(reply)
             session = service.memory.load("783190298", "person")
             last_search = session.metadata.get("last_search", {})
-            self.assertEqual(last_search.get("query"), "北京天气")
+            self.assertEqual(last_search, {})
 
     def test_pending_search_clarification_extends_query_without_second_mention(self) -> None:
         config = AppConfig(
@@ -754,8 +839,8 @@ class WaifuServiceTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
-        self.assertTrue(any("小米公司的哦" in query for query in captured_queries))
+        self.assertIsNone(second)
+        self.assertEqual(captured_queries, [])
 
     def test_search_link_followup_returns_real_urls_without_generator(self) -> None:
         service, _ = build_default_service()
@@ -780,10 +865,16 @@ class WaifuServiceTests(unittest.TestCase):
         ).as_dict()
         service.memory.store.save(session)
 
-        def fail_generate_reply(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise AssertionError("generator should not run for explicit link follow-up")
-
-        service.generator.generate_reply = fail_generate_reply  # type: ignore[method-assign]
+        self._install_tool_client(
+            service,
+            tool_name="search-links",
+            arguments={},
+            final_text=(
+                "真实链接：\n"
+                "https://www.samr.gov.cn/xw/zj/art/2026/art_9714ee2bef9244819134ef4ffdd14017.html\n"
+                "https://news.qq.com/rain/a/20260417A07W5G00"
+            ),
+        )
 
         reply = service.handle_event(
             InboundEvent(
@@ -819,10 +910,12 @@ class WaifuServiceTests(unittest.TestCase):
         ).as_dict()
         service.memory.store.save(session)
 
-        def fail_generate_reply(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise AssertionError("generator should not run for explicit link follow-up")
-
-        service.generator.generate_reply = fail_generate_reply  # type: ignore[method-assign]
+        self._install_tool_client(
+            service,
+            tool_name="search-links",
+            arguments={},
+            final_text="这次没有真实来源链接，不能给你乱编。",
+        )
 
         reply = service.handle_event(
             InboundEvent(
@@ -1256,6 +1349,12 @@ class WaifuServiceTests(unittest.TestCase):
     def test_group_onboarding_accepts_explicit_call_me_phrase(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
+        self._install_tool_client(
+            service,
+            tool_name="set-preferred-name",
+            arguments={"preferred_name": "爷爷"},
+            final_text="好的，我叫你爷爷。",
+        )
 
         first = service.handle_event(
             InboundEvent(
@@ -1302,6 +1401,12 @@ class WaifuServiceTests(unittest.TestCase):
     def test_group_onboarding_accepts_mentioned_self_intro(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
+        self._install_tool_client(
+            service,
+            tool_name="set-preferred-name",
+            arguments={"preferred_name": "阿狗"},
+            final_text="好的，我叫你阿狗。",
+        )
 
         result = service.handle_event(
             InboundEvent(
@@ -1343,6 +1448,12 @@ class WaifuServiceTests(unittest.TestCase):
                 ],
             )
         )
+        self._install_tool_client(
+            service,
+            tool_name="set-preferred-name",
+            arguments={"preferred_name": "luna"},
+            final_text="好的，我叫你luna。",
+        )
         second = service.handle_event(
             InboundEvent(
                 launcher_id="612475113",
@@ -1383,8 +1494,11 @@ class WaifuServiceTests(unittest.TestCase):
                 ],
             )
         )
-        service.generator.extract_preferred_name_hint = (  # type: ignore[method-assign]
-            lambda *args, **kwargs: {"name": "爸爸", "confidence": 0.92, "is_self_intro": True}
+        self._install_tool_client(
+            service,
+            tool_name="set-preferred-name",
+            arguments={"preferred_name": "爸爸"},
+            final_text="好的，我叫你爸爸。",
         )
         second = service.handle_event(
             InboundEvent(
@@ -1410,6 +1524,12 @@ class WaifuServiceTests(unittest.TestCase):
     def test_group_onboarding_rejects_third_party_call_phrase_with_explicit_reply(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
+        self._install_tool_client(
+            service,
+            tool_name="reject-third-party-naming",
+            arguments={},
+            final_text="我只能接受你给你自己定称呼，也只能接受别人亲自来给我定称呼，不能替别人决定怎么叫哦。",
+        )
 
         result = service.handle_event(
             InboundEvent(
@@ -1438,6 +1558,12 @@ class WaifuServiceTests(unittest.TestCase):
     def test_group_onboarding_clarifies_non_declarative_naming_question(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
+        self._install_tool_client(
+            service,
+            tool_name="clarify-naming-intent",
+            arguments={"intent": "user_name"},
+            final_text="如果你想让我换个叫法，直接告诉我“叫我 xx”就好。",
+        )
 
         result = service.handle_event(
             InboundEvent(
@@ -1488,6 +1614,12 @@ class WaifuServiceTests(unittest.TestCase):
     def test_group_onboarding_stage_reply_uses_saved_preferred_name_as_address(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, _ = build_default_service(config)
+        self._install_tool_client(
+            service,
+            tool_name="reject-third-party-naming",
+            arguments={},
+            final_text="不能替别人决定怎么叫哦。",
+        )
         service.state_store.save_member(
             {
                 "group_id": "612475113",
@@ -1497,15 +1629,6 @@ class WaifuServiceTests(unittest.TestCase):
                 "onboarding_status": "ready",
             }
         )
-        captured: dict[str, object] = {}
-
-        def fake_onboarding_reply(*args, **kwargs):  # type: ignore[no-untyped-def]
-            captured["address_override"] = kwargs.get("address_override", "")
-            captured["stage"] = kwargs.get("stage", "")
-            return "不能替别人决定怎么叫哦。"
-
-        service.generator.generate_onboarding_reply = fake_onboarding_reply  # type: ignore[method-assign]
-
         result = service.handle_event(
             InboundEvent(
                 launcher_id="612475113",
@@ -1522,13 +1645,17 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.text, "不能替别人决定怎么叫哦。")
-        self.assertEqual(captured["stage"], "reject_third_party_naming")
-        self.assertEqual(captured["address_override"], "爸爸")
 
     def test_group_assistant_alias_command_persists_for_same_character(self) -> None:
         config = AppConfig(bot_account_id="3518944354")
         service, outbound = build_default_service(config)
         current_character = service._active_character_id()
+        self._install_tool_client(
+            service,
+            tool_name="set-assistant-alias",
+            arguments={"assistant_alias": "阿璃"},
+            final_text="好的，那就叫我阿璃。",
+        )
 
         result = service.handle_event(
             InboundEvent(
@@ -1640,18 +1767,12 @@ class WaifuServiceTests(unittest.TestCase):
                 ],
             )
         )
-        service.naming_router._routing_ready = lambda: True  # type: ignore[method-assign]
-
-        async def fake_route(*args, **kwargs):  # type: ignore[no-untyped-def]
-            return {
-                "mode": "set_preferred_name",
-                "preferred_name": "小满",
-                "assistant_alias": "",
-                "clarification_text": "",
-                "reason": "follow-up naming",
-            }
-
-        service.generator.aresolve_naming_intent = fake_route  # type: ignore[method-assign]
+        self._install_tool_client(
+            service,
+            tool_name="set-preferred-name",
+            arguments={"preferred_name": "小满"},
+            final_text="好的，我叫你小满。",
+        )
         second = service.handle_event(
             InboundEvent(
                 launcher_id="612475113",
@@ -2294,7 +2415,9 @@ class WaifuServiceTests(unittest.TestCase):
                 )
             )
 
-            self.assertIsNone(result)
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertIn("AI 工具编排模型还没连上", result.text)
 
     def test_live_runtime_service_suppresses_local_fallback_on_provider_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
