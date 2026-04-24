@@ -3,9 +3,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
 from ..models import OutboundMessage
-from ..observability import TransportMetricsScope
+from ..infra import AsyncHttpTransport, SyncHttpTransport, TransportError, TransportMetricsScope
 
 
 class OneBotActionError(RuntimeError):

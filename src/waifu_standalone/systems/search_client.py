@@ -8,8 +8,7 @@ from typing import Protocol
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from ..config import AppConfig
-from ..http_transport import AsyncHttpTransport, SyncHttpTransport
-from ..observability import TransportMetricsScope
+from ..infra import AsyncHttpTransport, SyncHttpTransport, TransportMetricsScope
 
 
 @dataclass(slots=True)

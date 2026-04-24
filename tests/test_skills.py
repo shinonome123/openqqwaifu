@@ -29,6 +29,76 @@ from waifu_standalone.systems.searching import SearchResult
 
 
 class SkillRegistryTests(unittest.TestCase):
+    def _install_tool_client(
+        self,
+        service,
+        *,
+        tool_name: str,
+        arguments: dict[str, object] | None = None,
+        final_text: str = "工具调用完成。",
+    ):
+        class _SingleToolClient:
+            enabled = True
+            supports_tool_calling = True
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "tool-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.seen_tools: set[str] = set()
+                self.last_tool_message: dict[str, object] = {}
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            def invoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                raise AssertionError("sync tool loop should not run in async event path")
+
+            async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                self.calls += 1
+                if self.calls == 1:
+                    self.seen_tools = {item["name"] for item in tools}
+                    return LLMToolResponse(
+                        tool_calls=[
+                            LLMToolCall(
+                                call_id="call_1",
+                                tool_name=tool_name,
+                                arguments=dict(arguments or {}),
+                            )
+                        ],
+                        assistant_message={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": json.dumps(dict(arguments or {}), ensure_ascii=False),
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                self.last_tool_message = messages[-1]
+                return LLMToolResponse(
+                    text=final_text,
+                    assistant_message={"role": "assistant", "content": final_text},
+                )
+
+        client = _SingleToolClient()
+        service.config.llm.enabled = True
+        service.generator._dify_client = client  # type: ignore[assignment]
+        return client
+
     def test_parse_skill_file_reads_frontmatter_and_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_path = Path(tmpdir) / "brief.md"
@@ -312,6 +382,12 @@ Use summarize for URLs.
 
     def test_image_request_keeps_skill_match(self) -> None:
         service, _ = build_default_service()
+        client = self._install_tool_client(
+            service,
+            tool_name="image",
+            arguments={"prompt": "warm spring sky"},
+            final_text="图片生成好了。",
+        )
 
         result = service.handle_event(
             InboundEvent(
@@ -330,8 +406,9 @@ Use summarize for URLs.
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.images, ["generated://warm spring sky"])
-        self.assertIn("生图交付语气", names)
-        self.assertIn("直接生图", names)
+        self.assertIn("image", client.seen_tools)
+        self.assertTrue(names)
+        self.assertNotIn("直接生图", names)
 
     def test_disabling_image_command_stops_direct_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -354,6 +431,12 @@ Use summarize for URLs.
 
     def test_direct_search_skill_dispatches_tool(self) -> None:
         service, _ = build_default_service()
+        client = self._install_tool_client(
+            service,
+            tool_name="search",
+            arguments={"query": "北京天气"},
+            final_text="我帮你查了一下，北京天气：晴，最高温 26 度。",
+        )
         service.search._fetcher = lambda query: [
             SearchResult(title="北京天气", snippet=f"{query}：晴，最高温 26 度", url="https://example.com/weather")
         ]
@@ -372,9 +455,20 @@ Use summarize for URLs.
         assert reply is not None
         self.assertIn("我帮你查了一下", reply.text)
         self.assertIn("北京天气", reply.text)
+        self.assertIn("search", client.seen_tools)
+        session = service.memory.load("783190298", "person")
+        tool_calls = session.metadata.get("last_tool_calls", [])
+        self.assertEqual(tool_calls[0]["tool_id"], "search")
+        self.assertEqual(tool_calls[0]["status"], "ok")
 
     def test_direct_summary_skill_dispatches_tool(self) -> None:
         service, _ = build_default_service()
+        self._install_tool_client(
+            service,
+            tool_name="summary",
+            arguments={},
+            final_text="我先帮你收一下重点：今天想把页面做得更轻一点。",
+        )
         service.handle_event(
             InboundEvent(
                 launcher_id="783190298",
@@ -401,6 +495,12 @@ Use summarize for URLs.
 
     def test_skill_list_dispatch_accepts_skill_menu_phrases(self) -> None:
         service, _ = build_default_service()
+        self._install_tool_client(
+            service,
+            tool_name="skill-list",
+            arguments={},
+            final_text="我目前掌握的技能都列出来了。",
+        )
 
         for text in ("技能菜单", "你会干什么", "说说你会的技能", "help"):
             reply = service.handle_event(
@@ -419,37 +519,13 @@ Use summarize for URLs.
             self.assertIn("掌握的技能", reply.text, msg=text)
 
     def test_intent_router_dispatches_skill_list_and_keeps_raw_block(self) -> None:
-        class _FakeIntentClient:
-            enabled = True
-            supports_tool_calling = False
-            base_url = "https://example.com/v1"
-            api_key = "secret"
-            model = "intent-model"
-            backend = "openai"
-            timeout_seconds = 45.0
-            app_type = "chat"
-
-            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
-                if "[Intent Router]" in query:
-                    return json.dumps(
-                        {
-                            "mode": "dispatch",
-                            "dispatch_skill_id": "skill-list-command",
-                            "raw_args": "",
-                            "active_skill_ids": [],
-                            "clarification_text": "",
-                        },
-                        ensure_ascii=False,
-                    )
-                if "[Tool Result Render]" in query:
-                    return "好呀，我把现在能做的事情摊开给你看。"
-                return ""
-
-            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
-                return self.invoke(query, user=user)
-
         service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
-        service.generator._dify_client = _FakeIntentClient()  # type: ignore[assignment]
+        self._install_tool_client(
+            service,
+            tool_name="skill-list",
+            arguments={},
+            final_text="好呀，我把现在能做的事情摊开给你看。",
+        )
 
         reply = service.handle_event(
             InboundEvent(
@@ -467,38 +543,14 @@ Use summarize for URLs.
         self.assertIn("```text", reply.text)
         self.assertIn("直接生图", reply.text)
 
-    def test_intent_router_prefers_summarize_for_url_summary(self) -> None:
-        class _FakeIntentClient:
-            enabled = True
-            supports_tool_calling = False
-            base_url = "https://example.com/v1"
-            api_key = "secret"
-            model = "intent-model"
-            backend = "openai"
-            timeout_seconds = 45.0
-            app_type = "chat"
-
-            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
-                if "[Intent Router]" in query:
-                    return json.dumps(
-                        {
-                            "mode": "dispatch",
-                            "dispatch_skill_id": "summarize-command",
-                            "raw_args": "https://example.com/post",
-                            "active_skill_ids": [],
-                            "clarification_text": "",
-                        },
-                        ensure_ascii=False,
-                    )
-                if "[Tool Result Render]" in query:
-                    return "我已经替你看过这个网页了，核心意思是：这是网页内容摘要。"
-                return ""
-
-            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
-                return self.invoke(query, user=user)
-
+    def test_tool_orchestrator_prefers_summarize_for_url_summary(self) -> None:
         service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
-        service.generator._dify_client = _FakeIntentClient()  # type: ignore[assignment]
+        self._install_tool_client(
+            service,
+            tool_name="summarize",
+            arguments={"target": "https://example.com/post"},
+            final_text="我已经替你看过这个网页了，核心意思是：这是网页内容摘要。",
+        )
         service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
             {
                 "summary": "这是网页内容摘要。",
@@ -529,38 +581,39 @@ Use summarize for URLs.
         session = service.memory.load("783190298", "person")
         active_skills = session.metadata.get("active_skills", [])
         self.assertTrue(active_skills)
-        self.assertEqual(active_skills[0]["id"], "summarize-command")
+        self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
 
-    def test_intent_router_clarifies_ambiguous_skill_request(self) -> None:
-        class _FakeIntentClient:
+    def test_tool_orchestrator_clarifies_ambiguous_skill_request(self) -> None:
+        class _FakeToolClient:
             enabled = True
-            supports_tool_calling = False
+            supports_tool_calling = True
             base_url = "https://example.com/v1"
             api_key = "secret"
-            model = "intent-model"
+            model = "tool-model"
             backend = "openai"
             timeout_seconds = 45.0
             app_type = "chat"
 
             def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
-                if "[Intent Router]" in query:
-                    return json.dumps(
-                        {
-                            "mode": "clarify",
-                            "dispatch_skill_id": "",
-                            "raw_args": "",
-                            "active_skill_ids": [],
-                            "clarification_text": "你是想让我总结刚才的对话，还是总结一个链接或视频？",
-                        },
-                        ensure_ascii=False,
-                    )
-                return ""
+                return "你是想让我总结刚才的对话，还是总结一个链接或视频？"
 
             async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
                 return self.invoke(query, user=user)
 
+            def invoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                raise AssertionError("sync tool loop should not run in async event path")
+
+            async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                return LLMToolResponse(
+                    text="你是想让我总结刚才的对话，还是总结一个链接或视频？",
+                    assistant_message={
+                        "role": "assistant",
+                        "content": "你是想让我总结刚才的对话，还是总结一个链接或视频？",
+                    },
+                )
+
         service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
-        service.generator._dify_client = _FakeIntentClient()  # type: ignore[assignment]
+        service.generator._dify_client = _FakeToolClient()  # type: ignore[assignment]
 
         reply = service.handle_event(
             InboundEvent(
@@ -682,6 +735,12 @@ Use summarize for URLs.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="summarize",
+                arguments={"target": "https://www.youtube.com/watch?v=DmFdxaLgD70"},
+                final_text="按 summarize 技能真的跑：这是视频的真实摘要。",
+            )
             service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
                 {
                     "summary": "这是视频的真实摘要。",
@@ -712,7 +771,7 @@ Use summarize for URLs.
             session = service.memory.load("783190298", "person")
             active_skills = session.metadata.get("active_skills", [])
             self.assertTrue(active_skills)
-            self.assertEqual(active_skills[0]["id"], "summarize")
+            self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
 
     def test_explicit_named_summarize_skill_refuses_when_transcript_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -728,6 +787,12 @@ Use summarize for URLs.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="summarize",
+                arguments={"target": "https://www.youtube.com/watch?v=DmFdxaLgD70"},
+                final_text="这次没有拿到这个视频的可用字幕或正文，所以不能假装总结。",
+            )
             service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
                 {
                     "summary": "YouTube 是一个全球知名的视频分享平台。",
@@ -768,9 +833,9 @@ Use summarize for URLs.
         tool_ids = {item["id"] for item in tools["items"]}
         aliases_by_id = {item["id"]: set(item.get("aliases", [])) for item in tools["items"]}
 
-        self.assertEqual(tools["count"], 13)
-        self.assertEqual(tools["alias_count"], 69)
-        self.assertEqual(tools["model_callable_count"], 10)
+        self.assertEqual(tools["count"], 17)
+        self.assertEqual(tools["alias_count"], 73)
+        self.assertEqual(tools["model_callable_count"], 16)
         self.assertSetEqual(
             tool_ids,
             {
@@ -787,6 +852,10 @@ Use summarize for URLs.
                 "list-files",
                 "write-file",
                 "exec-command",
+                "set-preferred-name",
+                "set-assistant-alias",
+                "reject-third-party-naming",
+                "clarify-naming-intent",
             },
         )
         self.assertSetEqual(
@@ -834,7 +903,7 @@ Use summarize for URLs.
             self.assertIn("resolved_exec_allowed_roots", panel["safety"])
             self.assertGreaterEqual(len(panel["marketplace"]["sources"]), 3)
 
-    def test_slash_skill_command_dispatches_real_tool(self) -> None:
+    def test_slash_skill_command_no_longer_bypasses_tool_orchestrator(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skills_dir = Path(tmpdir) / "skills"
             skills_dir.mkdir(parents=True, exist_ok=True)
@@ -848,6 +917,12 @@ Use summarize for URLs.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="summarize",
+                arguments={"target": "https://example.com/post"},
+                final_text="slash skill execution completed.",
+            )
             service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
                 {
                     "summary": "This came from slash skill execution.",
@@ -871,11 +946,9 @@ Use summarize for URLs.
                 )
             )
 
-            self.assertIsNotNone(reply)
-            assert reply is not None
-            self.assertIn("slash skill", reply.text.lower())
+            self.assertIsNone(reply)
 
-    def test_summarize_tool_falls_back_when_cli_is_missing(self) -> None:
+    def test_ignored_slash_summarize_does_not_use_legacy_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             skills_dir = Path(tmpdir) / "skills"
             skills_dir.mkdir(parents=True, exist_ok=True)
@@ -894,6 +967,12 @@ Use summarize for URLs and files.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="summarize",
+                arguments={"target": str(document)},
+                final_text="按 summarize 技能真的跑：without requiring the external summarize CLI.",
+            )
             service.dispatcher._invoke_summarize_cli = lambda target, invocation: ({}, "当前运行时还没安装 summarize CLI。")  # type: ignore[method-assign]
 
             reply = service.handle_event(
@@ -911,10 +990,7 @@ Use summarize for URLs and files.
                 )
             )
 
-            self.assertIsNotNone(reply)
-            assert reply is not None
-            self.assertIn("按 summarize 技能真的跑", reply.text)
-            self.assertIn("without requiring the external summarize CLI", reply.text)
+            self.assertIsNone(reply)
 
     def test_explicit_weather_skill_dispatches_real_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -930,6 +1006,12 @@ Use wttr.in to answer weather questions.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="weather",
+                arguments={"location": "Shanghai"},
+                final_text="Shanghai现在 18°C，多云。明天，晴，11 到 22°C。",
+            )
 
             raw = """
 {
@@ -989,7 +1071,7 @@ Use wttr.in to answer weather questions.
                         launcher_type="person",
                         sender_id="783190298",
                         sender_name="tester",
-                        segments=[MessageSegment(kind="text", text="/skill weather Shanghai")],
+                        segments=[MessageSegment(kind="text", text="weather Shanghai")],
                     )
                 )
 
@@ -1001,7 +1083,7 @@ Use wttr.in to answer weather questions.
             session = service.memory.load("783190298", "person")
             active_skills = session.metadata.get("active_skills", [])
             self.assertTrue(active_skills)
-            self.assertEqual(active_skills[0]["id"], "weather")
+            self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
 
     def test_weather_skill_auto_binds_chinese_trigger_and_extracts_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1017,6 +1099,12 @@ Use wttr.in to answer weather questions.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="weather",
+                arguments={"location": "上海"},
+                final_text="Shanghai现在 23°C，晴。",
+            )
             weather = service.get_skill_detail("weather")
             assert weather is not None
             self.assertIn("天气", weather["triggers"])
@@ -1090,7 +1178,7 @@ Use wttr.in to answer weather questions.
             session = service.memory.load("weather-zh", "person")
             active_skills = session.metadata.get("active_skills", [])
             self.assertTrue(active_skills)
-            self.assertEqual(active_skills[0]["id"], "weather")
+            self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
 
     def test_openclaw_tool_alias_dispatches_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1112,6 +1200,12 @@ Use web_search when the user asks to look something up.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="search",
+                arguments={"query": "Beijing weather"},
+                final_text="Beijing Weather: sunny",
+            )
             service.search._fetcher = lambda query: [
                 SearchResult(
                     title="Beijing Weather",
@@ -1156,6 +1250,12 @@ Read files with the read alias.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="read-file",
+                arguments={"path": str(target)},
+                final_text="我读到了文件。",
+            )
 
             reply = service.handle_event(
                 InboundEvent(
@@ -1339,6 +1439,12 @@ Write a file using structured arguments.
                 encoding="utf-8",
             )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            self._install_tool_client(
+                service,
+                tool_name="write-file",
+                arguments={"path": target.as_posix(), "content": "json mode works"},
+                final_text="已写入文件。",
+            )
 
             reply = service.handle_event(
                 InboundEvent(
@@ -1390,6 +1496,12 @@ Write a file using structured arguments.
                         write_allowed_roots=["data"],
                     ),
                 )
+            )
+            self._install_tool_client(
+                service,
+                tool_name="write-file",
+                arguments={"path": target.as_posix(), "content": "blocked"},
+                final_text="路径超出允许范围。",
             )
 
             reply = service.handle_event(

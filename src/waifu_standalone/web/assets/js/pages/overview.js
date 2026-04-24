@@ -191,7 +191,7 @@ function renderProviders(dash) {
         t("overview.provider.sidecar"),
         !!sidecar.outbound_base_url,
         !!sidecar.outbound_base_url,
-        sidecar.outbound_base_url || t("overview.provider.live"),
+        sidecar.outbound_base_url || sidecar.delivery_mode || "offline_capture",
       ),
       providerRow(
         t("overview.provider.memory"),

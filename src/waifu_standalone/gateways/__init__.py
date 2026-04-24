@@ -11,3 +11,6 @@ __all__ = [
     "OneBotActionClient",
     "OneBotHttpOutboundPort",
 ]
+from .notice_dispatcher import NoticeDispatcher
+
+__all__ = ["NoticeDispatcher"]

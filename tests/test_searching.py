@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
@@ -13,12 +14,74 @@ if str(SRC) not in sys.path:
 
 from waifu_standalone.app import build_default_service
 from waifu_standalone.config import AppConfig
+from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
 from waifu_standalone.models import InboundEvent, MessageSegment
 from waifu_standalone.systems.search_client import DuckDuckGoSearchClient
 from waifu_standalone.systems.searching import SearchDecider, SearchResult
 
 
 class SearchDeciderTests(unittest.TestCase):
+    @staticmethod
+    def _install_tool_client(service, *, tool_name: str, arguments: dict[str, object], final_text: str):  # type: ignore[no-untyped-def]
+        class _SingleToolClient:
+            enabled = True
+            supports_tool_calling = True
+            base_url = "https://example.com/v1"
+            api_key = "secret"
+            model = "tool-model"
+            backend = "openai"
+            timeout_seconds = 45.0
+            app_type = "chat"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
+                return final_text
+
+            def invoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                return self._next_response()
+
+            async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                return self._next_response()
+
+            def _next_response(self):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMToolResponse(
+                        tool_calls=[
+                            LLMToolCall(
+                                call_id="call_1",
+                                tool_name=tool_name,
+                                arguments=dict(arguments),
+                            )
+                        ],
+                        assistant_message={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                return LLMToolResponse(
+                    text=final_text,
+                    assistant_message={"role": "assistant", "content": final_text},
+                )
+
+        service.config.llm.enabled = True
+        service.generator._dify_client = _SingleToolClient()  # type: ignore[assignment]
+
     def test_keyword_hit_builds_search_context(self) -> None:
         decider = SearchDecider(
             AppConfig(search_enabled=True, search_result_limit=2),
@@ -90,6 +153,12 @@ class SearchDeciderTests(unittest.TestCase):
             service.search._fetcher = lambda query: [
                 SearchResult(title="北京天气", snippet="今天晴，最高温 26 度", url="https://example.com/weather")
             ]
+            self._install_tool_client(
+                service,
+                tool_name="search",
+                arguments={"query": "今天北京天气怎么样"},
+                final_text="我刚查了一下，北京天气：今天晴，最高温 26 度。",
+            )
 
             reply = service.handle_event(
                 InboundEvent(

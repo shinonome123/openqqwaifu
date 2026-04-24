@@ -161,7 +161,9 @@ class ConfigManagerTests(unittest.TestCase):
         self.assertTrue(http_servers[0]["enable"])
 
         self.assertEqual(config.qq_sidecar.outbound_base_url, "http://127.0.0.1:3000")
-        self.assertFalse(config.qq_sidecar.dry_run)
+        # Legacy dry_run remains readable for old config files, but runtime delivery is
+        # decided by outbound_base_url and ignores this product-path flag.
+        self.assertTrue(config.qq_sidecar.dry_run)
 
     def test_autodiscovery_preserves_existing_napcat_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..cells.generator import Generator
 from ..config import AppConfig
 from ..models import InboundEvent, SessionMemory
+from ..reply_flow import Generator
 
 if TYPE_CHECKING:
-    from ..cells.skill_registry import SkillSpec
+    from ..skills import SkillSpec
 
 
 class Thoughts:

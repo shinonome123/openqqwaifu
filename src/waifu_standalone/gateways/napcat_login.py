@@ -9,8 +9,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..http_transport import SyncHttpTransport, TransportError
-from ..observability import TransportMetricsScope
+from ..infra import SyncHttpTransport, TransportError, TransportMetricsScope
 
 
 class NapCatLoginError(RuntimeError):
