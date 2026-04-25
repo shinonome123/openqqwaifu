@@ -38,6 +38,7 @@ export function mount(root) {
     const upstream = panel?.upstream || { total: 0, error_total: 0, targets: [], rows: [] };
     const http = panel?.http || { total: 0, rows: [] };
     const onebot = panel?.onebot || { total: 0, rows: [] };
+    const skills = panel?.skills || { total: 0, error_total: 0, targets: [], rows: [] };
 
     container.appendChild(
       el("div", { class: "page-header" }, [
@@ -95,9 +96,9 @@ export function mount(root) {
         }),
         statCard({
           label: t("observability.kpi.errors"),
-          value: String(upstream.error_total || 0),
-          meta: `${runtime.recent_behavior || 0} behavior`,
-          metaVariant: Number(upstream.error_total || 0) > 0 ? "down" : "up",
+          value: String(Number(upstream.error_total || 0) + Number(skills.error_total || 0)),
+          meta: `${skills.total || 0} skills`,
+          metaVariant: Number(upstream.error_total || 0) + Number(skills.error_total || 0) > 0 ? "down" : "up",
         }),
       ]),
     );
@@ -113,6 +114,12 @@ export function mount(root) {
       el("div", { class: "overview-split", style: { marginTop: "16px" } }, [
         renderHttpCard(http.rows || []),
         renderOneBotCard(onebot.rows || []),
+      ]),
+    );
+
+    container.appendChild(
+      el("div", { style: { marginTop: "16px" } }, [
+        renderSkillCard(skills.targets || []),
       ]),
     );
   }
@@ -227,6 +234,33 @@ export function mount(root) {
               ]),
             )
           : empty({ title: t("observability.onebot.empty") }),
+      ],
+    });
+  }
+
+  function renderSkillCard(rows) {
+    return card({
+      title: t("observability.skills.title"),
+      subtitle: t("observability.skills.desc"),
+      body: [
+        rows.length
+          ? tableView(
+              [
+                t("observability.table.skill"),
+                t("observability.table.tools"),
+                t("observability.table.requests"),
+                t("observability.table.errors"),
+                t("observability.table.latency"),
+              ],
+              rows.map((row) => [
+                row.skill_id,
+                (row.tools || []).join(", ") || "-",
+                String(row.total || 0),
+                String(row.error_total || 0),
+                `${Number(row.avg_ms || 0).toFixed(1)} ms`,
+              ]),
+            )
+          : empty({ title: t("observability.skills.empty") }),
       ],
     });
   }

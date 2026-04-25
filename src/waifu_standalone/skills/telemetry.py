@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 import uuid
 from typing import Any
@@ -27,8 +28,9 @@ def record_skill_telemetry_event(payload: dict[str, object]) -> dict[str, object
     if callable(recorder):
         try:
             recorder(normalized)
-        except Exception:
+        except (RuntimeError, OSError, TypeError, ValueError, sqlite3.Error):
             _LOGGER.exception("failed to persist skill telemetry event")
+    _record_observability_metric(normalized)
     return normalized
 
 
@@ -68,7 +70,7 @@ def get_skill_telemetry_summary(skill_id: str) -> dict[str, object]:
     if callable(summarizer):
         try:
             summary = summarizer(target)
-        except Exception:
+        except (RuntimeError, OSError, TypeError, ValueError, sqlite3.Error):
             _LOGGER.exception("failed to read persistent skill telemetry")
         else:
             if int(summary.get("calls") or 0) > 0:
@@ -137,3 +139,25 @@ def _safe_int(value: object, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _record_observability_metric(payload: dict[str, object]) -> None:
+    try:
+        from ..infra.observability import active_metrics_registry
+    except ImportError:
+        return
+    metrics = active_metrics_registry()
+    recorder = getattr(metrics, "record_skill_call", None)
+    if not callable(recorder):
+        return
+    try:
+        recorder(
+            skill_id=str(payload.get("skill_id") or "__unknown__"),
+            tool_id=str(payload.get("tool_id") or ""),
+            trigger_source=str(payload.get("trigger_source") or "system"),
+            status=str(payload.get("status") or "error"),
+            error_code=str(payload.get("error_code") or ""),
+            latency_ms=payload.get("latency_ms") or 0,
+        )
+    except (RuntimeError, OSError, TypeError, ValueError):
+        _LOGGER.exception("failed to record skill observability metric")

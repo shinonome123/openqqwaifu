@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from waifu_standalone.config import AppConfig
 from waifu_standalone.models import InboundEvent, MessageSegment, SessionMemory
+from waifu_standalone.observability import MetricsRegistry, set_active_metrics_registry
 from waifu_standalone.repositories.runtime_state import SqliteRuntimeStateStore
 from waifu_standalone.skills import (
     SkillExecutor,
@@ -32,12 +33,13 @@ from waifu_standalone.skills import (
 )
 from waifu_standalone.skills import registry as registry_module
 from waifu_standalone.skills.registry import parse_skill_markdown
-from waifu_standalone.skills.tool_aliases import ToolBindingError
+from waifu_standalone.skills.tool_aliases import ToolBindingError, load_tool_bindings
 
 
 class SkillManifestContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         set_skill_telemetry_store(None)
+        set_active_metrics_registry(None)
 
     def test_builtin_manifests_are_valid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -133,6 +135,38 @@ class SkillManifestContractTests(unittest.TestCase):
             self.assertEqual(summary["calls"], 1)
             self.assertEqual(summary["success"], 1)
             self.assertEqual(summary["last"]["trace_id"], "trace-persist")
+
+    def test_skill_telemetry_updates_observability_metrics(self) -> None:
+        metrics = MetricsRegistry(service_name="test-waifu")
+        set_active_metrics_registry(metrics)
+
+        record_skill_telemetry_event(
+            {
+                "skill_id": "observed-skill",
+                "tool_id": "search",
+                "trigger_source": "llm",
+                "status": "error",
+                "error_code": "contract_error",
+                "latency_ms": 42,
+                "created_at": 1,
+            }
+        )
+
+        snapshot = metrics.snapshot(object())
+        prometheus = metrics.render_prometheus(object())
+
+        self.assertEqual(snapshot["skills"]["total"], 1)
+        self.assertEqual(snapshot["skills"]["error_total"], 1)
+        self.assertEqual(snapshot["skills"]["targets"][0]["skill_id"], "observed-skill")
+        self.assertIn("openqqwaifu_skill_calls_total", prometheus)
+        self.assertIn('skill_id="observed-skill"', prometheus)
+
+    def test_yaml_tool_bindings_are_loaded(self) -> None:
+        payload = load_tool_bindings()
+
+        self.assertIn("canonical_tool_ids", payload)
+        self.assertEqual(payload["bindings"]["image-command"]["backend"], "image")
+        self.assertEqual(payload["aliases"]["web_search"], "search")
 
     def test_manifest_conflicts_are_validation_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

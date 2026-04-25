@@ -726,7 +726,7 @@ def _invalid_manifest_from_error(exc: SkillManifestError, path: Path, *, source_
 def _skill_telemetry_summary(skill_id: str) -> dict[str, object]:
     try:
         from .telemetry import get_skill_telemetry_summary
-    except Exception:
+    except ImportError:
         return {"calls": 0, "success": 0, "failure": 0, "success_rate": 0.0}
     return get_skill_telemetry_summary(skill_id)
 

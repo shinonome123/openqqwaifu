@@ -82,7 +82,7 @@ class SkillExecutor:
                 details=exc.details,
             )
             return result
-        except Exception as exc:
+        except (RuntimeError, ValueError, TypeError, OSError) as exc:
             message = t("skill.unhandled_exception", error=str(exc))
             result = ToolExecutionResult(error=message, text=message)
             self._record(
@@ -132,7 +132,7 @@ class SkillExecutor:
                 details=exc.details,
             )
             return result
-        except Exception as exc:
+        except (RuntimeError, ValueError, TypeError, OSError) as exc:
             message = t("skill.unhandled_exception", error=str(exc))
             result = ToolExecutionResult(error=message, text=message)
             self._record(

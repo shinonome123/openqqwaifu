@@ -17,11 +17,13 @@ class ToolBindingError(ValueError):
 def load_tool_bindings(path: str | Path | None = None) -> dict[str, object]:
     target = Path(path) if path else _DEFAULT_BINDINGS_PATH
     try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
+        content = target.read_text(encoding="utf-8")
     except OSError as exc:
         raise ToolBindingError("tool_bindings_missing", f"tool bindings file cannot be read: {target}") from exc
-    except json.JSONDecodeError as exc:
-        raise ToolBindingError("tool_bindings_invalid_json", f"tool bindings file is not valid JSON: {target}") from exc
+    try:
+        payload = _parse_tool_bindings_content(content)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ToolBindingError("tool_bindings_invalid_yaml", f"tool bindings file is invalid: {target}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ToolBindingError("tool_bindings_invalid", "tool bindings root must be an object")
     _validate_tool_bindings(payload)
@@ -94,6 +96,109 @@ def resolve_bound_tool_id(skill_id: str) -> str:
     binding = TOOL_BINDINGS.get(str(skill_id or "").strip(), {})
     backend = str(binding.get("backend", "") or "").strip()
     return resolve_compatible_tool_id(backend)
+
+
+def _parse_tool_bindings_content(content: str) -> dict[str, object]:
+    text = str(content or "").strip()
+    if not text:
+        raise ValueError("empty tool bindings file")
+    if text.startswith("{"):
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError("tool bindings root must be an object")
+        return payload
+    return _parse_simple_tool_bindings_yaml(text)
+
+
+def _parse_simple_tool_bindings_yaml(content: str) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "canonical_tool_ids": [],
+        "bindings": {},
+        "aliases": {},
+    }
+    section = ""
+    binding_key = ""
+    for raw_line in str(content or "").splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        item = line.strip()
+        if indent == 0:
+            if not item.endswith(":"):
+                raise ValueError(f"invalid top-level entry: {item}")
+            section = item[:-1].strip()
+            binding_key = ""
+            if section == "canonical_tool_ids":
+                payload[section] = []
+            elif section in {"bindings", "aliases"}:
+                payload[section] = {}
+            else:
+                raise ValueError(f"unknown section: {section}")
+            continue
+        if section == "canonical_tool_ids":
+            if indent != 2 or not item.startswith("- "):
+                raise ValueError(f"invalid canonical_tool_ids entry: {item}")
+            cast_list = payload["canonical_tool_ids"]
+            if isinstance(cast_list, list):
+                cast_list.append(_parse_yaml_scalar(item[2:].strip()))
+            continue
+        if section == "bindings":
+            bindings = payload["bindings"]
+            if not isinstance(bindings, dict):
+                raise ValueError("bindings must be an object")
+            if indent == 2:
+                key, value = _split_yaml_pair(item)
+                binding_key = str(key)
+                bindings[binding_key] = _parse_yaml_scalar(value) if value else {}
+                continue
+            if indent == 4 and binding_key:
+                binding = bindings.setdefault(binding_key, {})
+                if not isinstance(binding, dict):
+                    raise ValueError(f"binding must be an object: {binding_key}")
+                key, value = _split_yaml_pair(item)
+                binding[str(key)] = _parse_yaml_scalar(value)
+                continue
+            raise ValueError(f"invalid binding entry: {item}")
+        if section == "aliases":
+            aliases = payload["aliases"]
+            if not isinstance(aliases, dict) or indent != 2:
+                raise ValueError(f"invalid alias entry: {item}")
+            key, value = _split_yaml_pair(item)
+            aliases[str(key)] = _parse_yaml_scalar(value)
+            continue
+        raise ValueError(f"entry outside known section: {item}")
+    return payload
+
+
+def _split_yaml_pair(item: str) -> tuple[str, str]:
+    if ":" not in item:
+        raise ValueError(f"expected key/value pair: {item}")
+    key, value = item.split(":", 1)
+    clean_key = key.strip()
+    if not clean_key:
+        raise ValueError(f"empty key in pair: {item}")
+    return clean_key, value.strip()
+
+
+def _parse_yaml_scalar(value: str) -> object:
+    raw = str(value or "").strip()
+    if raw == "[]":
+        return []
+    if raw == "{}":
+        return {}
+    if raw in {"true", "True"}:
+        return True
+    if raw in {"false", "False"}:
+        return False
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_yaml_scalar(item.strip()) for item in inner.split(",")]
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        return raw[1:-1]
+    return raw
 
 
 def _validate_tool_bindings(payload: dict[str, object]) -> None:

@@ -136,7 +136,7 @@ class SkillsAdminService:
                     overwrite=overwrite,
                     metadata=source_metadata or {},
                 )
-            except Exception as exc:
+            except (RuntimeError, ValueError, TypeError, OSError) as exc:
                 record_skill_error_event(
                     skill_id="claw_runtime:install_plugin",
                     error_code="claw_runtime_install_failed",
@@ -159,7 +159,7 @@ class SkillsAdminService:
         svc = self.service
         try:
             runtime_tools = svc.claw_runtime.list_tools().get("items", [])
-        except Exception as exc:
+        except (RuntimeError, ValueError, TypeError, OSError) as exc:
             record_skill_error_event(
                 skill_id="claw_runtime:list_tools",
                 error_code="claw_runtime_list_tools_failed",
@@ -189,7 +189,7 @@ class SkillsAdminService:
                         _tool_id,
                         svc.dispatcher._claw_runtime_payload(invocation),
                     )
-                except Exception as exc:
+                except (RuntimeError, ValueError, TypeError, OSError) as exc:
                     record_skill_error_event(
                         skill_id=f"claw_runtime:{_tool_id}",
                         tool_id=_tool_id,

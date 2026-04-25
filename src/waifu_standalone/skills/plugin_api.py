@@ -121,7 +121,7 @@ def load_tool_plugins(
         try:
             entry.load()(ctx)
             loaded.append(name)
-        except Exception as exc:
+        except (RuntimeError, ValueError, TypeError, OSError) as exc:
             _LOGGER.exception("plugin %s failed to load", name or "<unnamed>")
             record_skill_error_event(
                 skill_id=f"plugin:{name or 'unnamed'}",
