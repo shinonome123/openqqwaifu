@@ -53,6 +53,7 @@ from ..skills import (
     ToolCallingOrchestrator,
     ToolRegistry,
     load_tool_plugins,
+    set_skill_telemetry_store,
 )
 from ..skills_admin import SkillsAdminService
 from ..systems.emotions import EmotionSensor
@@ -178,6 +179,7 @@ class WaifuService:
 
     def __post_init__(self) -> None:
         set_active_metrics_registry(self.metrics)
+        set_skill_telemetry_store(self.state_store)
         self.member_repository = MemberRepository(
             self.state_store,
             character_resolver=lambda: self.cards.active_character(),
@@ -1054,24 +1056,7 @@ class WaifuService:
 
     @staticmethod
     def _skill_to_dict(skill: SkillSpec) -> dict[str, object]:
-        return {
-            "id": skill.skill_id,
-            "name": skill.name,
-            "description": skill.description,
-            "triggers": list(skill.triggers),
-            "mode": skill.mode,
-            "priority": skill.priority,
-            "source": skill.source,
-            "source_kind": skill.source_kind,
-            "enabled": skill.enabled,
-            "user_invocable": skill.user_invocable,
-            "disable_model_invocation": skill.disable_model_invocation,
-            "command_dispatch": skill.command_dispatch,
-            "command_tool": skill.command_tool,
-            "command_arg_mode": skill.command_arg_mode,
-            "editable": skill.source_kind == "workspace",
-            "deletable": skill.source_kind == "workspace",
-        }
+        return skill.as_dict()
 
     @staticmethod
     def _normalize_preview_history(

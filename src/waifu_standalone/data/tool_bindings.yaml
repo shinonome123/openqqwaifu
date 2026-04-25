@@ -1,0 +1,126 @@
+canonical_tool_ids:
+  - image
+  - image-caption
+  - list-files
+  - read-file
+  - search
+  - search-links
+  - skill-list
+  - summary
+  - summarize
+  - weather
+  - web-fetch
+  - write-file
+  - exec-command
+
+bindings:
+  image-command:
+    backend: image
+    fallback: []
+  image-handoff:
+    backend: image-caption
+    fallback: []
+  list-files-command:
+    backend: list-files
+    fallback: []
+  read-file-command:
+    backend: read-file
+    fallback: []
+  search-command:
+    backend: search
+    fallback: []
+  search-links-command:
+    backend: search-links
+    fallback: []
+  skill-list-command:
+    backend: skill-list
+    fallback: []
+  summarize-command:
+    backend: summarize
+    fallback: []
+  summary-command:
+    backend: summary
+    fallback: []
+  weather-command:
+    backend: weather
+    fallback: []
+  web-fetch-command:
+    backend: web-fetch
+    fallback: []
+  write-file-command:
+    backend: write-file
+    fallback: []
+  exec-command:
+    backend: exec-command
+    fallback: []
+
+aliases:
+  web_search: search
+  internet_search: search
+  search_web: search
+  web_lookup: search
+  lookup_web: search
+  browser_search: search
+  image_generate: image
+  generate_image: image
+  create_image: image
+  draw_image: image
+  text_to_image: image
+  image_caption: image-caption
+  image_handoff: image-caption
+  deliver_image: image-caption
+  image_delivery: image-caption
+  handoff_image: image-caption
+  read: read-file
+  read_file: read-file
+  file_read: read-file
+  open_file: read-file
+  cat_file: read-file
+  read_text_file: read-file
+  list_files: list-files
+  ls: list-files
+  dir: list-files
+  file_list: list-files
+  find_files: list-files
+  tree: list-files
+  web_fetch: web-fetch
+  fetch_url: web-fetch
+  fetch: web-fetch
+  open_url: web-fetch
+  read_url: web-fetch
+  fetch_page: web-fetch
+  fetch_webpage: web-fetch
+  http_get: web-fetch
+  write: write-file
+  write_file: write-file
+  save_file: write-file
+  update_file: write-file
+  append_file: write-file
+  exec: exec-command
+  run_command: exec-command
+  run: exec-command
+  run_process: exec-command
+  execute_process: exec-command
+  conversation_summary: summary
+  chat_summary: summary
+  summarize_conversation: summary
+  skill_list: skill-list
+  skills: skill-list
+  abilities: skill-list
+  help_tools: skill-list
+  summarize_url: summarize
+  summarize_file: summarize
+  content_summary: summarize
+  webpage_summary: summarize
+  search_sources: search-links
+  search_links: search-links
+  sources: search-links
+  links: search-links
+  source_links: search-links
+  references: search-links
+  citations: search-links
+  related_links: search-links
+  forecast: weather
+  weather_lookup: weather
+  weather_check: weather
+  weather_forecast: weather

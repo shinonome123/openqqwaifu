@@ -2445,23 +2445,33 @@ class Generator:
             return False
         return bool(re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9_]{1,12}", cleaned))
 
-    @staticmethod
-    def _format_skill_block(active_skills: list[SkillSpec]) -> str:
-        prompt_skills = [skill for skill in active_skills if skill.prompt_visible]
+    def _format_skill_block(self, active_skills: list[SkillSpec]) -> str:
+        prompt_skills = [
+            skill
+            for skill in active_skills
+            if skill.is_prompt_policy and skill.enabled and skill.eligible
+        ]
         if not prompt_skills:
             return ""
+        max_skills = max(1, int(getattr(self.config, "max_active_skills", 3) or 3))
+        prompt_skills = sorted(prompt_skills, key=lambda skill: (-skill.priority, skill.name))[:max_skills]
+        max_block_chars = min(2400, max(700, max_skills * 800))
+        max_content_chars = max(240, min(700, max_block_chars // max(1, len(prompt_skills))))
         lines = ["[Active Skills]"]
         for skill in prompt_skills:
             summary = skill.name
             if skill.description:
                 summary = f"{summary}: {skill.description}"
-            lines.append(f"- {summary}")
+            lines.append(f"- {self._clip(summary, limit=180)}")
         for skill in prompt_skills:
-            content = str(skill.content or "").strip()
+            content = self._clip_multiline(str(skill.content or "").strip(), limit=max_content_chars)
             if not content:
                 continue
             lines.extend(["", f"[Skill: {skill.name}]", content])
-        return "\n".join(lines).strip()
+        block = "\n".join(lines).strip()
+        if len(block) <= max_block_chars:
+            return block
+        return block[:max_block_chars].rstrip() + "\n...[skill block truncated]"
 
     def _resolve_address(self, event: InboundEvent, session: SessionMemory, card: CharacterCard) -> str:
         if event.launcher_type == "person" and card.user_name:
@@ -2494,6 +2504,13 @@ class Generator:
     @staticmethod
     def _clip(text: str, limit: int = 24) -> str:
         normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit].rstrip() + "..."
+
+    @staticmethod
+    def _clip_multiline(text: str, limit: int = 700) -> str:
+        normalized = "\n".join(line.rstrip() for line in str(text or "").strip().splitlines() if line.strip())
         if len(normalized) <= limit:
             return normalized
         return normalized[:limit].rstrip() + "..."

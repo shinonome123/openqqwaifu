@@ -13,6 +13,7 @@ from ..skills import (
 )
 from ..skills import build_skill_markdown_template
 from ..skills import ToolExecutionResult
+from ..skills import record_skill_error_event
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -135,7 +136,13 @@ class SkillsAdminService:
                     overwrite=overwrite,
                     metadata=source_metadata or {},
                 )
-            except Exception as exc:
+            except (RuntimeError, ValueError, TypeError, OSError) as exc:
+                record_skill_error_event(
+                    skill_id="claw_runtime:install_plugin",
+                    error_code="claw_runtime_install_failed",
+                    message=str(exc),
+                    source="skills_admin.import_skill_bundle",
+                )
                 result["claw_runtime"] = {
                     "status": "error",
                     "reason": str(exc),
@@ -152,7 +159,13 @@ class SkillsAdminService:
         svc = self.service
         try:
             runtime_tools = svc.claw_runtime.list_tools().get("items", [])
-        except Exception:
+        except (RuntimeError, ValueError, TypeError, OSError) as exc:
+            record_skill_error_event(
+                skill_id="claw_runtime:list_tools",
+                error_code="claw_runtime_list_tools_failed",
+                message=str(exc),
+                source="skills_admin.register_tools",
+            )
             return
         for runtime_tool in runtime_tools if isinstance(runtime_tools, list) else []:
             if not isinstance(runtime_tool, dict):
@@ -176,7 +189,14 @@ class SkillsAdminService:
                         _tool_id,
                         svc.dispatcher._claw_runtime_payload(invocation),
                     )
-                except Exception as exc:
+                except (RuntimeError, ValueError, TypeError, OSError) as exc:
+                    record_skill_error_event(
+                        skill_id=f"claw_runtime:{_tool_id}",
+                        tool_id=_tool_id,
+                        error_code="claw_runtime_tool_failed",
+                        message=str(exc),
+                        source="skills_admin.model_handler",
+                    )
                     return ToolExecutionResult(error=str(exc), text=f"ClawRuntime 工具执行失败：{exc}")
                 return svc.dispatcher._tool_result_from_claw_runtime(payload)
 
@@ -239,9 +259,8 @@ class SkillsAdminService:
                 name="自定义技能",
                 description="描述这个技能的职责。",
                 triggers=["触发词"],
-                mode="prefix",
                 priority=4,
-                body="在这里写下给模型看的技能说明，或者加上 command-dispatch / command-tool 做工具分发。",
+                body="在这里写下给模型看的能力说明。工具型技能请在 handler 里绑定 tool_id。",
             )
         }
 
@@ -270,7 +289,11 @@ class SkillsAdminService:
         ]
         by_tool: dict[str, list[dict[str, object]]] = {}
         for skill in skill_items:
-            tool_id = str(skill.get("command_tool", "") or "").strip()
+            manifest = skill.get("manifest", {})
+            manifest = manifest if isinstance(manifest, dict) else {}
+            handler = manifest.get("handler", {})
+            handler = handler if isinstance(handler, dict) else {}
+            tool_id = str(handler.get("target", "") or "").strip() if handler.get("type") == "tool_id" else ""
             if tool_id:
                 by_tool.setdefault(tool_id, []).append(skill)
         items: list[dict[str, object]] = []
@@ -297,7 +320,11 @@ class SkillsAdminService:
                 }
             )
         for skill in skill_items:
-            if str(skill.get("command_dispatch", "") or "").strip() == "tool":
+            manifest = skill.get("manifest", {})
+            manifest = manifest if isinstance(manifest, dict) else {}
+            handler = manifest.get("handler", {})
+            handler = handler if isinstance(handler, dict) else {}
+            if str(handler.get("type", "") or "").strip() == "tool_id":
                 continue
             skill_id = str(skill.get("id", "") or "").strip()
             meta = _PROMPT_CAPABILITY_MAP.get(skill_id, {})
@@ -311,7 +338,7 @@ class SkillsAdminService:
                     "source_kind": str(skill.get("source_kind", "workspace") or "workspace"),
                     "model_callable": False,
                     "restricted": False,
-                    "aliases": list(skill.get("aliases", [])),
+                    "aliases": list((manifest.get("metadata", {}) or {}).get("aliases", []) if isinstance(manifest.get("metadata", {}), dict) else []),
                     "dispatch_skill_ids": [skill_id],
                     "dispatch_skill_count": 1,
                 }
@@ -338,16 +365,23 @@ class SkillsAdminService:
             "prompt": [],
             "tool_dispatch": [],
             "restricted": [],
+            "invalid": [],
         }
         for skill in skill_items:
             source_kind = str(skill.get("source_kind", "workspace") or "workspace")
-            command_dispatch = str(skill.get("command_dispatch", "") or "").strip()
-            command_tool = str(skill.get("command_tool", "") or "").strip()
+            manifest = skill.get("manifest", {})
+            manifest = manifest if isinstance(manifest, dict) else {}
+            handler = manifest.get("handler", {})
+            handler = handler if isinstance(handler, dict) else {}
+            command_dispatch = str(handler.get("type", "") or "").strip()
+            command_tool = str(handler.get("target", "") or "").strip()
             if source_kind in groups:
                 groups[source_kind].append(skill)
             else:
                 groups["workspace"].append(skill)
-            if command_dispatch == "tool":
+            if str(skill.get("status", "") or "") == "invalid" or skill.get("validation_errors"):
+                groups["invalid"].append(skill)
+            if command_dispatch == "tool_id":
                 groups["tool_dispatch"].append(skill)
                 if command_tool in _RESTRICTED_TOOL_IDS:
                     groups["restricted"].append(skill)

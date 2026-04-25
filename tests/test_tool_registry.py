@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from waifu_standalone.cells.skill_registry import SkillSpec
+from waifu_standalone.cells.skill_registry import SkillHandlerSpec, SkillManifest, SkillPolicySpec, SkillTriggerSpec
 from waifu_standalone.cells.tool_registry import ToolExecutionResult, ToolInvocation, ToolRegistry
 from waifu_standalone.models import InboundEvent, MessageSegment, OutboundMessage, SessionMemory
 
@@ -28,17 +28,19 @@ def _build_invocation() -> ToolInvocation:
         launcher_type="group",
         history=[],
     )
-    skill = SkillSpec(
+    skill = SkillManifest(
         skill_id="demo",
         name="Demo",
         description="",
-        triggers=["demo"],
-        aliases=[],
-        mode="prefix",
-        priority=0,
+        input_schema={"type": "object", "properties": {}},
+        output_schema={"type": "object", "properties": {}},
+        trigger=SkillTriggerSpec(command="demo", llm_tool=True, keywords=["demo"]),
+        handler=SkillHandlerSpec(type="tool_id", target="demo-tool"),
+        policy=SkillPolicySpec(priority=0),
+        default_args={},
+        metadata={},
         content="",
         source="test",
-        command_tool="demo-tool",
     )
     return ToolInvocation(
         tool_id="demo-tool",

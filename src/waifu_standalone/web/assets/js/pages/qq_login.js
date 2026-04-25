@@ -1,7 +1,7 @@
 import { api } from "../api.js";
 import { card, chip, el, empty, fieldRow, numberInput, textInput } from "../components.js";
 import { onLangChange, t } from "../i18n.js";
-import { copyToClipboard, formatTimestamp, toastError, toastOk } from "../ui.js";
+import { copyToClipboard, toastError, toastOk } from "../ui.js";
 
 const POLL_MS = 3000;
 
@@ -14,6 +14,9 @@ export function mount(root) {
   let qrFailed = false;
   let lastQrKey = "";
   let lastRenderSignature = "";
+  let statusLoading = false;
+  let qrRefreshing = false;
+  let settingsExpanded = false;
 
   function panelSignature(panel) {
     const isLogin = !!panel?.status?.is_login;
@@ -49,7 +52,12 @@ export function mount(root) {
   const container = el("div", { class: "page" });
   root.appendChild(container);
 
-  async function load(refresh = false, { background = false } = {}) {
+  async function load(refresh = false, { background = false, notify = false } = {}) {
+    const showLoading = refresh && !background;
+    if (showLoading) {
+      statusLoading = true;
+      render();
+    }
     try {
       const nextState = await api.getQqLoginPanel(refresh);
       const previousSignature = lastRenderSignature;
@@ -73,9 +81,15 @@ export function mount(root) {
       if (!background || qrChanged || previousSignature !== nextSignature) {
         render();
       }
+      if (notify) toastOk(t("qqlogin.status.refreshed"));
       syncPolling();
     } catch (err) {
       if (!stopped && !background) toastError(String(err?.message || err));
+    } finally {
+      if (showLoading) {
+        statusLoading = false;
+        if (!stopped) render();
+      }
     }
   }
 
@@ -98,6 +112,12 @@ export function mount(root) {
   }
 
   async function refreshQr() {
+    if (state?.status?.is_login) {
+      toastError(t("qqlogin.qr.loggedInNoRefresh"));
+      return;
+    }
+    qrRefreshing = true;
+    render();
     try {
       state = await api.refreshQqLoginPanel();
       syncQrState(state, { force: true });
@@ -107,7 +127,18 @@ export function mount(root) {
       syncPolling();
     } catch (err) {
       toastError(String(err?.message || err));
+    } finally {
+      qrRefreshing = false;
+      if (!stopped) render();
     }
+  }
+
+  function refreshStatus() {
+    return load(true, { notify: true });
+  }
+
+  function notifySwitchAccount() {
+    toastOk(t("qqlogin.actions.switchOpened"));
   }
 
   function patch(next) {
@@ -143,14 +174,9 @@ export function mount(root) {
           el("button", {
             type: "button",
             class: "btn",
-            text: t("common.refresh"),
-            onClick: () => load(true),
-          }),
-          el("button", {
-            type: "button",
-            class: "btn is-primary",
-            text: t("common.save"),
-            onClick: save,
+            disabled: statusLoading,
+            text: statusLoading ? t("qqlogin.actions.refreshing") : t("qqlogin.actions.refreshStatus"),
+            onClick: refreshStatus,
           }),
         ]),
       ]),
@@ -191,28 +217,58 @@ export function mount(root) {
 
     if (status?.is_login) {
       body.push(
-        el("div", { class: "qq-login-profile" }, [
-          info?.avatar_url
-            ? el("img", {
-                class: "qq-login-avatar",
-                src: info.avatar_url,
-                alt: "",
-              })
-            : el("div", { class: "qq-login-avatar is-fallback", text: "QQ" }),
-          el("div", { class: "qq-login-profile-meta" }, [
-            el("div", {
-              class: "qq-login-profile-name",
-              text: info?.nickname || info?.uin || t("common.none"),
-            }),
-            el("div", {
-              class: "qq-login-profile-sub",
-              text: info?.uin ? `QQ ${info.uin}` : t("common.none"),
-            }),
-            el("div", {
-              class: "qq-login-profile-sub",
-              text: info?.online ? t("qqlogin.profile.online") : t("qqlogin.profile.offline"),
+        el("div", { class: "qq-login-profile-card" }, [
+          el("div", { class: "qq-login-profile" }, [
+            info?.avatar_url
+              ? el("img", {
+                  class: "qq-login-avatar",
+                  src: info.avatar_url,
+                  alt: "",
+                })
+              : el("div", { class: "qq-login-avatar is-fallback", text: "QQ" }),
+            el("div", { class: "qq-login-profile-meta" }, [
+              el("div", {
+                class: "qq-login-profile-name",
+                text: info?.nickname || info?.uin || t("common.none"),
+              }),
+              el("div", {
+                class: "qq-login-profile-sub",
+                text: info?.uin ? `QQ ${info.uin}` : t("common.none"),
+              }),
+              el("div", {
+                class: "qq-login-profile-sub",
+                text: info?.online ? t("qqlogin.profile.online") : t("qqlogin.profile.offline"),
+              }),
+            ]),
+          ]),
+          el("div", { class: "qq-login-status-actions" }, [
+            state?.webui_url
+              ? el(
+                  "a",
+                  {
+                    class: "btn is-primary",
+                    href: state.webui_url,
+                    target: "_blank",
+                    rel: "noreferrer noopener",
+                    onClick: notifySwitchAccount,
+                  },
+                  [t("qqlogin.actions.switchAccount")],
+                )
+              : el("button", {
+                  type: "button",
+                  class: "btn is-primary",
+                  disabled: true,
+                  text: t("qqlogin.actions.switchAccount"),
+                }),
+            el("button", {
+              type: "button",
+              class: "btn",
+              disabled: statusLoading,
+              text: statusLoading ? t("qqlogin.actions.refreshing") : t("qqlogin.actions.refreshStatus"),
+              onClick: refreshStatus,
             }),
           ]),
+          el("div", { class: "qq-login-switch-hint", text: t("qqlogin.settings.switchHint") }),
         ]),
       );
     } else {
@@ -253,6 +309,7 @@ export function mount(root) {
       subtitle: t("qqlogin.status.desc"),
       actions: chips,
       body,
+      extraClass: "qq-login-card qq-login-status-card",
     });
   }
 
@@ -262,6 +319,7 @@ export function mount(root) {
       return card({
         title: t("qqlogin.qr.title"),
         subtitle: t("qqlogin.qr.desc"),
+        extraClass: "qq-login-card qq-login-qr-card",
         body: [
           empty({
             title: t("qqlogin.qr.needBridge"),
@@ -274,6 +332,7 @@ export function mount(root) {
       return card({
         title: t("qqlogin.qr.title"),
         subtitle: t("qqlogin.qr.desc"),
+        extraClass: "qq-login-card qq-login-qr-card",
         body: [
           empty({
             title: t("qqlogin.qr.needToken"),
@@ -286,6 +345,7 @@ export function mount(root) {
       return card({
         title: t("qqlogin.qr.title"),
         subtitle: t("qqlogin.qr.desc"),
+        extraClass: "qq-login-card qq-login-qr-card",
         body: [
           el("div", { class: "qq-login-success" }, [
             el("div", { class: "qq-login-success-mark", text: "OK" }),
@@ -317,6 +377,7 @@ export function mount(root) {
     return card({
       title: t("qqlogin.qr.title"),
       subtitle: t("qqlogin.qr.desc"),
+      extraClass: "qq-login-card qq-login-qr-card",
       body: [
         status?.login_error
           ? el("div", { class: "qq-login-alert is-danger", text: status.login_error })
@@ -326,7 +387,8 @@ export function mount(root) {
           el("button", {
             type: "button",
             class: "btn",
-            text: t("qqlogin.actions.refreshQr"),
+            disabled: qrRefreshing,
+            text: qrRefreshing ? t("qqlogin.qr.refreshing") : t("qqlogin.actions.refreshQr"),
             onClick: refreshQr,
           }),
           el("button", {
@@ -342,50 +404,95 @@ export function mount(root) {
   }
 
   function renderSettingsCard() {
+    const body = [
+      el("div", { class: "qq-login-settings-summary" }, [
+        renderSummaryPill(t("qqlogin.settings.summaryBase"), state?.webui_base_url || state?.webui_url || t("common.none")),
+        renderSummaryPill(t("qqlogin.settings.summaryPrefix"), state?.webui_api_prefix ?? "/api"),
+        renderSummaryPill(
+          t("qqlogin.settings.summaryToken"),
+          state?.token_configured ? t("qqlogin.state.tokenReady") : t("qqlogin.state.tokenMissing"),
+          state?.token_configured ? "ok" : "warn",
+        ),
+      ]),
+    ];
+
+    if (settingsExpanded) {
+      body.push(
+        el("div", { class: "qq-login-settings-fields" }, [
+          fieldRow({
+            label: t("sidecar.field.webuiBaseUrl"),
+            hint: t("qqlogin.settings.baseHint"),
+            control: textInput({
+              value: state?.webui_base_url || "",
+              placeholder: "http://127.0.0.1:6099",
+              onInput: (value) => patch({ webui_base_url: value }),
+            }),
+          }),
+          fieldRow({
+            label: t("sidecar.field.webuiApiPrefix"),
+            hint: t("qqlogin.settings.prefixHint"),
+            control: textInput({
+              value: state?.webui_api_prefix ?? "/api",
+              placeholder: "/api",
+              onInput: (value) => patch({ webui_api_prefix: value }),
+            }),
+          }),
+          fieldRow({
+            label: t("sidecar.field.webuiTimeout"),
+            hint: t("qqlogin.settings.timeoutHint"),
+            control: numberInput({
+              value: Number(state?.webui_timeout_seconds || 10),
+              min: 1,
+              max: 120,
+              onChange: (value) => patch({ webui_timeout_seconds: value }),
+            }),
+          }),
+          fieldRow({
+            label: t("sidecar.field.webuiToken"),
+            hint: t("qqlogin.settings.tokenHint"),
+            control: textInput({
+              type: "password",
+              value: state?.webui_token || "",
+              placeholder: t("qqlogin.settings.tokenPlaceholder"),
+              onInput: (value) => patch({ webui_token: value }),
+            }),
+          }),
+        ]),
+        el("div", { class: "qq-login-settings-actions" }, [
+          el("button", {
+            type: "button",
+            class: "btn is-primary",
+            text: t("qqlogin.settings.save"),
+            onClick: save,
+          }),
+        ]),
+      );
+    }
+
     return card({
-      title: t("qqlogin.settings.title"),
-      subtitle: t("qqlogin.settings.desc"),
-      body: [
-        fieldRow({
-          label: t("sidecar.field.webuiBaseUrl"),
-          hint: t("qqlogin.settings.baseHint"),
-          control: textInput({
-            value: state?.webui_base_url || "",
-            placeholder: "http://127.0.0.1:6099",
-            onInput: (value) => patch({ webui_base_url: value }),
-          }),
-        }),
-        fieldRow({
-          label: t("sidecar.field.webuiApiPrefix"),
-          hint: t("qqlogin.settings.prefixHint"),
-          control: textInput({
-            value: state?.webui_api_prefix ?? "/api",
-            placeholder: "/api",
-            onInput: (value) => patch({ webui_api_prefix: value }),
-          }),
-        }),
-        fieldRow({
-          label: t("sidecar.field.webuiTimeout"),
-          hint: t("qqlogin.settings.timeoutHint"),
-          control: numberInput({
-            value: Number(state?.webui_timeout_seconds || 10),
-            min: 1,
-            max: 120,
-            onChange: (value) => patch({ webui_timeout_seconds: value }),
-          }),
-        }),
-        fieldRow({
-          label: t("sidecar.field.webuiToken"),
-          hint: t("qqlogin.settings.tokenHint"),
-          control: textInput({
-            type: "password",
-            value: state?.webui_token || "",
-            placeholder: t("qqlogin.settings.tokenPlaceholder"),
-            onInput: (value) => patch({ webui_token: value }),
-          }),
+      title: t("qqlogin.settings.advancedTitle"),
+      subtitle: t("qqlogin.settings.advancedDesc"),
+      actions: [
+        el("button", {
+          type: "button",
+          class: "btn",
+          text: settingsExpanded ? t("qqlogin.settings.collapse") : t("qqlogin.settings.expand"),
+          onClick: () => {
+            settingsExpanded = !settingsExpanded;
+            render();
+          },
         }),
       ],
+      body,
+      extraClass: "qq-login-settings-card",
     });
+  }
+
+  function renderSummaryPill(label, value, variant = "") {
+    return el("div", { class: `qq-login-summary-pill ${variant ? `is-${variant}` : ""}`.trim() }, [
+      el("span", { class: "qq-login-summary-label", text: label }),
+      el("span", { class: "qq-login-summary-value", text: value || t("common.none") }),
+    ]);
   }
 
   load(true);

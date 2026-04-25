@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import os
 import re
 import shlex
@@ -28,7 +29,9 @@ from urllib.parse import quote_plus, urlparse
 
 from ..infra import AsyncHttpTransport, SyncHttpTransport, TransportError
 from ..models import InboundEvent, OutboundMessage, SessionMemory
+from .messages import t
 from .registry import SkillSpec
+from .telemetry import record_skill_error_event
 from .tool_registry import ToolExecutionResult, ToolInvocation
 
 if TYPE_CHECKING:
@@ -43,6 +46,30 @@ _SKILL_ICONS: dict[str, str] = {
     "concise-answer": "\U0001f4ac",
     "freshness-check": "\U0001f550",
 }
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _skill_text(key: str, **params: object) -> str:
+    return t(key, locale="zh_CN", **params)
+
+
+def _record_dispatch_error(
+    skill_id: str,
+    error_code: str,
+    message: str,
+    *,
+    source: str,
+    tool_id: str = "",
+) -> None:
+    _LOGGER.warning("%s skill_id=%s tool_id=%s error=%s", source, skill_id, tool_id or "-", message)
+    record_skill_error_event(
+        skill_id=skill_id or "__dispatcher__",
+        tool_id=tool_id,
+        error_code=error_code,
+        message=message,
+        source=source,
+    )
 
 
 class SkillDispatcher:
@@ -71,16 +98,6 @@ class SkillDispatcher:
     # Dispatch entry points (called from WaifuService event loop)
     # ------------------------------------------------------------------
     def resolve_builtin_dispatch(self, text: str) -> tuple[SkillSpec, str] | None:
-        normalized = str(text or "").strip()
-        if not normalized:
-            return None
-        skills = self._service.skills
-        if skills.has_dispatch_tool("skill-list") and self._looks_like_skill_list_request(
-            normalized
-        ):
-            skill = skills.get_skill("skill-list-command")
-            if skill is not None and skill.dispatches_tool:
-                return skill, ""
         return None
 
     def resolve_explicit_skill_request(self, text: str) -> tuple[SkillSpec, str] | None:
@@ -91,25 +108,9 @@ class SkillDispatcher:
         if slash_match is not None:
             skill_name = str(slash_match.group("skill") or "").strip()
             skill = self._service.skills.find_by_name_or_id(skill_name)
-            if skill is not None and skill.enabled and skill.eligible and skill.user_invocable:
+            if skill is not None and skill.user_invocable:
                 raw_args = str(slash_match.group("args") or "").strip()
                 return skill, raw_args
-        patterns = (
-            r'^\s*(?:请)?(?:用|使用|按|拿)\s*[\"“「]?(?P<skill>.+?)[\"”」]?\s*(?:这个)?(?:技能|skill)\s*(?:来|去|帮我|给我|直接|试着|一下)?\s*(?P<args>.*)$',
-            r'^\s*use\s+[\"“「]?(?P<skill>.+?)[\"”」]?\s+skill\b[\s:：，,]*(?P<args>.*)$',
-        )
-        for pattern in patterns:
-            match = re.match(pattern, normalized, flags=re.IGNORECASE)
-            if match is None:
-                continue
-            skill_name = str(match.group("skill") or "").strip().strip("\"'“”「」")
-            if not skill_name:
-                continue
-            skill = self._service.skills.find_by_name_or_id(skill_name)
-            if skill is None or not skill.enabled or not skill.eligible or not skill.user_invocable:
-                continue
-            raw_args = str(match.group("args") or "").lstrip(" ：:，,")
-            return skill, raw_args
         return None
 
     def dispatch_skill(
@@ -132,19 +133,10 @@ class SkillDispatcher:
             address=address,
             assistant_name=assistant_name,
             active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
-        message = service.tools.execute(skill.command_tool, invocation)
-        if message is not None:
-            return message
-        runtime_message = self._try_emit_claw_runtime_tool(invocation)
-        if runtime_message is not None:
-            return runtime_message
-        unavailable = OutboundMessage(
-            launcher_id=event.launcher_id,
-            launcher_type=event.launcher_type,
-            text=f"{address}，这个技能绑定的工具还没有注册：{skill.command_tool or 'unknown'}。",
-        )
-        return service.emitter.emit(event, unavailable, assistant_name=assistant_name)
+        invocation.arguments["_trigger_source"] = "runtime"
+        return self._emit_tool_execution_result(invocation, service.tools.execute_model(skill.skill_id, invocation))
 
     def dispatch_explicit_skill(
         self,
@@ -158,44 +150,18 @@ class SkillDispatcher:
         active_skills: list[SkillSpec],
     ) -> OutboundMessage | None:
         service = self._service
-        tool_id = self._explicit_tool_id(skill)
-        if tool_id:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=tool_id,
-            )
-            message = service.tools.execute(tool_id, invocation)
-            if message is not None:
-                return message
-            runtime_message = self._try_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        elif skill.command_tool:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=skill.command_tool,
-            )
-            runtime_message = self._try_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        return self.handle_unbound_skill_request(
+        invocation = self._build_tool_invocation(
             event,
+            session,
             skill=skill,
+            raw_args=raw_args,
             address=address,
             assistant_name=assistant_name,
+            active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
+        invocation.arguments["_trigger_source"] = "command"
+        return self._emit_tool_execution_result(invocation, service.tools.execute_model(skill.skill_id, invocation))
 
     async def adispatch_skill(
         self,
@@ -218,21 +184,13 @@ class SkillDispatcher:
             address=address,
             assistant_name=assistant_name,
             active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
+        invocation.arguments["_trigger_source"] = "runtime"
         if skill.command_tool == "image":
             invocation.arguments["background_delivery"] = bool(background_image_delivery)
-        message = await service.tools.aexecute(skill.command_tool, invocation)
-        if message is not None:
-            return message
-        runtime_message = await self._atry_emit_claw_runtime_tool(invocation)
-        if runtime_message is not None:
-            return runtime_message
-        unavailable = OutboundMessage(
-            launcher_id=event.launcher_id,
-            launcher_type=event.launcher_type,
-            text=f"{address}，这个技能绑定的工具还没有注册：{skill.command_tool or 'unknown'}。",
-        )
-        return await service.emitter.aemit(event, unavailable, assistant_name=assistant_name)
+        result = await service.tools.aexecute_model(skill.skill_id, invocation)
+        return await self._aemit_tool_execution_result(invocation, result)
 
     async def adispatch_explicit_skill(
         self,
@@ -247,48 +205,21 @@ class SkillDispatcher:
         background_image_delivery: bool = True,
     ) -> OutboundMessage | None:
         service = self._service
-        tool_id = self._explicit_tool_id(skill)
-        if tool_id:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=tool_id,
-            )
-            if tool_id == "image":
-                invocation.arguments["background_delivery"] = bool(background_image_delivery)
-            message = await service.tools.aexecute(tool_id, invocation)
-            if message is not None:
-                return message
-            runtime_message = await self._atry_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        elif skill.command_tool:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=skill.command_tool,
-            )
-            if skill.command_tool == "image":
-                invocation.arguments["background_delivery"] = bool(background_image_delivery)
-            runtime_message = await self._atry_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        return await self.ahandle_unbound_skill_request(
+        invocation = self._build_tool_invocation(
             event,
+            session,
             skill=skill,
+            raw_args=raw_args,
             address=address,
             assistant_name=assistant_name,
+            active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
+        invocation.arguments["_trigger_source"] = "command"
+        if skill.command_tool == "image":
+            invocation.arguments["background_delivery"] = bool(background_image_delivery)
+        result = await service.tools.aexecute_model(skill.skill_id, invocation)
+        return await self._aemit_tool_execution_result(invocation, result)
 
     def handle_unbound_skill_request(
         self,
@@ -299,17 +230,7 @@ class SkillDispatcher:
         assistant_name: str,
     ) -> OutboundMessage:
         service = self._service
-        trigger_hint = ""
-        if skill.triggers:
-            trigger_hint = "你可以直接用它的触发词： " + " / ".join(skill.triggers[:3]) + "。"
-        text = (
-            f"{address}，`{skill.name}` 这个技能现在还没有绑定可执行工具，"
-            "我不能假装已经替你跑完。"
-        )
-        if trigger_hint:
-            text += trigger_hint
-        else:
-            text += "要让它真的执行，需要给这个技能补 `command-dispatch / command-tool`，或者接上对应运行时。"
+        text = _skill_text("skill.unbound", address=address, skill_name=skill.name)
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -326,17 +247,7 @@ class SkillDispatcher:
         assistant_name: str,
     ) -> OutboundMessage:
         service = self._service
-        trigger_hint = ""
-        if skill.triggers:
-            trigger_hint = "你可以直接用它的触发词： " + " / ".join(skill.triggers[:3]) + "。"
-        text = (
-            f"{address}，`{skill.name}` 这个技能现在还没有绑定可执行工具，"
-            "我不能假装已经替你跑完。"
-        )
-        if trigger_hint:
-            text += trigger_hint
-        else:
-            text += "要让它真的执行，需要给这个技能补 `command-dispatch / command-tool`，或者接上对应运行时。"
+        text = _skill_text("skill.unbound", address=address, skill_name=skill.name)
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -369,18 +280,24 @@ class SkillDispatcher:
                     arguments={"prompt": image.prompt},
                 )
             )
-            text = caption_result.text or "图片已经准备好了。"
+            text = caption_result.text or _skill_text("skill.image_ready")
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
                 text=text,
                 images=[image.image_ref],
             )
-        except Exception:
+        except (RuntimeError, ValueError, OSError) as exc:
+            _record_dispatch_error(
+                "image-command",
+                "image_generation_failed",
+                str(exc) or "image generation failed",
+                source="dispatcher.handle_image_request",
+            )
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text="呜，这次图片没有画好，稍后再试一次吧。",
+                text=_skill_text("skill.image_failed_brief"),
             )
         return service.emitter.emit(event, message, assistant_name=assistant_name)
 
@@ -411,18 +328,24 @@ class SkillDispatcher:
                         arguments={"prompt": image.prompt},
                     )
                 )
-                text = caption_result.text or "图片已经准备好了。"
+                text = caption_result.text or _skill_text("skill.image_ready")
                 message = OutboundMessage(
                     launcher_id=event.launcher_id,
                     launcher_type=event.launcher_type,
                     text=text,
                     images=[image.image_ref],
                 )
-            except Exception:
+            except (RuntimeError, ValueError, OSError) as exc:
+                _record_dispatch_error(
+                    "image-command",
+                    "image_generation_failed",
+                    str(exc) or "image generation failed",
+                    source="dispatcher.ahandle_image_request",
+                )
                 message = OutboundMessage(
                     launcher_id=event.launcher_id,
                     launcher_type=event.launcher_type,
-                    text="呜，这次图片没有画好，稍后再试一次吧。",
+                    text=_skill_text("skill.image_failed_brief"),
                 )
             return await service.emitter.aemit(event, message, assistant_name=assistant_name)
 
@@ -450,7 +373,7 @@ class SkillDispatcher:
         ack = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
-            text=f"{address}，我先去画，画好就马上发你。",
+            text=_skill_text("skill.image_ack", address=address),
         )
         return await service.emitter.aemit(event, ack, assistant_name=assistant_name)
 
@@ -479,18 +402,24 @@ class SkillDispatcher:
                     arguments={"prompt": image.prompt},
                 )
             )
-            text = caption_result.text or "图片已经准备好了。"
+            text = caption_result.text or _skill_text("skill.image_ready")
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
                 text=text,
                 images=[image.image_ref],
             )
-        except Exception as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
+            _record_dispatch_error(
+                "image-command",
+                "image_generation_failed",
+                str(exc) or "image generation failed",
+                source="dispatcher._adeliver_generated_image",
+            )
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，这次图没画成，原因是：{str(exc) or '生成失败'}",
+                text=_skill_text("skill.image_failed", address=address, reason=str(exc) or "生成失败"),
             )
         await service.emitter.aemit(event, message, assistant_name=assistant_name)
 
@@ -509,15 +438,9 @@ class SkillDispatcher:
         sources = self._search_sources_from_payload(payload)
         if not sources:
             if query:
-                text = (
-                    f"{address}，我这边只有“{query}”那次检索的摘要，没有拿到稳定的原文链接，"
-                    "不能给你乱编。你要的话我可以换个关键词再查一次官网或原始来源。"
-                )
+                text = _skill_text("skill.search_links_missing_with_query", address=address, query=query)
             else:
-                text = (
-                    f"{address}，你要的是来源链接的话，我得先拿到一轮真实检索结果，"
-                    "现在手里没有可核对的链接，不能给你乱编。你把关键词再发我一次，我查到真实链接就直接贴给你。"
-                )
+                text = _skill_text("skill.search_links_missing", address=address)
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
@@ -525,9 +448,9 @@ class SkillDispatcher:
             )
             return service.emitter.emit(event, message, assistant_name=assistant_name)
 
-        lines = [f"{address}，我把这次检索里拿到的真实链接发你。"]
+        lines = [_skill_text("skill.search_links_intro", address=address)]
         if query:
-            lines.append(f"关键词：{query}")
+            lines.append(_skill_text("skill.search_links_query", query=query))
         for title, url in sources[:3]:
             lines.append(f"- {service.generator._clip(title, limit=56)}")
             lines.append(url)
@@ -553,15 +476,9 @@ class SkillDispatcher:
         sources = self._search_sources_from_payload(payload)
         if not sources:
             if query:
-                text = (
-                    f"{address}，我这边只有“{query}”那次检索的摘要，没有拿到稳定的原文链接，"
-                    "不能给你乱编。你要的话我可以换个关键词再查一次官网或原始来源。"
-                )
+                text = _skill_text("skill.search_links_missing_with_query", address=address, query=query)
             else:
-                text = (
-                    f"{address}，你要的是来源链接的话，我得先拿到一轮真实检索结果，"
-                    "现在手里没有可核对的链接，不能给你乱编。你把关键词再发我一次，我查到真实链接就直接贴给你。"
-                )
+                text = _skill_text("skill.search_links_missing", address=address)
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
@@ -569,9 +486,9 @@ class SkillDispatcher:
             )
             return await service.emitter.aemit(event, message, assistant_name=assistant_name)
 
-        lines = [f"{address}，我把这次检索里拿到的真实链接发你。"]
+        lines = [_skill_text("skill.search_links_intro", address=address)]
         if query:
-            lines.append(f"关键词：{query}")
+            lines.append(_skill_text("skill.search_links_query", query=query))
         for title, url in sources[:3]:
             lines.append(f"- {service.generator._clip(title, limit=56)}")
             lines.append(url)
@@ -598,7 +515,7 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，你想让我查什么呀，把关键词直接告诉我就好。",
+                text=_skill_text("skill.search_missing_query", address=address),
             )
             return service.emitter.emit(event, message, assistant_name=assistant_name)
 
@@ -608,11 +525,11 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，这次我没查到稳定结果，要不要换个关键词让我再试一次？",
+                text=_skill_text("skill.search_no_stable_result", address=address),
             )
             return service.emitter.emit(event, message, assistant_name=assistant_name)
 
-        lines = [f"{address}，我帮你查了一下。"]
+        lines = [_skill_text("skill.search_done", address=address)]
         if search_context.summary:
             lines.append(search_context.summary)
         for result in search_context.results[1:3]:
@@ -640,7 +557,7 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，你想让我查什么呀，把关键词直接告诉我就好。",
+                text=_skill_text("skill.search_missing_query", address=address),
             )
             return await service.emitter.aemit(event, message, assistant_name=assistant_name)
 
@@ -650,11 +567,11 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，这次我没查到稳定结果，要不要换个关键词让我再试一次？",
+                text=_skill_text("skill.search_no_stable_result", address=address),
             )
             return await service.emitter.aemit(event, message, assistant_name=assistant_name)
 
-        lines = [f"{address}，我帮你查了一下。"]
+        lines = [_skill_text("skill.search_done", address=address)]
         if search_context.summary:
             lines.append(search_context.summary)
         for result in search_context.results[1:3]:
@@ -680,16 +597,16 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，现在还没有足够的上下文，我再多陪你聊几句就能帮你总结啦。",
+                text=_skill_text("skill.summary_insufficient_context", address=address),
             )
             return service.emitter.emit(event, message, assistant_name=assistant_name)
         summary, tags = service.generator.summarize_history(recent_history, assistant_name=assistant_name)
         if summary:
-            text = f"{address}，我先帮你收一下重点：{summary}"
+            text = _skill_text("skill.summary_done", address=address, summary=summary)
             if tags:
-                text += "\n标签：" + "、".join(tags[:4])
+                text += "\n" + _skill_text("skill.summary_tags", tags="、".join(tags[:4]))
         else:
-            text = f"{address}，这段对话我还没法总结得漂亮，你再给我一点上下文吧。"
+            text = _skill_text("skill.summary_unavailable", address=address)
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -711,16 +628,16 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，现在还没有足够的上下文，我再多陪你聊几句就能帮你总结啦。",
+                text=_skill_text("skill.summary_insufficient_context", address=address),
             )
             return await service.emitter.aemit(event, message, assistant_name=assistant_name)
         summary, tags = await service.generator.asummarize_history(recent_history, assistant_name=assistant_name)
         if summary:
-            text = f"{address}，我先帮你收一下重点：{summary}"
+            text = _skill_text("skill.summary_done", address=address, summary=summary)
             if tags:
-                text += "\n标签：" + "、".join(tags[:4])
+                text += "\n" + _skill_text("skill.summary_tags", tags="、".join(tags[:4]))
         else:
-            text = f"{address}，这段对话我还没法总结得漂亮，你再给我一点上下文吧。"
+            text = _skill_text("skill.summary_unavailable", address=address)
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -743,11 +660,11 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，我现在还没有任何已启用的技能。",
+                text=_skill_text("skill.list_empty", address=address),
             )
             return service.emitter.emit(event, message, assistant_name=assistant_name)
 
-        lines = [f"{address}，我目前掌握的技能有：\n"]
+        lines = [_skill_text("skill.list_intro", address=address) + "\n"]
         for skill in enabled_skills:
             icon = _SKILL_ICONS.get(skill.skill_id, "\u2728")
             trigger_hint = self._skill_list_trigger_hint(skill)
@@ -758,9 +675,9 @@ class SkillDispatcher:
         total = len(enabled_skills)
         workspace_count = sum(1 for s in enabled_skills if s.source_kind == "workspace")
         if workspace_count:
-            lines.append(f"\n共 {total} 个技能（其中 {workspace_count} 个是自定义技能）。")
+            lines.append("\n" + _skill_text("skill.list_count_custom", total=total, workspace_count=workspace_count))
         else:
-            lines.append(f"\n共 {total} 个技能。")
+            lines.append("\n" + _skill_text("skill.list_count", total=total))
 
         message = OutboundMessage(
             launcher_id=event.launcher_id,
@@ -784,11 +701,11 @@ class SkillDispatcher:
             message = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
-                text=f"{address}，我现在还没有任何已启用的技能。",
+                text=_skill_text("skill.list_empty", address=address),
             )
             return await service.emitter.aemit(event, message, assistant_name=assistant_name)
 
-        lines = [f"{address}，我目前掌握的技能有：\n"]
+        lines = [_skill_text("skill.list_intro", address=address) + "\n"]
         for skill in enabled_skills:
             icon = _SKILL_ICONS.get(skill.skill_id, "\u2728")
             trigger_hint = self._skill_list_trigger_hint(skill)
@@ -799,9 +716,9 @@ class SkillDispatcher:
         total = len(enabled_skills)
         workspace_count = sum(1 for s in enabled_skills if s.source_kind == "workspace")
         if workspace_count:
-            lines.append(f"\n共 {total} 个技能（其中 {workspace_count} 个是自定义技能）。")
+            lines.append("\n" + _skill_text("skill.list_count_custom", total=total, workspace_count=workspace_count))
         else:
-            lines.append(f"\n共 {total} 个技能。")
+            lines.append("\n" + _skill_text("skill.list_count", total=total))
 
         message = OutboundMessage(
             launcher_id=event.launcher_id,
@@ -1057,13 +974,19 @@ class SkillDispatcher:
             or ""
         ).strip()
         if not prompt:
-            return ToolExecutionResult(error="missing prompt", text="请提供要生成图片的提示词。")
+            return ToolExecutionResult(error="missing prompt", text=_skill_text("skill.image_missing_prompt"))
         try:
             image = service.generator.generate_image(prompt)
-        except Exception as exc:
-            return ToolExecutionResult(error=f"image generation failed: {exc}", text="图片生成失败。")
+        except (RuntimeError, ValueError, OSError) as exc:
+            _record_dispatch_error(
+                "image-command",
+                "image_generation_failed",
+                str(exc) or "image generation failed",
+                source="dispatcher.use_image_tool",
+            )
+            return ToolExecutionResult(error=f"image generation failed: {exc}", text=_skill_text("skill.image_failed_brief"))
         return ToolExecutionResult(
-            text=f"已生成图片，prompt: {image.prompt}",
+            text=_skill_text("skill.image_success", prompt=image.prompt),
             images=[image.image_ref],
             metadata={"prompt": image.prompt, "image_ref": image.image_ref},
             display_mode="media",
@@ -1078,13 +1001,19 @@ class SkillDispatcher:
             or ""
         ).strip()
         if not prompt:
-            return ToolExecutionResult(error="missing prompt", text="请提供要生成图片的提示词。")
+            return ToolExecutionResult(error="missing prompt", text=_skill_text("skill.image_missing_prompt"))
         try:
             image = await service.generator.agenerate_image(prompt)
-        except Exception as exc:
-            return ToolExecutionResult(error=f"image generation failed: {exc}", text="图片生成失败。")
+        except (RuntimeError, ValueError, OSError) as exc:
+            _record_dispatch_error(
+                "image-command",
+                "image_generation_failed",
+                str(exc) or "image generation failed",
+                source="dispatcher.ause_image_tool",
+            )
+            return ToolExecutionResult(error=f"image generation failed: {exc}", text=_skill_text("skill.image_failed_brief"))
         return ToolExecutionResult(
-            text=f"已生成图片，prompt: {image.prompt}",
+            text=_skill_text("skill.image_success", prompt=image.prompt),
             images=[image.image_ref],
             metadata={"prompt": image.prompt, "image_ref": image.image_ref},
             display_mode="media",
@@ -1099,13 +1028,13 @@ class SkillDispatcher:
         )
         service.gate.clear_pending_search(invocation.session)
         if not query:
-            return ToolExecutionResult(error="missing query", text="请提供要搜索的关键词。")
+            return ToolExecutionResult(error="missing query", text=_skill_text("skill.search_tool_missing_query"))
         search_context = service.search.search_query(query, reason="model-tool")
         service._store_search_context(invocation.session, search_context)
         if not search_context.active:
             return ToolExecutionResult(
                 error=f"no stable result for query: {query}",
-                text=f"没有查到“{query}”的稳定结果。",
+                text=_skill_text("skill.search_tool_no_result", query=query),
                 metadata=search_context.as_dict(),
             )
         lines = []
@@ -1131,13 +1060,13 @@ class SkillDispatcher:
         )
         service.gate.clear_pending_search(invocation.session)
         if not query:
-            return ToolExecutionResult(error="missing query", text="请提供要搜索的关键词。")
+            return ToolExecutionResult(error="missing query", text=_skill_text("skill.search_tool_missing_query"))
         search_context = await service.search.asearch_query(query, reason="model-tool")
         await service._store_search_context_async(invocation.session, search_context)
         if not search_context.active:
             return ToolExecutionResult(
                 error=f"no stable result for query: {query}",
-                text=f"没有查到“{query}”的稳定结果。",
+                text=_skill_text("skill.search_tool_no_result", query=query),
                 metadata=search_context.as_dict(),
             )
         lines = []
@@ -1205,10 +1134,12 @@ class SkillDispatcher:
             summary = skill.name
             if skill.description:
                 summary += f": {skill.description}"
-            if skill.triggers:
-                summary += " | triggers=" + ", ".join(skill.triggers[:3])
-            if skill.command_tool:
+            if skill.keywords:
+                summary += " | keywords=" + ", ".join(skill.keywords[:3])
+            if skill.is_tool_handler:
                 summary += f" | tool={skill.command_tool}"
+            elif skill.is_prompt_policy:
+                summary += " | prompt-policy"
             lines.append(summary)
             items.append(skill.as_dict())
         return ToolExecutionResult(
@@ -1595,7 +1526,14 @@ class SkillDispatcher:
                 check=False,
                 shell=False,
             )
-        except Exception as exc:
+        except (subprocess.SubprocessError, OSError) as exc:
+            _record_dispatch_error(
+                str(invocation.skill.skill_id if invocation.skill is not None else "exec-command"),
+                "exec_command_failed",
+                str(exc) or "command execution failed",
+                source="dispatcher.use_exec_command_tool",
+                tool_id="exec-command",
+            )
             return ToolExecutionResult(error=str(exc), text=f"命令执行失败：{exc}")
         output = (completed.stdout or completed.stderr or "").strip()
         clipped = self._service.generator._clip(output or "(no output)", limit=4000)
@@ -1689,7 +1627,7 @@ class SkillDispatcher:
     @staticmethod
     def _compose_tool_display_text(prefix: str, result: ToolExecutionResult) -> str:
         lead = str(prefix or "").strip()
-        payload = str(result.text or result.error or "工具没有返回内容。").strip()
+        payload = str(result.text or result.error or _skill_text("skill.tool_empty_result")).strip()
         if result.display_mode != "raw_block":
             return lead or payload
         block = "```text\n" + payload + "\n```"
@@ -1727,12 +1665,12 @@ class SkillDispatcher:
         )
         if status == "ok":
             return ToolExecutionResult(
-                text=text or "已通过 ClawRuntime 执行。",
+                text=text or _skill_text("skill.claw_success"),
                 images=images,
                 metadata=metadata,
             )
         return ToolExecutionResult(
-            text=text or reason or "ClawRuntime 未能执行该工具。",
+            text=text or reason or _skill_text("skill.claw_failed"),
             images=images,
             metadata=metadata,
             error=reason or status or "claw runtime invocation failed",
@@ -1749,7 +1687,14 @@ class SkillDispatcher:
                 tool_id,
                 self._claw_runtime_payload(invocation),
             )
-        except Exception:
+        except (RuntimeError, ValueError, OSError, TimeoutError) as exc:
+            _record_dispatch_error(
+                str(invocation.skill.skill_id if invocation.skill is not None else tool_id),
+                "claw_runtime_failed",
+                str(exc) or "claw runtime failed",
+                source="dispatcher._try_emit_claw_runtime_tool",
+                tool_id=tool_id,
+            )
             return None
         return self._emit_tool_execution_result(
             invocation,
@@ -1768,7 +1713,14 @@ class SkillDispatcher:
                 tool_id,
                 self._claw_runtime_payload(invocation),
             )
-        except Exception:
+        except (RuntimeError, ValueError, OSError, TimeoutError) as exc:
+            _record_dispatch_error(
+                str(invocation.skill.skill_id if invocation.skill is not None else tool_id),
+                "claw_runtime_failed",
+                str(exc) or "claw runtime failed",
+                source="dispatcher._atry_emit_claw_runtime_tool",
+                tool_id=tool_id,
+            )
             return None
         return await self._aemit_tool_execution_result(
             invocation,
@@ -1789,6 +1741,13 @@ class SkillDispatcher:
     ) -> ToolInvocation:
         normalized_tool_id = str(tool_id or skill.command_tool or "").strip().lower()
         parsed_arguments = self._parse_command_arguments(raw_args, mode=skill.command_arg_mode)
+        skill_cards = [skill]
+        seen_skill_ids = {skill.skill_id}
+        for item in active_skills:
+            if item.skill_id in seen_skill_ids:
+                continue
+            seen_skill_ids.add(item.skill_id)
+            skill_cards.append(item)
         return ToolInvocation(
             tool_id=normalized_tool_id,
             raw_args=str(raw_args or "").strip(),
@@ -1797,7 +1756,7 @@ class SkillDispatcher:
             skill=skill,
             address=address,
             assistant_name=assistant_name,
-            active_skills=active_skills,
+            active_skills=skill_cards,
             arguments=parsed_arguments,
         )
 
@@ -2152,8 +2111,14 @@ class SkillDispatcher:
                 )
                 if payload:
                     return payload, ""
-            except Exception:
-                pass
+            except (RuntimeError, ValueError, OSError) as exc:
+                _record_dispatch_error(
+                    str(invocation.skill.skill_id if invocation.skill is not None else "summarize-command"),
+                    "summarize_fallback_failed",
+                    str(exc) or "summarize fallback failed",
+                    source="dispatcher._summarize_with_runtime",
+                    tool_id="summarize",
+                )
         return self._fallback_summarize_payload(target, content=content, title=title, extracted=extracted), ""
 
     def _load_summarize_source(self, target: str) -> tuple[str, str, dict[str, object], str]:

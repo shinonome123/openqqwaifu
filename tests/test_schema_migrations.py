@@ -27,19 +27,20 @@ class SchemaMigrationTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     ).fetchall()
                 }
-                self.assertEqual(version, 2)
+                self.assertEqual(version, 3)
                 self.assertIn("schema_version", tables)
                 self.assertIn("members", tables)
                 self.assertIn("member_persona_state", tables)
                 self.assertIn("assistant_aliases", tables)
+                self.assertIn("skill_telemetry", tables)
                 self.assertIn("knowledge_entries", tables)
                 row = conn.execute(
                     "SELECT version, description FROM schema_version ORDER BY version DESC"
                 ).fetchone()
                 self.assertIsNotNone(row)
                 assert row is not None
-                self.assertEqual(row[0], 2)
-                self.assertEqual(row[1], "assistant alias state")
+                self.assertEqual(row[0], 3)
+                self.assertEqual(row[1], "skill telemetry events")
             finally:
                 conn.close()
 
@@ -51,11 +52,11 @@ class SchemaMigrationTests(unittest.TestCase):
                 first = run_migrations(conn)
                 second = run_migrations(conn)
                 version_rows = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()
-                self.assertEqual(first, 2)
-                self.assertEqual(second, 2)
+                self.assertEqual(first, 3)
+                self.assertEqual(second, 3)
                 self.assertIsNotNone(version_rows)
                 assert version_rows is not None
-                self.assertEqual(version_rows[0], 2)
+                self.assertEqual(version_rows[0], 3)
             finally:
                 conn.close()
 
@@ -142,8 +143,8 @@ class SchemaMigrationTests(unittest.TestCase):
 
                 version = run_migrations(conn)
 
-                self.assertEqual(version, 2)
-                self.assertEqual(current_version(conn), 2)
+                self.assertEqual(version, 3)
+                self.assertEqual(current_version(conn), 3)
                 member_columns = {
                     row[1]
                     for row in conn.execute("PRAGMA table_info(members)").fetchall()

@@ -14,12 +14,13 @@ const COPY = {
     skillSourcesTitle: "Skill sources",
     skillSourcesDesc: "Loaded skills grouped by where they come from.",
     skillModesTitle: "Dispatch modes",
-    skillModesDesc: "How the runtime currently uses each skill.",
+    skillModesDesc: "Manifest handlers, prompt policies, validation state and recent executions.",
     builtin: "Built-in",
     workspace: "Workspace",
     plugin: "Plugin",
     prompt: "Prompt-only",
     toolDispatch: "Tool dispatch",
+    invalid: "Invalid",
     restricted: "Restricted",
     aliases: "Aliases",
     commandArgMode: "Argument mode",
@@ -36,6 +37,12 @@ const COPY = {
     enabled: "enabled",
     disabled: "disabled",
     noAliases: "No aliases",
+    keywords: "Keywords",
+    validation: "Validation",
+    telemetry: "Telemetry",
+    neverSucceeded: "never succeeded",
+    bindingErrorsTitle: "Tool binding errors",
+    bindingErrorsDesc: "Runtime kept the previous valid binding map. Fix data/tool_bindings.yaml and reload skills.",
     clawTitle: "Claw runtime",
     clawDesc: "Managed OpenClaw-compatible runtime status, plugin routing owner, and capability diagnostics.",
     clawPlugins: "Installed plugins",
@@ -62,12 +69,13 @@ const COPY = {
     skillSourcesTitle: "技能来源",
     skillSourcesDesc: "按来源查看当前已加载技能。",
     skillModesTitle: "技能模式",
-    skillModesDesc: "按运行方式查看当前技能如何参与回复或分发。",
+    skillModesDesc: "按 Manifest handler、Prompt Policy、校验状态和最近调用查看技能。",
     builtin: "内置",
     workspace: "工作区",
     plugin: "插件",
     prompt: "Prompt 型",
     toolDispatch: "Tool 分发",
+    invalid: "校验失败",
     restricted: "受限",
     aliases: "别名",
     commandArgMode: "参数模式",
@@ -84,6 +92,12 @@ const COPY = {
     enabled: "启用",
     disabled: "禁用",
     noAliases: "无别名",
+    keywords: "关键词",
+    validation: "校验",
+    telemetry: "调用统计",
+    neverSucceeded: "从未成功",
+    bindingErrorsTitle: "工具绑定错误",
+    bindingErrorsDesc: "运行时会继续沿用上一份有效绑定。修复 data/tool_bindings.yaml 后重新加载技能。",
     clawTitle: "Claw 运行时",
     clawDesc: "受管的 OpenClaw 兼容运行时状态、插件路由归属和能力诊断。",
     clawPlugins: "已安装插件",
@@ -217,6 +231,8 @@ export function mount(root) {
     }
 
     container.appendChild(renderSummary());
+    const bindingErrors = renderToolBindingErrors();
+    if (bindingErrors) container.appendChild(bindingErrors);
     container.appendChild(renderClawRuntime());
     container.appendChild(renderCapabilities());
     container.appendChild(
@@ -257,6 +273,22 @@ export function mount(root) {
         meta: panel?.safety?.enabled ? copy("enabled") : copy("disabled"),
       }),
     ]);
+  }
+
+  function renderToolBindingErrors() {
+    const errors = Array.isArray(panel?.skills?.tool_binding_errors) ? panel.skills.tool_binding_errors : [];
+    if (!errors.length) return null;
+    return card({
+      title: copy("bindingErrorsTitle"),
+      subtitle: copy("bindingErrorsDesc"),
+      body: [
+        el(
+          "div",
+          { class: "row" },
+          errors.map((item) => chip({ label: `${item.code || "error"}: ${item.message || ""}`, variant: "danger" })),
+        ),
+      ],
+    });
   }
 
   function renderCapabilities() {
@@ -486,6 +518,7 @@ export function mount(root) {
         renderSkillGroup(copy("prompt"), groups.prompt || []),
         renderSkillGroup(copy("toolDispatch"), groups.tool_dispatch || []),
         renderSkillGroup(copy("restricted"), groups.restricted || []),
+        renderSkillGroup(copy("invalid"), groups.invalid || []),
       ],
     });
   }
@@ -508,7 +541,18 @@ export function mount(root) {
   }
 
   function renderSkillCard(skill) {
-    const aliases = Array.isArray(skill?.aliases) ? skill.aliases : [];
+    const manifest = skill?.manifest || {};
+    const trigger = manifest?.trigger || {};
+    const handler = manifest?.handler || {};
+    const policy = manifest?.policy || {};
+    const metadata = manifest?.metadata || {};
+    const aliases = Array.isArray(metadata?.aliases) ? metadata.aliases : [];
+    const keywords = Array.isArray(trigger?.keywords) ? trigger.keywords : [];
+    const validationErrors = Array.isArray(skill?.validation_errors) ? skill.validation_errors : [];
+    const telemetry = skill?.telemetry || {};
+    const lastExecution = skill?.last_execution && Object.keys(skill.last_execution).length
+      ? skill.last_execution
+      : telemetry?.last || {};
     return el("div", { class: "rule-card skill-rule-card" }, [
       el("div", { class: "rule-card-head" }, [
         el("div", {}, [
@@ -536,27 +580,53 @@ export function mount(root) {
         safeSourceLabel(skill.source)
           ? chip({ label: safeSourceLabel(skill.source), variant: "outline" })
           : null,
-        skill.directly_usable
-          ? chip({ label: "ready", variant: "ok" })
-          : chip({ label: "needs-setup", variant: "danger" }),
-        skill.auto_bound ? chip({ label: "auto-bound", variant: "info" }) : null,
-        skill.command_dispatch === "tool"
-          ? chip({ label: `tool:${skill.command_tool || "unknown"}`, variant: "ok" })
+        chip({
+          label: skill.status || "unknown",
+          variant: skill.status === "ready" ? "ok" : skill.status === "disabled" ? "outline" : "danger",
+        }),
+        handler?.type === "tool_id"
+          ? chip({ label: `tool:${handler?.target || "unknown"}`, variant: "ok" })
           : chip({ label: copy("typePrompt"), variant: "outline" }),
-        skill.command_arg_mode && skill.command_dispatch === "tool"
-          ? chip({ label: `${copy("commandArgMode")}: ${skill.command_arg_mode}`, variant: "outline" })
+        trigger?.llm_tool ? chip({ label: "llm tool", variant: "ok" }) : chip({ label: "prompt policy", variant: "outline" }),
+        trigger?.command ? chip({ label: `/skill ${trigger.command}`, variant: "info" }) : null,
+        policy?.risk_level ? chip({ label: `risk:${policy.risk_level}`, variant: policy.risk_level === "safe" ? "outline" : "danger" }) : null,
+        handler?.arg_mode && handler?.type === "tool_id"
+          ? chip({ label: `${copy("commandArgMode")}: ${handler.arg_mode}`, variant: "outline" })
           : null,
       ]),
-      Array.isArray(skill.triggers) && skill.triggers.length
+      keywords.length
         ? el("div", { class: "skill-trigger-list" }, [
-            el("div", { class: "skill-trigger-label", text: t("skills.triggers") }),
+            el("div", { class: "skill-trigger-label", text: copy("keywords") }),
             el(
               "div",
               { class: "row" },
-              skill.triggers.map((trigger) => chip({ label: trigger, variant: "outline" })),
+              keywords.map((keyword) => chip({ label: keyword, variant: "outline" })),
             ),
           ])
         : null,
+      validationErrors.length
+        ? el("div", { class: "skill-trigger-list" }, [
+            el("div", { class: "skill-trigger-label", text: copy("validation") }),
+            el(
+              "div",
+              { class: "row" },
+              validationErrors.map((item) =>
+                chip({ label: `${item.code || "error"}: ${item.message || ""}`, variant: "danger" }),
+              ),
+            ),
+          ])
+        : null,
+      el("div", { class: "skill-trigger-list" }, [
+        el("div", { class: "skill-trigger-label", text: copy("telemetry") }),
+        el("div", { class: "row" }, [
+          chip({ label: `calls:${telemetry?.calls || 0}`, variant: "outline" }),
+          chip({ label: `ok:${telemetry?.success || 0}`, variant: "ok" }),
+          chip({ label: `fail:${telemetry?.failure || 0}`, variant: telemetry?.failure ? "danger" : "outline" }),
+          telemetry?.never_succeeded ? chip({ label: copy("neverSucceeded"), variant: "danger" }) : null,
+          lastExecution?.trace_id ? chip({ label: `trace:${lastExecution.trace_id}`, variant: "info" }) : null,
+          lastExecution?.error_code ? chip({ label: lastExecution.error_code, variant: "danger" }) : null,
+        ]),
+      ]),
       el("div", { class: "skill-trigger-list" }, [
         el("div", { class: "skill-trigger-label", text: copy("aliases") }),
         aliases.length

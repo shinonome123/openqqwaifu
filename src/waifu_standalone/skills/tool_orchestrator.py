@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from ..models import InboundEvent, SessionMemory
@@ -25,15 +24,11 @@ class ToolCallingOrchestrator:
     def __init__(self, service: "WaifuService") -> None:
         self._service = service
 
-    def prompt_skill_cards(self) -> list[SkillSpec]:
+    def prompt_skill_cards(self, latest_message: str = "") -> list[SkillSpec]:
         svc = self._service
         if not svc.config.skills_enabled:
             return []
-        return [
-            skill
-            for skill in svc.skills.list_skills()
-            if skill.enabled and skill.eligible and skill.prompt_visible
-        ][: max(1, svc.config.max_active_skills)]
+        return svc.skills.candidate_manifests(latest_message)
 
     def exposure_context(
         self,
@@ -44,6 +39,7 @@ class ToolCallingOrchestrator:
         address: str,
         assistant_name: str,
     ) -> ToolExposureContext:
+        svc = self._service
         return ToolExposureContext(
             event=event,
             session=session,
@@ -52,6 +48,7 @@ class ToolCallingOrchestrator:
             assistant_name=assistant_name,
             allowed_tool_ids=self._allowed_tool_ids(event),
             skill_cards_by_tool=self._skill_cards_by_tool(),
+            skill_manifests=svc.skills.candidate_manifests(latest_message),
         )
 
     def model_schemas(self, context: ToolExposureContext) -> list[dict[str, object]]:
@@ -73,16 +70,14 @@ class ToolCallingOrchestrator:
 
     def _skill_cards_by_tool(self) -> dict[str, list[SkillSpec]]:
         svc = self._service
-        grouped: dict[str, list[SkillSpec]] = defaultdict(list)
         if not svc.config.skills_enabled:
             return {}
+        grouped: dict[str, list[SkillSpec]] = {}
         for skill in svc.skills.list_skills():
-            if not (skill.enabled and skill.eligible and skill.dispatches_tool):
+            if not (skill.enabled and skill.eligible and not skill.validation_errors and skill.is_tool_handler):
                 continue
-            tool_id = str(skill.command_tool or "").strip().lower()
-            if tool_id:
-                grouped[tool_id].append(skill)
-        return dict(grouped)
+            grouped.setdefault(skill.handler_target, []).append(skill)
+        return grouped
 
     def _allowed_tool_ids(self, event: InboundEvent) -> set[str]:
         svc = self._service
@@ -92,26 +87,7 @@ class ToolCallingOrchestrator:
             if bool(item.get("model_callable"))
         }
         all_model_tools.discard("")
-        all_skill_bound: set[str] = set()
-        enabled_skill_bound: set[str] = set()
-        if svc.config.skills_enabled:
-            for skill in svc.skills.list_skills():
-                tool_id = str(skill.command_tool or "").strip().lower()
-                if not tool_id or skill.command_dispatch != "tool":
-                    continue
-                all_skill_bound.add(tool_id)
-                if skill.enabled and skill.eligible and skill.user_invocable:
-                    enabled_skill_bound.add(tool_id)
-        else:
-            for skill in svc.skills.list_skills():
-                tool_id = str(skill.command_tool or "").strip().lower()
-                if tool_id and skill.command_dispatch == "tool":
-                    all_skill_bound.add(tool_id)
-
         allowed = set(all_model_tools)
-        for tool_id in all_skill_bound:
-            if tool_id not in enabled_skill_bound:
-                allowed.discard(tool_id)
 
         if event.launcher_type == "group":
             bot_account_id = str(svc.config.bot_account_id or "").strip()

@@ -465,7 +465,7 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertIsNotNone(detail)
         assert detail is not None
-        self.assertEqual(detail["command_tool"], "search")
+        self.assertEqual(detail["manifest"]["handler"]["target"], "search")
         self.assertIn("markdown", detail)
 
     def test_skill_template_is_available(self) -> None:

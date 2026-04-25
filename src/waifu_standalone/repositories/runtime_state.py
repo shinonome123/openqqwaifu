@@ -239,6 +239,7 @@ class InMemoryRuntimeStateStore:
         self._members: dict[tuple[str, str], dict[str, Any]] = {}
         self._persona_members: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._assistant_aliases: dict[tuple[str, str], dict[str, Any]] = {}
+        self._skill_telemetry: list[dict[str, Any]] = []
         self._knowledge: dict[int, dict[str, Any]] = {}
         self._knowledge_id = 1
         self._lock = threading.Lock()
@@ -296,6 +297,29 @@ class InMemoryRuntimeStateStore:
                 if not _normalize_character_id(entry.get("character_id")):
                     entry["character_id"] = safe_character_id
         return migrated
+
+    def record_skill_telemetry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        event = _normalize_skill_telemetry(payload)
+        with self._lock:
+            self._skill_telemetry.append(event)
+            self._skill_telemetry = self._skill_telemetry[-5000:]
+        return dict(event)
+
+    def list_skill_telemetry(self, *, skill_id: object = "", limit: int = 200) -> list[dict[str, Any]]:
+        safe_skill_id = _normalize_string(skill_id)
+        resolved_limit = max(1, min(1000, int(limit or 200)))
+        with self._lock:
+            rows = [
+                dict(item)
+                for item in self._skill_telemetry
+                if not safe_skill_id or _normalize_string(item.get("skill_id")) == safe_skill_id
+            ]
+        rows.sort(key=lambda item: (int(item.get("created_at") or 0), int(item.get("id") or 0)), reverse=True)
+        return rows[:resolved_limit]
+
+    def skill_telemetry_summary(self, skill_id: object) -> dict[str, Any]:
+        rows = self.list_skill_telemetry(skill_id=skill_id, limit=1000)
+        return _skill_telemetry_summary_from_rows(rows)
 
     def save_assistant_alias(
         self,
@@ -1072,6 +1096,100 @@ class SqliteRuntimeStateStore:
                 run_migrations(connection)
             finally:
                 connection.close()
+
+    def record_skill_telemetry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        event = _normalize_skill_telemetry(payload)
+        with self._lock, self._session() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO skill_telemetry (
+                    trace_id, skill_id, tool_id, trigger_source, caller, status,
+                    error_code, error, latency_ms, arg_summary, result_summary,
+                    details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["trace_id"],
+                    event["skill_id"],
+                    event["tool_id"],
+                    event["trigger_source"],
+                    event["caller"],
+                    event["status"],
+                    event["error_code"],
+                    event["error"],
+                    int(event["latency_ms"]),
+                    event["arg_summary"],
+                    event["result_summary"],
+                    event["details_json"],
+                    int(event["created_at"]),
+                ),
+            )
+            event["id"] = int(cursor.lastrowid or 0)
+        return dict(event)
+
+    def list_skill_telemetry(self, *, skill_id: object = "", limit: int = 200) -> list[dict[str, Any]]:
+        safe_skill_id = _normalize_string(skill_id)
+        resolved_limit = max(1, min(1000, int(limit or 200)))
+        with self._read_session() as connection:
+            if safe_skill_id:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM skill_telemetry
+                    WHERE skill_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (safe_skill_id, resolved_limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM skill_telemetry
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (resolved_limit,),
+                ).fetchall()
+        return [_row_to_skill_telemetry(row) for row in rows]
+
+    def skill_telemetry_summary(self, skill_id: object) -> dict[str, Any]:
+        safe_skill_id = _normalize_string(skill_id)
+        if not safe_skill_id:
+            return _skill_telemetry_summary_from_rows([])
+        with self._read_session() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS calls,
+                    SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS success
+                FROM skill_telemetry
+                WHERE skill_id = ?
+                """,
+                (safe_skill_id,),
+            ).fetchone()
+            last_row = connection.execute(
+                """
+                SELECT *
+                FROM skill_telemetry
+                WHERE skill_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (safe_skill_id,),
+            ).fetchone()
+        calls = int(row["calls"] or 0) if row is not None else 0
+        success = int(row["success"] or 0) if row is not None else 0
+        failure = max(0, calls - success)
+        return {
+            "calls": calls,
+            "success": success,
+            "failure": failure,
+            "success_rate": round(success / calls, 4) if calls else 0.0,
+            "last": _row_to_skill_telemetry(last_row) if last_row is not None else {},
+            "never_succeeded": calls > 0 and success == 0,
+        }
 
     def save_assistant_alias(
         self,
@@ -2054,6 +2172,79 @@ def _row_to_assistant_alias(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
         "assistant_alias": _normalize_string(row["assistant_alias"]),
         "created_at": int(row["created_at"] or 0),
         "updated_at": int(row["updated_at"] or 0),
+    }
+
+
+def _normalize_skill_telemetry(payload: dict[str, Any]) -> dict[str, Any]:
+    details = payload.get("details")
+    if isinstance(details, dict):
+        details_json = json.dumps(details, ensure_ascii=False, separators=(",", ":"), default=str)
+    else:
+        details_json = _normalize_string(payload.get("details_json")) or "{}"
+    created_at = payload.get("created_at", payload.get("timestamp", 0))
+    try:
+        resolved_created_at = int(float(created_at or 0))
+    except (TypeError, ValueError):
+        resolved_created_at = _now()
+    if resolved_created_at <= 0:
+        resolved_created_at = _now()
+    return {
+        "id": int(payload.get("id") or 0),
+        "trace_id": _normalize_string(payload.get("trace_id")),
+        "skill_id": _normalize_string(payload.get("skill_id")) or "__unknown__",
+        "tool_id": _normalize_string(payload.get("tool_id")),
+        "trigger_source": _normalize_string(payload.get("trigger_source")) or "system",
+        "caller": _normalize_string(payload.get("caller")),
+        "status": _normalize_string(payload.get("status")) or "error",
+        "error_code": _normalize_string(payload.get("error_code")),
+        "error": _normalize_string(payload.get("error"))[:1000],
+        "latency_ms": int(payload.get("latency_ms") or 0),
+        "arg_summary": _normalize_string(payload.get("arg_summary"))[:1000],
+        "result_summary": _normalize_string(payload.get("result_summary"))[:1000],
+        "details_json": details_json,
+        "created_at": resolved_created_at,
+    }
+
+
+def _row_to_skill_telemetry(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    if row is None:
+        return {}
+    payload = {
+        "id": row["id"] if "id" in row.keys() else 0,
+        "trace_id": row["trace_id"] if "trace_id" in row.keys() else "",
+        "skill_id": row["skill_id"] if "skill_id" in row.keys() else "",
+        "tool_id": row["tool_id"] if "tool_id" in row.keys() else "",
+        "trigger_source": row["trigger_source"] if "trigger_source" in row.keys() else "",
+        "caller": row["caller"] if "caller" in row.keys() else "",
+        "status": row["status"] if "status" in row.keys() else "",
+        "error_code": row["error_code"] if "error_code" in row.keys() else "",
+        "error": row["error"] if "error" in row.keys() else "",
+        "latency_ms": row["latency_ms"] if "latency_ms" in row.keys() else 0,
+        "arg_summary": row["arg_summary"] if "arg_summary" in row.keys() else "",
+        "result_summary": row["result_summary"] if "result_summary" in row.keys() else "",
+        "details_json": row["details_json"] if "details_json" in row.keys() else "{}",
+        "created_at": row["created_at"] if "created_at" in row.keys() else 0,
+    }
+    normalized = _normalize_skill_telemetry(payload)
+    try:
+        normalized["details"] = json.loads(str(normalized.get("details_json") or "{}"))
+    except json.JSONDecodeError:
+        normalized["details"] = {}
+    return normalized
+
+
+def _skill_telemetry_summary_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    calls = len(rows)
+    success = sum(1 for row in rows if row.get("status") == "ok")
+    failure = max(0, calls - success)
+    ordered = sorted(rows, key=lambda row: (int(row.get("created_at") or 0), int(row.get("id") or 0)))
+    return {
+        "calls": calls,
+        "success": success,
+        "failure": failure,
+        "success_rate": round(success / calls, 4) if calls else 0.0,
+        "last": dict(ordered[-1]) if ordered else {},
+        "never_succeeded": calls > 0 and success == 0,
     }
 
 

@@ -192,8 +192,12 @@ process.stdin.resume();
 id: weather_bundle
 name: weather_bundle
 description: Weather bundle skill
-triggers: ["weather bundle"]
-mode: prefix
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"weather_bundle","llm_tool":false,"keywords":["weather bundle"]}
+handler: {"type":"prompt_template","target":"weather_bundle"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use tools carefully.
 """,
@@ -204,6 +208,12 @@ Use tools carefully.
 id: summary_bundle
 name: summary_bundle
 description: Claude command bundle
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"summary_bundle","llm_tool":false,"keywords":[]}
+handler: {"type":"prompt_template","target":"summary_bundle"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Summarize carefully.
 """,
@@ -268,6 +278,12 @@ Summarize carefully.
                 """---
 name: echo-bundle
 description: Minimal skill root for MCP bundle installation.
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"echo-bundle","llm_tool":false,"keywords":[]}
+handler: {"type":"prompt_template","target":"echo-bundle"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Expose MCP tools through the ClawRuntime bridge.
 """,
@@ -338,11 +354,12 @@ Expose MCP tools through the ClawRuntime bridge.
 id: runtime-echo
 name: runtime-echo
 description: Dispatch through the ClawRuntime MCP bridge.
-triggers: ["runtimeecho"]
-mode: prefix
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: echo-server__echo_text
+input_schema: {"type":"object","properties":{"input":{"type":"string"}}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"runtime-echo","llm_tool":true,"keywords":["runtimeecho"]}
+handler: {"type":"tool_id","target":"echo-server__echo_text","arg_mode":"structured"}
+policy: {"priority":9,"user_invocable":true,"risk_level":"command","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use the runtime echo tool.
 """,
@@ -415,6 +432,12 @@ Use the runtime echo tool.
                 """---
 name: native-plugin
 description: native manifest should win
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"native-plugin","llm_tool":false,"keywords":[]}
+handler: {"type":"prompt_template","target":"native-plugin"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use native plugin runtime.
 """,

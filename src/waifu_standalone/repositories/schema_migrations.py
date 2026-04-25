@@ -148,9 +148,45 @@ def _migration_002_assistant_aliases(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_003_skill_telemetry(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS skill_telemetry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL DEFAULT '',
+            skill_id TEXT NOT NULL DEFAULT '',
+            tool_id TEXT NOT NULL DEFAULT '',
+            trigger_source TEXT NOT NULL DEFAULT '',
+            caller TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            arg_summary TEXT NOT NULL DEFAULT '',
+            result_summary TEXT NOT NULL DEFAULT '',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_skill_telemetry_skill_created
+        ON skill_telemetry (skill_id, created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_skill_telemetry_status
+        ON skill_telemetry (status, created_at DESC)
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     Migration(version=1, description="baseline schema", apply=_migration_001_baseline),
     Migration(version=2, description="assistant alias state", apply=_migration_002_assistant_aliases),
+    Migration(version=3, description="skill telemetry events", apply=_migration_003_skill_telemetry),
 ]
 
 

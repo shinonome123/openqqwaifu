@@ -99,7 +99,7 @@ class MarketplaceClient:
         for source in sources:
             try:
                 source_items.append(self._search_source(source, query=query, limit=limit))
-            except Exception as exc:
+            except (RuntimeError, ValueError, TypeError, OSError) as exc:
                 errors[source.source_id] = str(exc)
         return {
             "enabled": True,

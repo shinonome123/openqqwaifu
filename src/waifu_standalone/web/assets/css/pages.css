@@ -827,15 +827,38 @@
 /* QQ login */
 .qq-login-grid {
   display: grid;
-  grid-template-columns: 1.05fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 @media (max-width: 1040px) {
   .qq-login-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.qq-login-card {
+  min-height: 330px;
+}
+
+.qq-login-card .card-header {
+  align-items: flex-start;
+}
+
+.qq-login-card .card-header > .row-tight {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 52%;
+}
+
+.qq-login-card .card-body {
+  flex: 1;
+}
+
+.qq-login-status-card .card-body,
+.qq-login-qr-card .card-body {
+  justify-content: space-between;
 }
 
 .qq-login-alert {
@@ -852,6 +875,15 @@
   border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
   background: color-mix(in srgb, var(--danger) 10%, var(--card));
   color: var(--danger);
+}
+
+.qq-login-profile-card {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 214px;
 }
 
 .qq-login-profile {
@@ -897,6 +929,24 @@
   font-size: 12px;
   color: var(--muted);
   word-break: break-word;
+}
+
+.qq-login-status-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.qq-login-switch-hint {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 20%, var(--border));
+  background: color-mix(in srgb, var(--accent-2) 8%, transparent);
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .qq-login-meta-row {
@@ -990,6 +1040,82 @@
   font-size: 12px;
   line-height: 1.6;
   color: var(--muted);
+}
+
+.qq-login-settings-card {
+  margin-top: 16px;
+}
+
+.qq-login-settings-card .card-header {
+  align-items: flex-start;
+}
+
+.qq-login-settings-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.qq-login-summary-pill {
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+}
+
+.qq-login-summary-pill.is-ok {
+  border-color: color-mix(in srgb, var(--ok) 24%, var(--border));
+  background: color-mix(in srgb, var(--ok) 8%, var(--bg-elevated));
+}
+
+.qq-login-summary-pill.is-warn {
+  border-color: color-mix(in srgb, var(--warn) 24%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-elevated));
+}
+
+.qq-login-summary-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.qq-login-summary-value {
+  display: block;
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qq-login-settings-fields {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.qq-login-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 720px) {
+  .qq-login-card .card-header > .row-tight {
+    max-width: none;
+    justify-content: flex-start;
+  }
+
+  .qq-login-settings-summary {
+    grid-template-columns: 1fr;
+  }
 }
 
 .character-preview-transcript {
