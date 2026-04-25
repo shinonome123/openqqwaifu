@@ -16,8 +16,12 @@ from waifu_standalone.app import build_default_service
 from waifu_standalone.cells.generator import Generator
 from waifu_standalone.cells.llm_clients import LLMToolCall, LLMToolResponse
 from waifu_standalone.cells.skill_registry import (
+    SkillHandlerSpec,
+    SkillManifest,
+    SkillPolicySpec,
     SkillRegistry,
     SkillSpec,
+    SkillTriggerSpec,
     build_skill_markdown_template,
     parse_skill_file,
 )
@@ -29,6 +33,35 @@ from waifu_standalone.systems.searching import SearchResult
 
 
 class SkillRegistryTests(unittest.TestCase):
+    def _manifest(
+        self,
+        *,
+        skill_id: str,
+        name: str,
+        description: str = "",
+        keywords: list[str] | None = None,
+        priority: int = 0,
+        content: str = "",
+        handler_type: str = "prompt_template",
+        handler_target: str = "",
+        llm_tool: bool = False,
+        source: str = "builtin",
+    ) -> SkillManifest:
+        return SkillManifest(
+            skill_id=skill_id,
+            name=name,
+            description=description,
+            input_schema={"type": "object", "properties": {}},
+            output_schema={"type": "object", "properties": {}},
+            trigger=SkillTriggerSpec(command=skill_id, llm_tool=llm_tool, keywords=list(keywords or [])),
+            handler=SkillHandlerSpec(type=handler_type, target=handler_target or skill_id),
+            policy=SkillPolicySpec(priority=priority),
+            default_args={},
+            metadata={},
+            content=content,
+            source=source,
+        )
+
     def _install_tool_client(
         self,
         service,
@@ -107,14 +140,12 @@ class SkillRegistryTests(unittest.TestCase):
 id: brief-mode
 name: 简洁输出
 description: 压缩回答长度
-triggers: ["简短点", "一句话"]
-mode: prefix
-priority: 6
-user-invocable: true
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: summary
-command-arg-mode: raw
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"brief-mode","llm_tool":true,"keywords":["简短点","一句话"]}
+handler: {"type":"tool_id","target":"summary","arg_mode":"raw"}
+policy: {"priority":6,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 只给结论，不要绕。
 """,
@@ -126,9 +157,8 @@ command-arg-mode: raw
             self.assertEqual(skill.skill_id, "brief-mode")
             self.assertEqual(skill.name, "简洁输出")
             self.assertEqual(skill.triggers, ["简短点", "一句话"])
-            self.assertEqual(skill.mode, "prefix")
             self.assertTrue(skill.dispatches_tool)
-            self.assertTrue(skill.disable_model_invocation)
+            self.assertFalse(skill.disable_model_invocation)
             self.assertEqual(skill.command_tool, "summary")
             self.assertIn("只给结论", skill.content)
 
@@ -140,14 +170,12 @@ command-arg-mode: raw
 id: skill-list-command
 name: 技能列表
 description: 列出当前可用技能
-triggers:
-  - 技能菜单
-  - 说说你会的技能
-mode: contains
-user-invocable: true
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: skill-list
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"skill-list-command","llm_tool":true,"keywords":["技能菜单","说说你会的技能"]}
+handler: {"type":"tool_id","target":"skill-list","arg_mode":"structured"}
+policy: {"priority":6,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 直接展示技能列表。
 """,
@@ -236,6 +264,9 @@ command-tool: skill-list
                     "read-file-command",
                     "list-files-command",
                     "search-links-command",
+                    "weather-command",
+                    "write-file-command",
+                    "exec-command",
                 },
                 skill_ids,
             )
@@ -249,6 +280,12 @@ name: openclaw_skill
 description: OpenClaw-compatible metadata.
 homepage: https://example.com/skill
 metadata: {"openclaw": {"requires": {"bins": ["uv"], "env": ["OPENQQWAIFU_TEST_KEY"]}, "homepage": "https://fallback.example.com"}}
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"openclaw","llm_tool":false,"keywords":[]}
+handler: {"type":"prompt_template","target":"openclaw"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use tools carefully.
 """,
@@ -273,6 +310,12 @@ Use tools carefully.
                 """---
 name: codex-agent
 description: Bundle style skill without explicit id.
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"codex-agent","llm_tool":false,"keywords":[]}
+handler: {"type":"prompt_template","target":"codex-agent"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use bundle-relative resources.
 """,
@@ -293,8 +336,12 @@ id: alias-skill
 name: alias_skill
 aliases: ["lookup-weather", "weather_lookup"]
 description: alias test
-triggers: ["weather alias"]
-mode: prefix
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"alias-skill","llm_tool":false,"keywords":["weather alias"]}
+handler: {"type":"prompt_template","target":"alias-skill"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use aliases.
 """,
@@ -315,6 +362,12 @@ id: gated-skill
 name: gated_skill
 description: Requires unavailable runtime bits.
 metadata: {"openclaw": {"requires": {"bins": ["definitely-missing-openqqwaifu-bin"], "env": ["OPENQQWAIFU_NEVER_SET_ENV"]}}}
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"gated-skill","llm_tool":false,"keywords":["gated"]}
+handler: {"type":"prompt_template","target":"gated-skill"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Do gated work.
 """,
@@ -328,7 +381,7 @@ Do gated work.
             assert skill is not None
             self.assertFalse(skill.eligible)
             self.assertIn("missing bin:definitely-missing-openqqwaifu-bin", skill.ineligibility_reasons)
-            self.assertEqual(registry.match("gated"), [])
+            self.assertNotIn("gated-skill", {skill.skill_id for skill in registry.candidate_manifests("gated")})
 
     def test_registry_prefers_exact_workspace_id_and_auto_binds_known_tool_skill(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -336,9 +389,16 @@ Do gated work.
             skills_dir.mkdir(parents=True, exist_ok=True)
             (skills_dir / "skill.md").write_text(
                 """---
+id: summarize
 name: summarize
 description: Summarize URLs and videos.
 metadata: {"nanobot": {"requires": {"bins": ["summarize"]}}}
+input_schema: {"type":"object","properties":{"target":{"type":"string"}},"required":["target"]}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"summarize","llm_tool":true,"keywords":["summarize"]}
+handler: {"type":"tool_id","target":"summarize","arg_mode":"structured"}
+policy: {"priority":10,"user_invocable":true,"risk_level":"safe","timeout_seconds":90,"max_output_chars":10000}
+default_args: {}
 ---
 Use summarize for URLs.
 """,
@@ -353,7 +413,6 @@ Use summarize for URLs.
             self.assertEqual(skill.skill_id, "summarize")
             self.assertEqual(skill.command_dispatch, "tool")
             self.assertEqual(skill.command_tool, "summarize")
-            self.assertTrue(skill.auto_bound)
             self.assertIn("summarize", skill.triggers)
             self.assertTrue(skill.eligible)
 
@@ -384,7 +443,7 @@ Use summarize for URLs.
         service, _ = build_default_service()
         client = self._install_tool_client(
             service,
-            tool_name="image",
+            tool_name="image-command",
             arguments={"prompt": "warm spring sky"},
             final_text="图片生成好了。",
         )
@@ -406,9 +465,9 @@ Use summarize for URLs.
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.images, ["generated://warm spring sky"])
-        self.assertIn("image", client.seen_tools)
+        self.assertIn("image-command", client.seen_tools)
         self.assertTrue(names)
-        self.assertNotIn("直接生图", names)
+        self.assertIn("直接生图", names)
 
     def test_disabling_image_command_stops_direct_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -433,7 +492,7 @@ Use summarize for URLs.
         service, _ = build_default_service()
         client = self._install_tool_client(
             service,
-            tool_name="search",
+            tool_name="search-command",
             arguments={"query": "北京天气"},
             final_text="我帮你查了一下，北京天气：晴，最高温 26 度。",
         )
@@ -455,17 +514,17 @@ Use summarize for URLs.
         assert reply is not None
         self.assertIn("我帮你查了一下", reply.text)
         self.assertIn("北京天气", reply.text)
-        self.assertIn("search", client.seen_tools)
+        self.assertIn("search-command", client.seen_tools)
         session = service.memory.load("783190298", "person")
         tool_calls = session.metadata.get("last_tool_calls", [])
-        self.assertEqual(tool_calls[0]["tool_id"], "search")
+        self.assertEqual(tool_calls[0]["tool_id"], "search-command")
         self.assertEqual(tool_calls[0]["status"], "ok")
 
     def test_direct_summary_skill_dispatches_tool(self) -> None:
         service, _ = build_default_service()
         self._install_tool_client(
             service,
-            tool_name="summary",
+            tool_name="summary-command",
             arguments={},
             final_text="我先帮你收一下重点：今天想把页面做得更轻一点。",
         )
@@ -497,7 +556,7 @@ Use summarize for URLs.
         service, _ = build_default_service()
         self._install_tool_client(
             service,
-            tool_name="skill-list",
+            tool_name="skill-list-command",
             arguments={},
             final_text="我目前掌握的技能都列出来了。",
         )
@@ -522,7 +581,7 @@ Use summarize for URLs.
         service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
         self._install_tool_client(
             service,
-            tool_name="skill-list",
+            tool_name="skill-list-command",
             arguments={},
             final_text="好呀，我把现在能做的事情摊开给你看。",
         )
@@ -540,14 +599,15 @@ Use summarize for URLs.
         self.assertIsNotNone(reply)
         assert reply is not None
         self.assertIn("摊开给你看", reply.text)
-        self.assertIn("```text", reply.text)
-        self.assertIn("直接生图", reply.text)
+        session = service.memory.load("783190298", "person")
+        tool_calls = session.metadata.get("last_tool_calls", [])
+        self.assertEqual(tool_calls[0]["tool_id"], "skill-list-command")
 
     def test_tool_orchestrator_prefers_summarize_for_url_summary(self) -> None:
         service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp(), llm=LLMConfig(enabled=True)))
         self._install_tool_client(
             service,
-            tool_name="summarize",
+            tool_name="summarize-command",
             arguments={"target": "https://example.com/post"},
             final_text="我已经替你看过这个网页了，核心意思是：这是网页内容摘要。",
         )
@@ -581,7 +641,7 @@ Use summarize for URLs.
         session = service.memory.load("783190298", "person")
         active_skills = session.metadata.get("active_skills", [])
         self.assertTrue(active_skills)
-        self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
+        self.assertTrue(any(item.get("id") == "summarize-command" for item in active_skills))
 
     def test_tool_orchestrator_clarifies_ambiguous_skill_request(self) -> None:
         class _FakeToolClient:
@@ -640,30 +700,24 @@ Use summarize for URLs.
             sender_name="tester",
             segments=[MessageSegment(kind="text", text="今天怎么样")],
         )
-        visible_skill = SkillSpec(
+        visible_skill = self._manifest(
             skill_id="freshness-check",
             name="时效性核验",
             description="提醒时效性话题需要先核验",
-            triggers=["今天"],
-            aliases=[],
-            mode="contains",
+            keywords=["今天"],
             priority=8,
             content="先提醒对方这类内容最好核验。",
-            source="builtin",
         )
-        hidden_tool_skill = SkillSpec(
+        hidden_tool_skill = self._manifest(
             skill_id="search-command",
             name="联网搜索",
             description="直接调用搜索工具",
-            triggers=["搜一下"],
-            aliases=[],
-            mode="prefix",
+            keywords=["搜一下"],
             priority=12,
             content="直接调用搜索工具。",
-            source="builtin",
-            disable_model_invocation=True,
-            command_dispatch="tool",
-            command_tool="search",
+            handler_type="tool_id",
+            handler_target="search",
+            llm_tool=True,
         )
 
         prompt = generator._build_chat_query(
@@ -687,6 +741,53 @@ Use summarize for URLs.
         self.assertIn("时效性核验", prompt)
         self.assertIn("先提醒对方这类内容最好核验。", prompt)
         self.assertNotIn("联网搜索", prompt)
+
+    def test_generator_caps_prompt_visible_skill_block_by_config(self) -> None:
+        generator = Generator(AppConfig(max_active_skills=1))
+        session = SessionMemory(launcher_id="1", launcher_type="person")
+        event = InboundEvent(
+            launcher_id="1",
+            launcher_type="person",
+            sender_id="2",
+            sender_name="tester",
+            segments=[MessageSegment(kind="text", text="今天怎么样")],
+        )
+        high_priority_skill = self._manifest(
+            skill_id="freshness-check",
+            name="时效性核验",
+            description="高优先级能力",
+            priority=8,
+            content="高优先级内容",
+        )
+        low_priority_skill = self._manifest(
+            skill_id="image-handoff",
+            name="生图交付语气",
+            description="低优先级能力",
+            priority=4,
+            content="低优先级内容",
+        )
+
+        prompt = generator._build_chat_query(
+            event,
+            session,
+            EmotionState(),
+            card=generator._cards.load("person", session),
+            assistant_name="琉璃",
+            address="tester",
+            search_hint="",
+            search_context="",
+            conversation_view="",
+            memory_hints=[],
+            speaker_notes=[],
+            analysis_hint="",
+            latest_message="今天怎么样",
+            active_skills=[low_priority_skill, high_priority_skill],
+        )
+
+        self.assertIn("时效性核验", prompt)
+        self.assertIn("高优先级内容", prompt)
+        self.assertNotIn("生图交付语气", prompt)
+        self.assertNotIn("低优先级内容", prompt)
 
     def test_story_mode_prompt_pins_visible_reply_language(self) -> None:
         generator = Generator(AppConfig(story_mode=True, story_detail_level=2))
@@ -737,7 +838,7 @@ Use summarize for URLs.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="summarize",
+                tool_name="summarize-command",
                 arguments={"target": "https://www.youtube.com/watch?v=DmFdxaLgD70"},
                 final_text="按 summarize 技能真的跑：这是视频的真实摘要。",
             )
@@ -771,7 +872,7 @@ Use summarize for URLs.
             session = service.memory.load("783190298", "person")
             active_skills = session.metadata.get("active_skills", [])
             self.assertTrue(active_skills)
-            self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
+            self.assertTrue(any(item.get("id") == "summarize-command" for item in active_skills))
 
     def test_explicit_named_summarize_skill_refuses_when_transcript_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -789,7 +890,7 @@ Use summarize for URLs.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="summarize",
+                tool_name="summarize-command",
                 arguments={"target": "https://www.youtube.com/watch?v=DmFdxaLgD70"},
                 final_text="这次没有拿到这个视频的可用字幕或正文，所以不能假装总结。",
             )
@@ -834,7 +935,7 @@ Use summarize for URLs.
         aliases_by_id = {item["id"]: set(item.get("aliases", [])) for item in tools["items"]}
 
         self.assertEqual(tools["count"], 17)
-        self.assertEqual(tools["alias_count"], 73)
+        self.assertEqual(tools["alias_count"], 66)
         self.assertEqual(tools["model_callable_count"], 16)
         self.assertSetEqual(
             tool_ids,
@@ -860,31 +961,31 @@ Use summarize for URLs.
         )
         self.assertSetEqual(
             aliases_by_id["search"],
-            {"web_search", "internet_search", "search_web", "web_lookup", "lookup_web", "browser_search"},
+            {"web-search", "internet-search", "search-web", "web-lookup", "lookup-web", "browser-search"},
         )
         self.assertSetEqual(
             aliases_by_id["image"],
-            {"image_generate", "generate_image", "create_image", "draw_image", "text_to_image"},
+            {"image-generate", "generate-image", "create-image", "draw-image", "text-to-image"},
         )
         self.assertSetEqual(
             aliases_by_id["image-caption"],
-            {"image_caption", "image_handoff", "deliver_image", "image_delivery", "handoff_image"},
+            {"image-handoff", "deliver-image", "image-delivery", "handoff-image"},
         )
         self.assertSetEqual(
             aliases_by_id["read-file"],
-            {"read", "read_file", "file_read", "open_file", "cat_file", "read_text_file"},
+            {"read", "file-read", "open-file", "cat-file", "read-text-file"},
         )
         self.assertSetEqual(
             aliases_by_id["web-fetch"],
-            {"web_fetch", "fetch_url", "fetch", "open_url", "read_url", "fetch_page", "fetch_webpage", "http_get"},
+            {"fetch-url", "fetch", "open-url", "read-url", "fetch-page", "fetch-webpage", "http-get"},
         )
         self.assertSetEqual(
             aliases_by_id["search-links"],
-            {"search_sources", "search_links", "sources", "links", "source_links", "references", "citations", "related_links"},
+            {"search-sources", "sources", "links", "source-links", "references", "citations", "related-links"},
         )
         self.assertSetEqual(
             aliases_by_id["weather"],
-            {"forecast", "weather_lookup", "weather_check", "weather_forecast"},
+            {"forecast", "weather-lookup", "weather-check", "weather-forecast"},
         )
 
     def test_skills_panel_exposes_normalized_capabilities_and_safety(self) -> None:
@@ -919,7 +1020,7 @@ Use summarize for URLs.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="summarize",
+                tool_name="summarize-command",
                 arguments={"target": "https://example.com/post"},
                 final_text="slash skill execution completed.",
             )
@@ -969,7 +1070,7 @@ Use summarize for URLs and files.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="summarize",
+                tool_name="summarize-command",
                 arguments={"target": str(document)},
                 final_text="按 summarize 技能真的跑：without requiring the external summarize CLI.",
             )
@@ -1008,7 +1109,7 @@ Use wttr.in to answer weather questions.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="weather",
+                tool_name="weather-command",
                 arguments={"location": "Shanghai"},
                 final_text="Shanghai现在 18°C，多云。明天，晴，11 到 22°C。",
             )
@@ -1083,31 +1184,20 @@ Use wttr.in to answer weather questions.
             session = service.memory.load("783190298", "person")
             active_skills = session.metadata.get("active_skills", [])
             self.assertTrue(active_skills)
-            self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
+            self.assertTrue(any(item.get("id") == "weather-command" for item in active_skills))
 
     def test_weather_skill_auto_binds_chinese_trigger_and_extracts_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            skills_dir = Path(tmpdir) / "skills"
-            skills_dir.mkdir(parents=True, exist_ok=True)
-            (skills_dir / "SKILL.md").write_text(
-                """---
-name: weather
-description: Get weather for any location.
----
-Use wttr.in to answer weather questions.
-""",
-                encoding="utf-8",
-            )
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="weather",
+                tool_name="weather-command",
                 arguments={"location": "上海"},
                 final_text="Shanghai现在 23°C，晴。",
             )
-            weather = service.get_skill_detail("weather")
+            weather = service.get_skill_detail("weather-command")
             assert weather is not None
-            self.assertIn("天气", weather["triggers"])
+            self.assertIn("天气", weather["manifest"]["trigger"]["keywords"])
 
             raw = """
 {
@@ -1178,7 +1268,7 @@ Use wttr.in to answer weather questions.
             session = service.memory.load("weather-zh", "person")
             active_skills = session.metadata.get("active_skills", [])
             self.assertTrue(active_skills)
-            self.assertTrue(any(item.get("id") == "freshness-check" for item in active_skills))
+            self.assertTrue(any(item.get("id") == "weather-command" for item in active_skills))
 
     def test_openclaw_tool_alias_dispatches_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1189,11 +1279,12 @@ Use wttr.in to answer weather questions.
 id: lookup-command
 name: lookup
 description: OpenClaw-style search tool alias.
-triggers: ["lookup"]
-mode: prefix
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: web_search
+input_schema: {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"lookup-command","llm_tool":true,"keywords":["lookup"]}
+handler: {"type":"tool_id","target":"web_search","arg_mode":"structured"}
+policy: {"priority":9,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use web_search when the user asks to look something up.
 """,
@@ -1202,7 +1293,7 @@ Use web_search when the user asks to look something up.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="search",
+                tool_name="lookup-command",
                 arguments={"query": "Beijing weather"},
                 final_text="Beijing Weather: sunny",
             )
@@ -1235,15 +1326,16 @@ Use web_search when the user asks to look something up.
             skills_dir = Path(tmpdir) / "skills"
             skills_dir.mkdir(parents=True, exist_ok=True)
             (skills_dir / "read.md").write_text(
-                f"""---
+                """---
 id: read-command
 name: readnote
 description: Read a local note.
-triggers: ["readnote"]
-mode: prefix
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: read
+input_schema: {"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"read-command","llm_tool":true,"keywords":["readnote"]}
+handler: {"type":"tool_id","target":"read","arg_mode":"structured"}
+policy: {"priority":9,"user_invocable":true,"risk_level":"filesystem","timeout_seconds":30,"max_output_chars":6000,"requires_authorization":true}
+default_args: {}
 ---
 Read files with the read alias.
 """,
@@ -1252,7 +1344,7 @@ Read files with the read alias.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="read-file",
+                tool_name="read-command",
                 arguments={"path": str(target)},
                 final_text="我读到了文件。",
             )
@@ -1299,7 +1391,7 @@ Read files with the read alias.
                 if self.calls == 1:
                     self.seen_tools = {item["name"] for item in tools}
                     return LLMToolResponse(
-                        tool_calls=[LLMToolCall(call_id="call_1", tool_name="search", arguments={"query": "北京天气"})],
+                        tool_calls=[LLMToolCall(call_id="call_1", tool_name="search-command", arguments={"query": "北京天气"})],
                         assistant_message={
                             "role": "assistant",
                             "content": "",
@@ -1308,7 +1400,7 @@ Read files with the read alias.
                                     "id": "call_1",
                                     "type": "function",
                                     "function": {
-                                        "name": "search",
+                                        "name": "search-command",
                                         "arguments": '{"query":"北京天气"}',
                                     },
                                 }
@@ -1341,7 +1433,7 @@ Read files with the read alias.
         self.assertIsNotNone(reply)
         assert reply is not None
         self.assertIn("北京今天晴", reply.text)
-        self.assertIn("search", service.generator._dify_client.seen_tools)  # type: ignore[attr-defined]
+        self.assertIn("search-command", service.generator._dify_client.seen_tools)  # type: ignore[attr-defined]
         self.assertEqual(service.generator._dify_client.last_tool_message["role"], "tool")  # type: ignore[attr-defined]
 
     def test_generator_tool_loop_executes_registered_search_tool(self) -> None:
@@ -1372,7 +1464,7 @@ Read files with the read alias.
                 if self.calls == 1:
                     self.seen_tools = {item["name"] for item in tools}
                     return LLMToolResponse(
-                        tool_calls=[LLMToolCall(call_id="call_1", tool_name="search", arguments={"query": "北京天气"})],
+                        tool_calls=[LLMToolCall(call_id="call_1", tool_name="search-command", arguments={"query": "北京天气"})],
                         assistant_message={
                             "role": "assistant",
                             "content": "",
@@ -1381,7 +1473,7 @@ Read files with the read alias.
                                     "id": "call_1",
                                     "type": "function",
                                     "function": {
-                                        "name": "search",
+                                        "name": "search-command",
                                         "arguments": '{"query":"北京天气"}',
                                     },
                                 }
@@ -1414,7 +1506,7 @@ Read files with the read alias.
         self.assertIsNotNone(reply)
         assert reply is not None
         self.assertIn("北京今天晴", reply.text)
-        self.assertIn("search", service.generator._dify_client.seen_tools)  # type: ignore[attr-defined]
+        self.assertIn("search-command", service.generator._dify_client.seen_tools)  # type: ignore[attr-defined]
         self.assertEqual(service.generator._dify_client.last_tool_message["role"], "tool")  # type: ignore[attr-defined]
 
     def test_skill_dispatch_supports_json_command_arg_mode(self) -> None:
@@ -1427,12 +1519,12 @@ Read files with the read alias.
 id: json-write
 name: json_write
 description: write file through json args
-triggers: ["jsonwrite"]
-mode: prefix
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: write-file
-command-arg-mode: json
+input_schema: {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"json-write","llm_tool":true,"keywords":["jsonwrite"]}
+handler: {"type":"tool_id","target":"write-file","arg_mode":"json"}
+policy: {"priority":9,"user_invocable":true,"risk_level":"filesystem","timeout_seconds":30,"max_output_chars":6000,"requires_authorization":true}
+default_args: {}
 ---
 Write a file using structured arguments.
 """,
@@ -1441,7 +1533,7 @@ Write a file using structured arguments.
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
             self._install_tool_client(
                 service,
-                tool_name="write-file",
+                tool_name="json-write",
                 arguments={"path": target.as_posix(), "content": "json mode works"},
                 final_text="已写入文件。",
             )
@@ -1477,12 +1569,12 @@ Write a file using structured arguments.
 id: json-write
 name: json_write
 description: write file through json args
-triggers: ["jsonwrite"]
-mode: prefix
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: write-file
-command-arg-mode: json
+input_schema: {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"json-write","llm_tool":true,"keywords":["jsonwrite"]}
+handler: {"type":"tool_id","target":"write-file","arg_mode":"json"}
+policy: {"priority":9,"user_invocable":true,"risk_level":"filesystem","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Write a file using structured arguments.
 """,
@@ -1499,7 +1591,7 @@ Write a file using structured arguments.
             )
             self._install_tool_client(
                 service,
-                tool_name="write-file",
+                tool_name="json-write",
                 arguments={"path": target.as_posix(), "content": "blocked"},
                 final_text="路径超出允许范围。",
             )
@@ -1567,8 +1659,12 @@ Write a file using structured arguments.
 id: weather_bundle
 name: weather_bundle
 description: Bundle weather skill.
-triggers: ["weather bundle"]
-mode: prefix
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"weather_bundle","llm_tool":false,"keywords":["weather bundle"]}
+handler: {"type":"prompt_template","target":"weather_bundle"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use tools to answer weather prompts.
 """,
@@ -1579,6 +1675,12 @@ Use tools to answer weather prompts.
 id: summary_bundle
 name: summary_bundle
 description: Bundle summary skill.
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"summary_bundle","llm_tool":false,"keywords":[]}
+handler: {"type":"prompt_template","target":"summary_bundle"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Summarize content carefully.
 """,
@@ -1602,6 +1704,12 @@ Summarize content carefully.
                 """---
 name: codex-agent
 description: Preserve bundle resources.
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"codex-agent","llm_tool":false,"keywords":[]}
+handler: {"type":"prompt_template","target":"codex-agent"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 See knowledge/features.md and hooks/start_codex.sh.
 """,
@@ -1625,9 +1733,16 @@ See knowledge/features.md and hooks/start_codex.sh.
             bundle_root.mkdir(parents=True, exist_ok=True)
             (bundle_root / "SKILL.md").write_text(
                 """---
+id: summarize
 name: summarize
 description: Summarize URLs and local files.
 metadata: {"nanobot": {"requires": {"bins": ["summarize"]}}}
+input_schema: {"type":"object","properties":{"target":{"type":"string"}},"required":["target"]}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"summarize","llm_tool":true,"keywords":["summarize"]}
+handler: {"type":"tool_id","target":"summarize","arg_mode":"structured"}
+policy: {"priority":10,"user_invocable":true,"risk_level":"safe","timeout_seconds":90,"max_output_chars":10000}
+default_args: {}
 ---
 Use summarize for URLs.
 """,
@@ -1642,9 +1757,8 @@ Use summarize for URLs.
             self.assertEqual(result["ready_count"], 1)
             self.assertIsNotNone(detail)
             assert detail is not None
-            self.assertTrue(detail["directly_usable"])
-            self.assertTrue(detail["auto_bound"])
-            self.assertEqual(detail["command_tool"], "summarize")
+            self.assertEqual(detail["status"], "ready")
+            self.assertEqual(detail["manifest"]["handler"]["target"], "summarize")
 
 
 if __name__ == "__main__":

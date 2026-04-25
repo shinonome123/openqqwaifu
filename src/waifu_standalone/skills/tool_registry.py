@@ -77,6 +77,7 @@ class ToolExposureContext:
     assistant_name: str = ""
     allowed_tool_ids: set[str] | None = None
     skill_cards_by_tool: dict[str, list[SkillSpec]] = field(default_factory=dict)
+    skill_manifests: list[SkillSpec] = field(default_factory=list)
 
 
 ToolExposurePolicy = Callable[[ToolExposureContext], bool]
@@ -238,6 +239,11 @@ class ToolRegistry:
         return await asyncio.to_thread(spec.handler, invocation)
 
     def execute_model(self, tool_id: str, invocation: ToolInvocation) -> ToolExecutionResult:
+        skill = _manifest_for_tool_call(tool_id, invocation.active_skills)
+        if skill is not None:
+            from .executor import SkillExecutor
+
+            return SkillExecutor(self).run(skill, invocation)
         spec = self.get(tool_id)
         if spec is None:
             return ToolExecutionResult(error=f"tool is not registered: {tool_id}")
@@ -246,6 +252,11 @@ class ToolRegistry:
         return spec.model_handler(invocation)
 
     async def aexecute_model(self, tool_id: str, invocation: ToolInvocation) -> ToolExecutionResult:
+        skill = _manifest_for_tool_call(tool_id, invocation.active_skills)
+        if skill is not None:
+            from .executor import SkillExecutor
+
+            return await SkillExecutor(self).arun(skill, invocation)
         spec = self.get(tool_id)
         if spec is None:
             return ToolExecutionResult(error=f"tool is not registered: {tool_id}")
@@ -259,8 +270,33 @@ class ToolRegistry:
 
     def model_schemas(self, context: ToolExposureContext | None = None) -> list[dict[str, object]]:
         items = []
+        skill_bound_tool_ids: set[str] = set()
+        if context is not None and context.skill_manifests:
+            for skill in sorted(context.skill_manifests, key=lambda item: (-item.priority, item.name.lower())):
+                if not skill.model_visible or not skill.is_tool_handler:
+                    continue
+                if context.allowed_tool_ids is not None and skill.handler_target not in context.allowed_tool_ids:
+                    continue
+                tool = self.get(skill.handler_target)
+                if tool is None or not tool.model_callable:
+                    continue
+                if tool.exposure_policy is not None and not tool.exposure_policy(context):
+                    continue
+                skill_bound_tool_ids.add(tool.tool_id)
+                description = _description_with_skill_manifest(tool.description or tool.name, skill)
+                items.append(
+                    {
+                        "name": skill.skill_id,
+                        "description": description,
+                        "parameters": dict(skill.input_schema or tool.parameters or _default_parameters_schema()),
+                    }
+                )
         for tool in sorted(self._tools.values(), key=lambda item: item.name.lower()):
             if not tool.model_callable:
+                continue
+            if context is not None and tool.tool_id in context.skill_cards_by_tool:
+                continue
+            if tool.tool_id in skill_bound_tool_ids:
                 continue
             if context is not None:
                 if context.allowed_tool_ids is not None and tool.tool_id not in context.allowed_tool_ids:
@@ -317,3 +353,25 @@ def _description_with_skill_cards(description: str, skill_cards: list[SkillSpec]
             summary = f"{summary} 约束：{content[:240]}"
         lines.append(f"- {skill.name} ({skill.skill_id}): {summary}")
     return "\n".join(line for line in lines if line).strip()
+
+
+def _description_with_skill_manifest(description: str, skill: SkillSpec) -> str:
+    lines = [str(description or "").strip()]
+    lines.append(f"Skill: {skill.name} ({skill.skill_id})")
+    if skill.description:
+        lines.append(skill.description)
+    if skill.content:
+        lines.append("执行策略：" + " ".join(str(skill.content).split())[:500])
+    if skill.keywords:
+        lines.append("相关表达：" + " / ".join(skill.keywords[:8]))
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _manifest_for_tool_call(tool_id: str, active_skills: list[SkillSpec]) -> SkillSpec | None:
+    target = str(tool_id or "").strip()
+    if not target:
+        return None
+    for skill in active_skills:
+        if skill.skill_id == target:
+            return skill
+    return None

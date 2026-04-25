@@ -1,15 +1,13 @@
 ---
 id: search-command
 name: 联网搜索
-description: 当用户明确让你查一下、搜一下时，直接调用联网搜索工具。
-triggers: ["搜一下", "查一下", "search", "搜索"]
-aliases: ["search", "web_search", "lookup", "查资料", "联网搜索"]
-mode: prefix
-priority: 12
-user-invocable: true
-disable-model-invocation: true
-command-dispatch: tool
-command-tool: search
-command-arg-mode: raw
+description: 当用户需要查询事实、实时信息、资料或来源时，调用联网搜索工具。
+input_schema: {"type":"object","properties":{"query":{"type":"string","description":"要检索的问题或关键词"}},"required":["query"]}
+output_schema: {"type":"object","properties":{"text":{"type":"string"},"metadata":{"type":"object"}}}
+trigger: {"command":"search-command","llm_tool":true,"keywords":["搜一下","查一下","search","搜索","最新","新闻","价格","刚刚"]}
+handler: {"type":"tool_id","target":"search","arg_mode":"structured"}
+policy: {"priority":12,"user_invocable":true,"risk_level":"safe","timeout_seconds":45,"max_output_chars":8000}
+default_args: {}
+metadata: {"aliases":["search","web_search","lookup","查资料","联网搜索"]}
 ---
-当用户明确要求你去查时，直接走联网检索，不要先绕回普通聊天。
+当用户需要你查询外部事实或实时信息时，调用联网检索，不要凭空回答。

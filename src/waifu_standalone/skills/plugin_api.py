@@ -6,6 +6,7 @@ from importlib.metadata import EntryPoint, entry_points as discover_entry_points
 from typing import Any, Iterable
 
 from .registry import SkillRegistry, SkillSpec, build_skill_markdown_template
+from .telemetry import record_skill_error_event
 from .tool_registry import (
     AsyncModelToolHandler,
     AsyncToolHandler,
@@ -120,6 +121,13 @@ def load_tool_plugins(
         try:
             entry.load()(ctx)
             loaded.append(name)
-        except Exception:
+        except Exception as exc:
             _LOGGER.exception("plugin %s failed to load", name or "<unnamed>")
+            record_skill_error_event(
+                skill_id=f"plugin:{name or 'unnamed'}",
+                error_code="plugin_load_failed",
+                message=str(exc),
+                source="plugin_api",
+                details={"entry_point": name or ""},
+            )
     return loaded

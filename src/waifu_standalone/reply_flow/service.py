@@ -56,8 +56,21 @@ class ReplyFlowService:
         if repeat_reply is not None:
             return await svc.emitter.aemit(event, repeat_reply, assistant_name=assistant_name)
 
-        active_skills = svc.tool_orchestrator.prompt_skill_cards()
+        active_skills = svc.tool_orchestrator.prompt_skill_cards(latest_message)
         await svc._store_active_skills_async(session, active_skills)
+        explicit_skill = svc.dispatcher.resolve_explicit_skill_request(latest_message)
+        if explicit_skill is not None:
+            skill, raw_args = explicit_skill
+            return await svc.dispatcher.adispatch_explicit_skill(
+                event,
+                session,
+                skill=skill,
+                raw_args=raw_args,
+                address=address,
+                assistant_name=assistant_name,
+                active_skills=active_skills,
+                background_image_delivery=svc.config.background_image_delivery,
+            )
         tool_context = svc.tool_orchestrator.exposure_context(
             event,
             session,

@@ -62,6 +62,17 @@ class _FakeNapCatLoginBridge:
         return "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
 
 
+class _CapturingLiveOutboundPort:
+    def __init__(self) -> None:
+        self.sent = []
+
+    def send(self, message):  # type: ignore[no-untyped-def]
+        self.sent.append(message)
+
+    async def send_async(self, message):  # type: ignore[no-untyped-def]
+        self.sent.append(message)
+
+
 class _CoordinatedUserSaveStore(InMemoryStore):
     def __init__(self, target_character_id: str, target_launcher_id: str, target_launcher_type: str) -> None:
         super().__init__()
@@ -2404,6 +2415,8 @@ class WaifuServiceTests(unittest.TestCase):
                 qq_sidecar=QQSidecarConfig(outbound_base_url="http://127.0.0.1:3000"),
             )
             service, _ = build_runtime_service(config)
+            outbound = _CapturingLiveOutboundPort()
+            service.outbound = outbound
 
             result = service.handle_event(
                 InboundEvent(
@@ -2418,6 +2431,7 @@ class WaifuServiceTests(unittest.TestCase):
             self.assertIsNotNone(result)
             assert result is not None
             self.assertIn("AI 工具编排模型还没连上", result.text)
+            self.assertEqual(len(outbound.sent), 1)
 
     def test_live_runtime_service_suppresses_local_fallback_on_provider_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

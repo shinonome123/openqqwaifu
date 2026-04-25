@@ -7,17 +7,20 @@ import re
 import shutil
 import sys
 import time
+import hashlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from ..config import AppConfig
 from .tool_aliases import (
-    SELF_HOSTED_TOOL_IDS,
     SELF_HOSTED_TOOL_TRIGGERS,
+    ToolBindingError,
     normalize_tool_like_name,
+    reload_tool_bindings,
     resolve_compatible_tool_id,
 )
+from .telemetry import record_skill_error_event
 
 _WORKSPACE_BUNDLE_ROOTS: tuple[str, ...] = (
     "skills",
@@ -26,98 +29,234 @@ _WORKSPACE_BUNDLE_ROOTS: tuple[str, ...] = (
 )
 
 
+_LEGACY_SKILL_KEYS: set[str] = {
+    "triggers",
+    "mode",
+    "disable-model-invocation",
+    "command-dispatch",
+    "command-tool",
+    "command-arg-mode",
+}
+
+_DANGEROUS_TOOL_IDS: set[str] = {"write-file", "exec-command"}
+
+
+class SkillManifestError(ValueError):
+    def __init__(self, code: str, message: str, *, source: str = "") -> None:
+        super().__init__(message)
+        self.code = str(code or "invalid_skill_manifest")
+        self.source = str(source or "")
+
+
 @dataclass(slots=True)
-class SkillSpec:
+class SkillTriggerSpec:
+    command: str = ""
+    llm_tool: bool = False
+    keywords: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "command": self.command,
+            "llm_tool": self.llm_tool,
+            "keywords": list(self.keywords),
+        }
+
+
+@dataclass(slots=True)
+class SkillHandlerSpec:
+    type: str
+    target: str = ""
+    arg_mode: str = "structured"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "type": self.type,
+            "target": self.target,
+            "arg_mode": self.arg_mode,
+        }
+
+
+@dataclass(slots=True)
+class SkillPolicySpec:
+    priority: int = 0
+    user_invocable: bool = True
+    risk_level: str = "safe"
+    timeout_seconds: float = 30.0
+    max_output_chars: int = 6000
+    requires_authorization: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "priority": self.priority,
+            "user_invocable": self.user_invocable,
+            "risk_level": self.risk_level,
+            "timeout_seconds": self.timeout_seconds,
+            "max_output_chars": self.max_output_chars,
+            "requires_authorization": self.requires_authorization,
+        }
+
+
+@dataclass(slots=True)
+class SkillManifest:
     skill_id: str
     name: str
     description: str
-    triggers: list[str]
-    aliases: list[str]
-    mode: str
-    priority: int
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    trigger: SkillTriggerSpec
+    handler: SkillHandlerSpec
+    policy: SkillPolicySpec
+    default_args: dict[str, Any]
+    metadata: dict[str, Any]
     content: str
     source: str
     source_kind: str = "workspace"
     enabled: bool = True
-    user_invocable: bool = True
-    disable_model_invocation: bool = False
-    command_dispatch: str = ""
-    command_tool: str = ""
-    command_arg_mode: str = "raw"
-    homepage: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-    auto_bound: bool = False
     eligible: bool = True
     ineligibility_reasons: list[str] = field(default_factory=list)
+    validation_errors: list[dict[str, str]] = field(default_factory=list)
+    sha256: str = ""
+    last_execution: dict[str, object] | None = None
 
-    def matches(self, text: str) -> bool:
-        if not self.enabled or not self.eligible:
-            return False
-        normalized_text = str(text or "").strip()
-        if not normalized_text or not self.triggers:
-            return False
-        lowered_text = normalized_text.lower()
-        for trigger in self.triggers:
-            lowered_trigger = str(trigger or "").strip().lower()
-            if not lowered_trigger:
-                continue
-            if self.mode == "prefix":
-                if lowered_text.startswith(lowered_trigger):
-                    return True
-            elif lowered_trigger in lowered_text:
-                return True
-        return False
+    @property
+    def priority(self) -> int:
+        return int(self.policy.priority)
 
-    def extracts_args(self, text: str) -> str:
-        normalized_text = str(text or "").strip()
-        if not normalized_text:
-            return ""
-        lowered_text = normalized_text.lower()
-        if self.mode == "prefix":
-            for trigger in self.triggers:
-                raw_trigger = str(trigger or "").strip()
-                lowered_trigger = raw_trigger.lower()
-                if lowered_trigger and lowered_text.startswith(lowered_trigger):
-                    return normalized_text[len(raw_trigger) :].lstrip(" ：:,-")
-        return normalized_text
+    @property
+    def user_invocable(self) -> bool:
+        return bool(self.policy.user_invocable)
+
+    @property
+    def command(self) -> str:
+        return self.trigger.command or self.skill_id
+
+    @property
+    def keywords(self) -> list[str]:
+        return list(self.trigger.keywords)
+
+    @property
+    def aliases(self) -> list[str]:
+        return _coerce_str_list(self.metadata.get("aliases"))
+
+    @property
+    def triggers(self) -> list[str]:
+        return list(self.trigger.keywords)
+
+    @property
+    def mode(self) -> str:
+        return "contains"
+
+    @property
+    def homepage(self) -> str:
+        return str(self.metadata.get("homepage", "") or "").strip()
+
+    @property
+    def handler_type(self) -> str:
+        return self.handler.type
+
+    @property
+    def handler_target(self) -> str:
+        return self.handler.target
+
+    @property
+    def command_tool(self) -> str:
+        return self.handler.target if self.handler.type == "tool_id" else ""
+
+    @command_tool.setter
+    def command_tool(self, value: str) -> None:
+        if self.handler.type == "tool_id":
+            self.handler.target = str(value or "").strip().lower()
+
+    @property
+    def command_dispatch(self) -> str:
+        return "tool" if self.handler.type == "tool_id" else self.handler.type
+
+    @property
+    def command_arg_mode(self) -> str:
+        return self.handler.arg_mode
+
+    @property
+    def is_tool_handler(self) -> bool:
+        return self.handler.type == "tool_id" and bool(self.handler.target)
+
+    @property
+    def is_prompt_policy(self) -> bool:
+        return self.handler.type == "prompt_template"
 
     @property
     def dispatches_tool(self) -> bool:
-        return self.enabled and self.eligible and self.command_dispatch == "tool" and bool(self.command_tool)
+        return self.is_tool_handler
 
     @property
     def prompt_visible(self) -> bool:
-        return self.enabled and self.eligible and not self.disable_model_invocation
+        return self.is_prompt_policy and self.enabled and self.eligible
+
+    @property
+    def disable_model_invocation(self) -> bool:
+        return not bool(self.trigger.llm_tool)
+
+    @property
+    def model_visible(self) -> bool:
+        return self.enabled and self.eligible and self.trigger.llm_tool
+
+    @property
+    def status(self) -> str:
+        if self.validation_errors:
+            return "invalid"
+        if not self.enabled:
+            return "disabled"
+        if not self.eligible:
+            return "ineligible"
+        return "ready"
+
+    def keyword_score(self, text: str) -> int:
+        normalized = _normalize_lookup_key(text)
+        if not normalized:
+            return 0
+        score = 0
+        for keyword in self.keywords:
+            candidate = _normalize_lookup_key(keyword)
+            if candidate and candidate in normalized:
+                score += max(1, min(8, len(candidate)))
+        return score
 
     def as_dict(self) -> dict[str, object]:
+        manifest = {
+            "id": self.skill_id,
+            "name": self.name,
+            "description": self.description,
+            "input_schema": dict(self.input_schema),
+            "output_schema": dict(self.output_schema),
+            "trigger": self.trigger.as_dict(),
+            "handler": self.handler.as_dict(),
+            "policy": self.policy.as_dict(),
+            "default_args": dict(self.default_args),
+            "metadata": dict(self.metadata),
+            "content": self.content,
+            "sha256": self.sha256,
+        }
         return {
             "id": self.skill_id,
             "name": self.name,
             "description": self.description,
-            "triggers": list(self.triggers),
-            "aliases": list(self.aliases),
-            "mode": self.mode,
-            "priority": self.priority,
+            "manifest": manifest,
+            "status": self.status,
             "source": self.source,
             "source_kind": self.source_kind,
             "enabled": self.enabled,
-            "user_invocable": self.user_invocable,
-            "disable_model_invocation": self.disable_model_invocation,
-            "command_dispatch": self.command_dispatch,
-            "command_tool": self.command_tool,
-            "command_arg_mode": self.command_arg_mode,
-            "homepage": self.homepage,
-            "metadata": dict(self.metadata),
-            "auto_bound": self.auto_bound,
             "eligible": self.eligible,
+            "validation_errors": [dict(item) for item in self.validation_errors],
             "ineligibility_reasons": list(self.ineligibility_reasons),
-            "dispatches_tool": self.dispatches_tool,
-            "prompt_visible": self.prompt_visible,
-            "directly_usable": self.enabled and self.eligible and (self.dispatches_tool or bool(self.triggers)),
-            "content": self.content,
+            "telemetry": _skill_telemetry_summary(self.skill_id),
+            "last_execution": dict(self.last_execution or {}),
             "editable": self.source_kind == "workspace",
             "deletable": self.source_kind == "workspace",
         }
+
+
+# Keep the old Python import name as a compatibility alias. The runtime
+# contract is SkillManifest; legacy markdown fields are rejected by the parser.
+SkillSpec = SkillManifest
 
 
 class SkillRegistry:
@@ -130,6 +269,7 @@ class SkillRegistry:
         self._registered_skills: dict[str, SkillSpec] = {}
         self._last_reload_at = time.time()
         self._reload_count = 0
+        self._tool_binding_errors: list[dict[str, str]] = []
 
     @property
     def workspace_root(self) -> Path:
@@ -140,9 +280,13 @@ class SkillRegistry:
         skills: list[SkillSpec] = []
         seen_ids: set[str] = set()
         for skill_file in sorted(self._builtin_root.glob("*.md")):
-            skill = parse_skill_file(skill_file)
-            if skill.skill_id in seen_ids:
+            try:
+                skill = parse_skill_file(skill_file)
+            except SkillManifestError as exc:
+                skills.append(_invalid_manifest_from_error(exc, skill_file, source_kind="builtin"))
                 continue
+            if skill.skill_id in seen_ids:
+                skill.validation_errors.append({"code": "duplicate_id", "message": f"duplicate skill id: {skill.skill_id}"})
             seen_ids.add(skill.skill_id)
             runtime = state.get(skill.skill_id, {})
             skill.enabled = bool(runtime.get("enabled", True))
@@ -151,9 +295,13 @@ class SkillRegistry:
             self._apply_runtime_compatibility(skill)
             skills.append(skill)
         for skill_file in self._workspace_skill_files():
-            skill = parse_skill_file(skill_file)
-            if skill.skill_id in seen_ids:
+            try:
+                skill = parse_skill_file(skill_file)
+            except SkillManifestError as exc:
+                skills.append(_invalid_manifest_from_error(exc, skill_file, source_kind="workspace"))
                 continue
+            if skill.skill_id in seen_ids:
+                skill.validation_errors.append({"code": "duplicate_id", "message": f"duplicate skill id: {skill.skill_id}"})
             seen_ids.add(skill.skill_id)
             runtime = state.get(skill.skill_id, {})
             skill.enabled = bool(runtime.get("enabled", True))
@@ -163,7 +311,7 @@ class SkillRegistry:
             skills.append(skill)
         for registered in self._registered_skills.values():
             if registered.skill_id in seen_ids:
-                continue
+                registered.validation_errors.append({"code": "duplicate_id", "message": f"duplicate skill id: {registered.skill_id}"})
             seen_ids.add(registered.skill_id)
             skill = replace(registered)
             runtime = state.get(skill.skill_id, {})
@@ -171,21 +319,33 @@ class SkillRegistry:
             self._apply_runtime_bridge(skill)
             self._apply_runtime_compatibility(skill)
             skills.append(skill)
+        self._apply_conflict_validation(skills)
         skills.sort(key=lambda item: (-item.priority, item.name))
         return skills
 
-    def match(self, text: str) -> list[SkillSpec]:
+    def candidate_manifests(self, text: str, *, include_prompt: bool = True) -> list[SkillManifest]:
+        """Return context-relevant manifests without executing keyword matches."""
         if not self.config.skills_enabled:
             return []
-        matched = [skill for skill in self.list_skills() if skill.matches(text)]
-        return matched[: max(0, self.config.max_active_skills)]
-
-    def resolve_dispatch(self, text: str) -> tuple[SkillSpec, str] | None:
-        for skill in self.match(text):
-            if not skill.dispatches_tool:
+        skills = [
+            skill
+            for skill in self.list_skills()
+            if skill.enabled and skill.eligible and not skill.validation_errors
+        ]
+        scored: list[tuple[int, SkillManifest]] = []
+        normalized_text = str(text or "")
+        has_url = bool(re.search(r"https?://|www\.", normalized_text, flags=re.IGNORECASE))
+        for skill in skills:
+            if not include_prompt and not skill.is_tool_handler:
                 continue
-            return skill, skill.extracts_args(text)
-        return None
+            score = skill.keyword_score(text)
+            if has_url and skill.command_tool == "summarize":
+                score += 24
+            elif has_url and skill.command_tool == "summary":
+                score -= 12
+            scored.append((score, skill))
+        scored.sort(key=lambda item: (-item[0], -item[1].priority, item[1].name))
+        return [skill for _, skill in scored[: max(1, int(self.config.max_active_skills or 3))]]
 
     def describe(self) -> dict[str, Any]:
         skills = self.list_skills()
@@ -194,12 +354,27 @@ class SkillRegistry:
             "count": len(skills),
             "reload_count": self._reload_count,
             "last_reload_at": self._last_reload_at,
+            "reload_status": "error" if self._tool_binding_errors else "ok",
+            "tool_binding_errors": [dict(item) for item in self._tool_binding_errors],
             "items": [skill.as_dict() for skill in skills],
         }
 
     def reload(self) -> dict[str, Any]:
+        binding_errors: list[dict[str, str]] = []
+        try:
+            reload_tool_bindings()
+        except ToolBindingError as exc:
+            binding_errors.append({"code": exc.code, "message": str(exc)})
+            record_skill_error_event(
+                skill_id="__tool_bindings__",
+                error_code=exc.code,
+                message=str(exc),
+                source="tool_bindings",
+            )
+        self._tool_binding_errors = binding_errors
         self._touch_reload()
-        return self.describe()
+        payload = self.describe()
+        return payload
 
     def get_skill(self, skill_id: str) -> SkillSpec | None:
         target = str(skill_id or "").strip()
@@ -250,7 +425,7 @@ class SkillRegistry:
         target = str(tool_name or "").strip().lower()
         if not target:
             return False
-        return any(skill.command_tool == target and skill.command_dispatch == "tool" for skill in self.list_skills())
+        return any(skill.is_tool_handler and skill.command_tool == target for skill in self.list_skills())
 
     def install_workspace_skill(self, markdown: str, filename: str | None = None) -> SkillSpec:
         raw = str(markdown or "").strip()
@@ -329,27 +504,25 @@ class SkillRegistry:
     ) -> SkillSpec:
         source = str(source_name or "runtime-skill").strip() or "runtime-skill"
         parsed = parse_skill_markdown(markdown, source=source)
-        skill = SkillSpec(
+        skill = SkillManifest(
             skill_id=parsed.skill_id,
             name=parsed.name,
             description=parsed.description,
-            triggers=list(parsed.triggers),
-            aliases=list(parsed.aliases),
-            mode=parsed.mode,
-            priority=parsed.priority,
+            input_schema=dict(parsed.input_schema),
+            output_schema=dict(parsed.output_schema),
+            trigger=replace(parsed.trigger),
+            handler=replace(parsed.handler),
+            policy=replace(parsed.policy),
+            default_args=dict(parsed.default_args),
+            metadata=dict(parsed.metadata),
             content=parsed.content,
             source=source,
             source_kind=str(source_kind or "plugin").strip() or "plugin",
             enabled=bool(enabled),
-            user_invocable=parsed.user_invocable,
-            disable_model_invocation=parsed.disable_model_invocation,
-            command_dispatch=parsed.command_dispatch,
-            command_tool=parsed.command_tool,
-            command_arg_mode=parsed.command_arg_mode,
-            homepage=parsed.homepage,
-            metadata=dict(parsed.metadata),
             eligible=parsed.eligible,
             ineligibility_reasons=list(parsed.ineligibility_reasons),
+            validation_errors=[dict(item) for item in parsed.validation_errors],
+            sha256=parsed.sha256,
         )
         self._registered_skills[skill.skill_id] = skill
         self._touch_reload()
@@ -369,7 +542,7 @@ class SkillRegistry:
         for skill_file in candidates:
             try:
                 skill = parse_skill_file(skill_file)
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError, SkillManifestError):
                 continue
             if skill.skill_id == target:
                 return skill_file
@@ -408,10 +581,47 @@ class SkillRegistry:
         self._reload_count += 1
         self._last_reload_at = time.time()
 
+    @staticmethod
+    def _apply_conflict_validation(skills: list[SkillSpec]) -> None:
+        commands: dict[str, SkillSpec] = {}
+        keywords: dict[str, SkillSpec] = {}
+        for skill in skills:
+            if skill.validation_errors:
+                continue
+            if skill.is_tool_handler and skill.handler_target in _DANGEROUS_TOOL_IDS and not skill.policy.requires_authorization:
+                skill.validation_errors.append(
+                    {
+                        "code": "dangerous_tool_requires_authorization",
+                        "message": f"{skill.handler_target} requires policy.requires_authorization=true",
+                    }
+                )
+                continue
+            command_key = _normalize_lookup_key(skill.command)
+            if command_key:
+                previous = commands.get(command_key)
+                if previous is not None:
+                    message = f"trigger.command conflicts with {previous.skill_id}: {skill.command}"
+                    skill.validation_errors.append({"code": "command_conflict", "message": message})
+                    previous.validation_errors.append({"code": "command_conflict", "message": message})
+                else:
+                    commands[command_key] = skill
+            if skill.model_visible and skill.is_tool_handler:
+                for keyword in skill.keywords:
+                    keyword_key = _normalize_lookup_key(keyword)
+                    if not keyword_key:
+                        continue
+                    previous_keyword = keywords.get(keyword_key)
+                    if previous_keyword is not None and previous_keyword.handler_target != skill.handler_target:
+                        message = f"trigger keyword conflicts with {previous_keyword.skill_id}: {keyword}"
+                        skill.validation_errors.append({"code": "keyword_conflict", "message": message})
+                        previous_keyword.validation_errors.append({"code": "keyword_conflict", "message": message})
+                    else:
+                        keywords[keyword_key] = skill
+
     def _apply_runtime_compatibility(self, skill: SkillSpec) -> None:
         metadata = _compat_runtime_metadata(skill.metadata)
         reasons: list[str] = []
-        if skill.command_dispatch == "tool" and skill.command_tool in SELF_HOSTED_TOOL_IDS:
+        if skill.is_tool_handler:
             skill.eligible = True
             skill.ineligibility_reasons = []
             return
@@ -447,24 +657,11 @@ class SkillRegistry:
         skill.ineligibility_reasons = reasons
 
     def _apply_runtime_bridge(self, skill: SkillSpec) -> None:
-        if skill.command_dispatch == "tool" and skill.command_tool:
+        if skill.is_tool_handler and skill.command_tool:
             resolved_tool = resolve_compatible_tool_id(skill.command_tool)
             if resolved_tool:
                 skill.command_tool = resolved_tool
-            if not skill.triggers and skill.command_tool in SELF_HOSTED_TOOL_IDS:
-                skill.triggers = _infer_tool_triggers(skill, skill.command_tool)
             return
-        resolved_tool = resolve_compatible_tool_id(skill.skill_id, skill.name, *skill.aliases)
-        if not resolved_tool:
-            return
-        skill.command_dispatch = "tool"
-        skill.command_tool = resolved_tool
-        skill.disable_model_invocation = True
-        skill.auto_bound = True
-        if not skill.triggers:
-            skill.triggers = _infer_tool_triggers(skill, resolved_tool)
-        if skill.priority <= 0:
-            skill.priority = 10
 
     def _load_state(self) -> dict[str, dict[str, Any]]:
         if not self._state_path.exists():
@@ -497,22 +694,68 @@ def parse_skill_file(path: str | Path) -> SkillSpec:
     return parse_skill_markdown(raw, source=file_path)
 
 
+def _invalid_manifest_from_error(exc: SkillManifestError, path: Path, *, source_kind: str) -> SkillManifest:
+    name = path.stem if path.stem else "invalid-skill"
+    raw = ""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return SkillManifest(
+        skill_id=f"invalid-{_slugify(name)}",
+        name=name,
+        description=str(exc),
+        input_schema={"type": "object", "properties": {}},
+        output_schema={"type": "object", "properties": {}},
+        trigger=SkillTriggerSpec(command=f"invalid-{_slugify(name)}", llm_tool=False, keywords=[]),
+        handler=SkillHandlerSpec(type="prompt_template", target=""),
+        policy=SkillPolicySpec(priority=-1000, user_invocable=False),
+        default_args={},
+        metadata={},
+        content="",
+        source=str(path),
+        source_kind=source_kind,
+        enabled=False,
+        eligible=False,
+        ineligibility_reasons=[exc.code],
+        validation_errors=[{"code": exc.code, "message": str(exc)}],
+        sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else "",
+    )
+
+
+def _skill_telemetry_summary(skill_id: str) -> dict[str, object]:
+    try:
+        from .telemetry import get_skill_telemetry_summary
+    except Exception:
+        return {"calls": 0, "success": 0, "failure": 0, "success_rate": 0.0}
+    return get_skill_telemetry_summary(skill_id)
+
+
 def parse_skill_markdown(raw: str, source: str | Path = "<memory>") -> SkillSpec:
     file_path = Path(source)
     frontmatter, body = _split_frontmatter(raw)
     payload = _parse_frontmatter(frontmatter)
+    legacy_keys = sorted(key for key in _LEGACY_SKILL_KEYS if key in payload)
+    if legacy_keys:
+        raise SkillManifestError(
+            "legacy_skill_format",
+            "legacy skill fields are no longer supported; use trigger/handler manifest fields",
+            source=str(file_path),
+        )
     name = str(payload.get("name") or file_path.stem).strip() or file_path.stem
     description = str(payload.get("description") or "").strip()
     metadata = _coerce_mapping(payload.get("metadata"))
+    signature = str(payload.get("signature") or "").strip()
+    if signature:
+        metadata["signature"] = signature
     compat_metadata = _compat_runtime_metadata(metadata)
-    triggers = _coerce_str_list(payload.get("triggers"))
     aliases = _coerce_str_list(payload.get("aliases"))
     aliases.extend(_coerce_str_list(compat_metadata.get("aliases")))
-    aliases = [alias for alias in aliases if alias]
-    mode = str(payload.get("mode") or "contains").strip().lower() or "contains"
-    if mode not in {"contains", "prefix"}:
-        mode = "contains"
-    priority = int(payload.get("priority", 0) or 0)
+    if aliases:
+        metadata["aliases"] = _dedupe_str_list(aliases)
+    homepage = str(payload.get("homepage") or compat_metadata.get("homepage") or "").strip()
+    if homepage:
+        metadata["homepage"] = homepage
     content = body.strip()
     explicit_id = str(payload.get("id") or "").strip()
     if explicit_id:
@@ -521,23 +764,36 @@ def parse_skill_markdown(raw: str, source: str | Path = "<memory>") -> SkillSpec
         skill_id = _slugify(str(payload.get("name") or file_path.parent.name or file_path.stem))
     else:
         skill_id = str(file_path.stem).strip() or file_path.stem
-    return SkillSpec(
+    trigger = _parse_trigger_spec(payload.get("trigger"), skill_id=skill_id)
+    handler = _parse_handler_spec(payload.get("handler"))
+    policy = _parse_policy_spec(payload.get("policy"))
+    input_schema = _schema_or_default(payload.get("input_schema") or payload.get("input-schema"))
+    output_schema = _schema_or_default(payload.get("output_schema") or payload.get("output-schema"))
+    default_args = _coerce_mapping(payload.get("default_args") or payload.get("default-args"))
+    errors = _validate_manifest(
+        skill_id=skill_id,
+        name=name,
+        trigger=trigger,
+        handler=handler,
+        input_schema=input_schema,
+        output_schema=output_schema,
+    )
+    _apply_signature_validation(errors, metadata, content)
+    return SkillManifest(
         skill_id=skill_id,
         name=name,
         description=description,
-        triggers=triggers,
-        aliases=_dedupe_str_list(aliases),
-        mode=mode,
-        priority=priority,
+        input_schema=input_schema,
+        output_schema=output_schema,
+        trigger=trigger,
+        handler=handler,
+        policy=policy,
+        default_args=default_args,
         content=content,
         source=str(file_path),
-        user_invocable=bool(payload.get("user-invocable", True)),
-        disable_model_invocation=bool(payload.get("disable-model-invocation", False)),
-        command_dispatch=str(payload.get("command-dispatch") or "").strip().lower(),
-        command_tool=str(payload.get("command-tool") or "").strip().lower(),
-        command_arg_mode=str(payload.get("command-arg-mode") or "raw").strip().lower() or "raw",
-        homepage=str(payload.get("homepage") or compat_metadata.get("homepage") or "").strip(),
         metadata=metadata,
+        validation_errors=errors,
+        sha256=hashlib.sha256(str(raw or "").encode("utf-8")).hexdigest(),
     )
 
 
@@ -561,37 +817,159 @@ def build_skill_markdown_template(
 ) -> str:
     resolved_id = _slugify(skill_id or name or "custom-skill")
     resolved_name = str(name or resolved_id).strip() or resolved_id
-    resolved_triggers = triggers or []
     resolved_aliases = _dedupe_str_list(aliases or [])
+    resolved_tool = str(command_tool or "").strip().lower()
+    handler_type = "tool_id" if command_dispatch == "tool" or resolved_tool else "prompt_template"
+    handler_target = resolved_tool if handler_type == "tool_id" else resolved_id
+    trigger_payload = {
+        "command": resolved_id,
+        "llm_tool": handler_type == "tool_id",
+        "keywords": triggers or [],
+    }
+    handler_payload = {
+        "type": handler_type,
+        "target": handler_target,
+        "arg_mode": command_arg_mode or "structured",
+    }
+    policy_payload = {
+        "priority": int(priority or 0),
+        "user_invocable": bool(user_invocable),
+        "risk_level": "safe",
+        "timeout_seconds": 30,
+        "max_output_chars": 6000,
+    }
+    metadata_payload = dict(metadata or {})
+    if resolved_aliases:
+        metadata_payload["aliases"] = resolved_aliases
+    if homepage:
+        metadata_payload["homepage"] = homepage
     lines = [
         "---",
         f"id: {resolved_id}",
         f"name: {resolved_name}",
         f"description: {description}",
-        f"triggers: {json.dumps(resolved_triggers, ensure_ascii=False)}",
+        'input_schema: {"type":"object","properties":{}}',
+        'output_schema: {"type":"object","properties":{}}',
+        f"trigger: {json.dumps(trigger_payload, ensure_ascii=False)}",
+        f"handler: {json.dumps(handler_payload, ensure_ascii=False)}",
+        f"policy: {json.dumps(policy_payload, ensure_ascii=False)}",
+        "default_args: {}",
     ]
-    if resolved_aliases:
-        lines.append(f"aliases: {json.dumps(resolved_aliases, ensure_ascii=False)}")
-    lines.extend(
-        [
-            f"mode: {mode}",
-            f"priority: {priority}",
-            f"user-invocable: {'true' if user_invocable else 'false'}",
-            f"disable-model-invocation: {'true' if disable_model_invocation else 'false'}",
-        ]
-    )
-    if command_dispatch:
-        lines.append(f"command-dispatch: {command_dispatch}")
-    if command_tool:
-        lines.append(f"command-tool: {command_tool}")
-    if command_arg_mode:
-        lines.append(f"command-arg-mode: {command_arg_mode}")
-    if homepage:
-        lines.append(f"homepage: {homepage}")
-    if metadata:
-        lines.append(f"metadata: {json.dumps(metadata, ensure_ascii=False)}")
+    if metadata_payload:
+        lines.append(f"metadata: {json.dumps(metadata_payload, ensure_ascii=False)}")
     lines.extend(["---", body.strip()])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _parse_trigger_spec(value: Any, *, skill_id: str) -> SkillTriggerSpec:
+    payload = _coerce_mapping(value)
+    command = str(payload.get("command") or skill_id).strip() or skill_id
+    return SkillTriggerSpec(
+        command=command,
+        llm_tool=bool(payload.get("llm_tool", False)),
+        keywords=_dedupe_str_list(_coerce_str_list(payload.get("keywords"))),
+    )
+
+
+def _parse_handler_spec(value: Any) -> SkillHandlerSpec:
+    payload = _coerce_mapping(value)
+    handler_type = str(payload.get("type") or "").strip().lower()
+    if handler_type not in {"tool_id", "prompt_template", "callable"}:
+        handler_type = ""
+    target = str(payload.get("target") or "").strip()
+    arg_mode = str(payload.get("arg_mode") or "structured").strip().lower() or "structured"
+    return SkillHandlerSpec(type=handler_type, target=target, arg_mode=arg_mode)
+
+
+def _parse_policy_spec(value: Any) -> SkillPolicySpec:
+    payload = _coerce_mapping(value)
+    risk_level = str(payload.get("risk_level") or "safe").strip().lower()
+    if risk_level not in {"safe", "filesystem", "command", "mutating"}:
+        risk_level = "safe"
+    return SkillPolicySpec(
+        priority=_safe_int(payload.get("priority"), 0),
+        user_invocable=bool(payload.get("user_invocable", True)),
+        risk_level=risk_level,
+        timeout_seconds=max(1.0, _safe_float(payload.get("timeout_seconds"), 30.0)),
+        max_output_chars=max(200, _safe_int(payload.get("max_output_chars"), 6000)),
+        requires_authorization=bool(payload.get("requires_authorization", False)),
+    )
+
+
+def _schema_or_default(value: Any) -> dict[str, Any]:
+    payload = _coerce_mapping(value)
+    if not payload:
+        return {"type": "object", "properties": {}}
+    if payload.get("type") != "object":
+        payload["type"] = "object"
+    if not isinstance(payload.get("properties"), dict):
+        payload["properties"] = {}
+    return payload
+
+
+def _validate_manifest(
+    *,
+    skill_id: str,
+    name: str,
+    trigger: SkillTriggerSpec,
+    handler: SkillHandlerSpec,
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any],
+) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    if not str(skill_id or "").strip():
+        errors.append({"code": "missing_id", "message": "manifest id is required"})
+    if not str(name or "").strip():
+        errors.append({"code": "missing_name", "message": "manifest name is required"})
+    if not trigger.command:
+        errors.append({"code": "missing_command", "message": "trigger.command is required"})
+    if handler.type not in {"tool_id", "prompt_template", "callable"}:
+        errors.append({"code": "invalid_handler", "message": "handler.type must be tool_id, prompt_template or callable"})
+    if handler.type in {"tool_id", "callable"} and not handler.target:
+        errors.append({"code": "missing_handler_target", "message": "handler.target is required"})
+    for key, schema in (("input_schema", input_schema), ("output_schema", output_schema)):
+        if schema.get("type") != "object":
+            errors.append({"code": f"invalid_{key}", "message": f"{key}.type must be object"})
+    return errors
+
+
+def _apply_signature_validation(errors: list[dict[str, str]], metadata: dict[str, Any], content: str) -> None:
+    signature = str(metadata.get("signature") or "").strip()
+    if not signature:
+        return
+    if not signature.startswith("sha256:"):
+        metadata["signature_verified"] = False
+        errors.append(
+            {
+                "code": "unsupported_signature",
+                "message": "signature must use sha256:<body_digest> format",
+            }
+        )
+        return
+    expected = signature.removeprefix("sha256:").strip().lower()
+    actual = hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
+    metadata["signature_verified"] = expected == actual
+    if expected != actual:
+        errors.append(
+            {
+                "code": "signature_mismatch",
+                "message": "skill signature does not match body digest",
+            }
+        )
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _split_frontmatter(raw: str) -> tuple[str, str]:

@@ -149,8 +149,12 @@ id: plugin-skill
 name: plugin_skill
 aliases: ["plugin-skill-alias"]
 description: plugin registered skill
-triggers: ["plugin skill"]
-mode: prefix
+input_schema: {"type":"object","properties":{}}
+output_schema: {"type":"object","properties":{}}
+trigger: {"command":"plugin-skill","llm_tool":false,"keywords":["plugin skill"]}
+handler: {"type":"prompt_template","target":"plugin-skill"}
+policy: {"priority":0,"user_invocable":true,"risk_level":"safe","timeout_seconds":30,"max_output_chars":6000}
+default_args: {}
 ---
 Use plugin tools carefully.
 """,

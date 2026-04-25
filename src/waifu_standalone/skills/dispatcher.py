@@ -71,16 +71,6 @@ class SkillDispatcher:
     # Dispatch entry points (called from WaifuService event loop)
     # ------------------------------------------------------------------
     def resolve_builtin_dispatch(self, text: str) -> tuple[SkillSpec, str] | None:
-        normalized = str(text or "").strip()
-        if not normalized:
-            return None
-        skills = self._service.skills
-        if skills.has_dispatch_tool("skill-list") and self._looks_like_skill_list_request(
-            normalized
-        ):
-            skill = skills.get_skill("skill-list-command")
-            if skill is not None and skill.dispatches_tool:
-                return skill, ""
         return None
 
     def resolve_explicit_skill_request(self, text: str) -> tuple[SkillSpec, str] | None:
@@ -91,25 +81,9 @@ class SkillDispatcher:
         if slash_match is not None:
             skill_name = str(slash_match.group("skill") or "").strip()
             skill = self._service.skills.find_by_name_or_id(skill_name)
-            if skill is not None and skill.enabled and skill.eligible and skill.user_invocable:
+            if skill is not None and skill.user_invocable:
                 raw_args = str(slash_match.group("args") or "").strip()
                 return skill, raw_args
-        patterns = (
-            r'^\s*(?:请)?(?:用|使用|按|拿)\s*[\"“「]?(?P<skill>.+?)[\"”」]?\s*(?:这个)?(?:技能|skill)\s*(?:来|去|帮我|给我|直接|试着|一下)?\s*(?P<args>.*)$',
-            r'^\s*use\s+[\"“「]?(?P<skill>.+?)[\"”」]?\s+skill\b[\s:：，,]*(?P<args>.*)$',
-        )
-        for pattern in patterns:
-            match = re.match(pattern, normalized, flags=re.IGNORECASE)
-            if match is None:
-                continue
-            skill_name = str(match.group("skill") or "").strip().strip("\"'“”「」")
-            if not skill_name:
-                continue
-            skill = self._service.skills.find_by_name_or_id(skill_name)
-            if skill is None or not skill.enabled or not skill.eligible or not skill.user_invocable:
-                continue
-            raw_args = str(match.group("args") or "").lstrip(" ：:，,")
-            return skill, raw_args
         return None
 
     def dispatch_skill(
@@ -132,19 +106,10 @@ class SkillDispatcher:
             address=address,
             assistant_name=assistant_name,
             active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
-        message = service.tools.execute(skill.command_tool, invocation)
-        if message is not None:
-            return message
-        runtime_message = self._try_emit_claw_runtime_tool(invocation)
-        if runtime_message is not None:
-            return runtime_message
-        unavailable = OutboundMessage(
-            launcher_id=event.launcher_id,
-            launcher_type=event.launcher_type,
-            text=f"{address}，这个技能绑定的工具还没有注册：{skill.command_tool or 'unknown'}。",
-        )
-        return service.emitter.emit(event, unavailable, assistant_name=assistant_name)
+        invocation.arguments["_trigger_source"] = "runtime"
+        return self._emit_tool_execution_result(invocation, service.tools.execute_model(skill.skill_id, invocation))
 
     def dispatch_explicit_skill(
         self,
@@ -158,44 +123,18 @@ class SkillDispatcher:
         active_skills: list[SkillSpec],
     ) -> OutboundMessage | None:
         service = self._service
-        tool_id = self._explicit_tool_id(skill)
-        if tool_id:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=tool_id,
-            )
-            message = service.tools.execute(tool_id, invocation)
-            if message is not None:
-                return message
-            runtime_message = self._try_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        elif skill.command_tool:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=skill.command_tool,
-            )
-            runtime_message = self._try_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        return self.handle_unbound_skill_request(
+        invocation = self._build_tool_invocation(
             event,
+            session,
             skill=skill,
+            raw_args=raw_args,
             address=address,
             assistant_name=assistant_name,
+            active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
+        invocation.arguments["_trigger_source"] = "command"
+        return self._emit_tool_execution_result(invocation, service.tools.execute_model(skill.skill_id, invocation))
 
     async def adispatch_skill(
         self,
@@ -218,21 +157,13 @@ class SkillDispatcher:
             address=address,
             assistant_name=assistant_name,
             active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
+        invocation.arguments["_trigger_source"] = "runtime"
         if skill.command_tool == "image":
             invocation.arguments["background_delivery"] = bool(background_image_delivery)
-        message = await service.tools.aexecute(skill.command_tool, invocation)
-        if message is not None:
-            return message
-        runtime_message = await self._atry_emit_claw_runtime_tool(invocation)
-        if runtime_message is not None:
-            return runtime_message
-        unavailable = OutboundMessage(
-            launcher_id=event.launcher_id,
-            launcher_type=event.launcher_type,
-            text=f"{address}，这个技能绑定的工具还没有注册：{skill.command_tool or 'unknown'}。",
-        )
-        return await service.emitter.aemit(event, unavailable, assistant_name=assistant_name)
+        result = await service.tools.aexecute_model(skill.skill_id, invocation)
+        return await self._aemit_tool_execution_result(invocation, result)
 
     async def adispatch_explicit_skill(
         self,
@@ -247,48 +178,21 @@ class SkillDispatcher:
         background_image_delivery: bool = True,
     ) -> OutboundMessage | None:
         service = self._service
-        tool_id = self._explicit_tool_id(skill)
-        if tool_id:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=tool_id,
-            )
-            if tool_id == "image":
-                invocation.arguments["background_delivery"] = bool(background_image_delivery)
-            message = await service.tools.aexecute(tool_id, invocation)
-            if message is not None:
-                return message
-            runtime_message = await self._atry_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        elif skill.command_tool:
-            invocation = self._build_tool_invocation(
-                event,
-                session,
-                skill=skill,
-                raw_args=raw_args,
-                address=address,
-                assistant_name=assistant_name,
-                active_skills=active_skills,
-                tool_id=skill.command_tool,
-            )
-            if skill.command_tool == "image":
-                invocation.arguments["background_delivery"] = bool(background_image_delivery)
-            runtime_message = await self._atry_emit_claw_runtime_tool(invocation)
-            if runtime_message is not None:
-                return runtime_message
-        return await self.ahandle_unbound_skill_request(
+        invocation = self._build_tool_invocation(
             event,
+            session,
             skill=skill,
+            raw_args=raw_args,
             address=address,
             assistant_name=assistant_name,
+            active_skills=active_skills,
+            tool_id=skill.skill_id,
         )
+        invocation.arguments["_trigger_source"] = "command"
+        if skill.command_tool == "image":
+            invocation.arguments["background_delivery"] = bool(background_image_delivery)
+        result = await service.tools.aexecute_model(skill.skill_id, invocation)
+        return await self._aemit_tool_execution_result(invocation, result)
 
     def handle_unbound_skill_request(
         self,
@@ -299,17 +203,11 @@ class SkillDispatcher:
         assistant_name: str,
     ) -> OutboundMessage:
         service = self._service
-        trigger_hint = ""
-        if skill.triggers:
-            trigger_hint = "你可以直接用它的触发词： " + " / ".join(skill.triggers[:3]) + "。"
         text = (
-            f"{address}，`{skill.name}` 这个技能现在还没有绑定可执行工具，"
+            f"{address}，`{skill.name}` 这个技能不是可执行工具型 manifest，"
             "我不能假装已经替你跑完。"
         )
-        if trigger_hint:
-            text += trigger_hint
-        else:
-            text += "要让它真的执行，需要给这个技能补 `command-dispatch / command-tool`，或者接上对应运行时。"
+        text += "如果要强制执行，请把 handler.type 设为 `tool_id` 并绑定可用工具。"
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -326,17 +224,11 @@ class SkillDispatcher:
         assistant_name: str,
     ) -> OutboundMessage:
         service = self._service
-        trigger_hint = ""
-        if skill.triggers:
-            trigger_hint = "你可以直接用它的触发词： " + " / ".join(skill.triggers[:3]) + "。"
         text = (
-            f"{address}，`{skill.name}` 这个技能现在还没有绑定可执行工具，"
+            f"{address}，`{skill.name}` 这个技能不是可执行工具型 manifest，"
             "我不能假装已经替你跑完。"
         )
-        if trigger_hint:
-            text += trigger_hint
-        else:
-            text += "要让它真的执行，需要给这个技能补 `command-dispatch / command-tool`，或者接上对应运行时。"
+        text += "如果要强制执行，请把 handler.type 设为 `tool_id` 并绑定可用工具。"
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
@@ -1205,10 +1097,12 @@ class SkillDispatcher:
             summary = skill.name
             if skill.description:
                 summary += f": {skill.description}"
-            if skill.triggers:
-                summary += " | triggers=" + ", ".join(skill.triggers[:3])
-            if skill.command_tool:
+            if skill.keywords:
+                summary += " | keywords=" + ", ".join(skill.keywords[:3])
+            if skill.is_tool_handler:
                 summary += f" | tool={skill.command_tool}"
+            elif skill.is_prompt_policy:
+                summary += " | prompt-policy"
             lines.append(summary)
             items.append(skill.as_dict())
         return ToolExecutionResult(
@@ -1789,6 +1683,13 @@ class SkillDispatcher:
     ) -> ToolInvocation:
         normalized_tool_id = str(tool_id or skill.command_tool or "").strip().lower()
         parsed_arguments = self._parse_command_arguments(raw_args, mode=skill.command_arg_mode)
+        skill_cards = [skill]
+        seen_skill_ids = {skill.skill_id}
+        for item in active_skills:
+            if item.skill_id in seen_skill_ids:
+                continue
+            seen_skill_ids.add(item.skill_id)
+            skill_cards.append(item)
         return ToolInvocation(
             tool_id=normalized_tool_id,
             raw_args=str(raw_args or "").strip(),
@@ -1797,7 +1698,7 @@ class SkillDispatcher:
             skill=skill,
             address=address,
             assistant_name=assistant_name,
-            active_skills=active_skills,
+            active_skills=skill_cards,
             arguments=parsed_arguments,
         )
 

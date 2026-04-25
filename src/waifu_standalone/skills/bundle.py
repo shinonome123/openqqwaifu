@@ -108,8 +108,8 @@ def import_skill_bundle(
             detail["markdown"] = markdown
             detail["bundle_path"] = bundle_path
             imported.append(detail)
-        ready = [detail for detail in imported if bool(detail.get("directly_usable"))]
-        needs_setup = [detail for detail in imported if not bool(detail.get("directly_usable"))]
+        ready = [detail for detail in imported if str(detail.get("status", "")) == "ready"]
+        needs_setup = [detail for detail in imported if str(detail.get("status", "")) != "ready"]
 
         return {
             "format": "openclaw-compatible-bundle",
