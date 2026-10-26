@@ -110,9 +110,9 @@ class MarketplaceConfig:
 class ToolPolicyConfig:
     enabled: bool = True
     allowed_roots: list[str] = field(default_factory=lambda: [".", "data"])
-    write_enabled: bool = True
+    write_enabled: bool = False
     write_allowed_roots: list[str] = field(default_factory=lambda: [".", "data"])
-    exec_enabled: bool = True
+    exec_enabled: bool = False
     exec_allowed_roots: list[str] = field(default_factory=lambda: ["."])
     exec_allowlist: list[str] = field(
         default_factory=lambda: [
@@ -131,6 +131,9 @@ class ToolPolicyConfig:
             "docker-compose",
         ]
     )
+    # QQ 用户 ID 白名单：只有这些人才能让模型调用高风险工具
+    # （读/写文件、列目录、执行命令、联网抓取）。默认空 = 任何人都不行。
+    authorized_user_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

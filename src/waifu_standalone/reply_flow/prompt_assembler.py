@@ -506,6 +506,7 @@ class Generator:
                     assistant_name=assistant_name,
                     active_skills=active_skills,
                     arguments=tool_call.arguments,
+                    allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
                 result = self._tools.execute_model(tool_call.tool_name, invocation)
                 tool_turns.append(self._tool_turn_record(tool_call.tool_name, tool_call.arguments, result))
@@ -571,6 +572,7 @@ class Generator:
                     assistant_name=assistant_name,
                     active_skills=active_skills,
                     arguments=tool_call.arguments,
+                    allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
                 result = await self._tools.aexecute_model(tool_call.tool_name, invocation)
                 tool_turns.append(self._tool_turn_record(tool_call.tool_name, tool_call.arguments, result))

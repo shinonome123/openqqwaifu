@@ -884,7 +884,7 @@ def _parse_handler_spec(value: Any) -> SkillHandlerSpec:
 def _parse_policy_spec(value: Any) -> SkillPolicySpec:
     payload = _coerce_mapping(value)
     risk_level = str(payload.get("risk_level") or "safe").strip().lower()
-    if risk_level not in {"safe", "filesystem", "command", "mutating"}:
+    if risk_level not in {"safe", "filesystem", "command", "mutating", "network"}:
         risk_level = "safe"
     return SkillPolicySpec(
         priority=_safe_int(payload.get("priority"), 0),

@@ -217,6 +217,7 @@ def _load_tool_policy(raw_value: object) -> ToolPolicyConfig:
         exec_enabled=bool(raw_value.get("exec_enabled", defaults.exec_enabled)),
         exec_allowed_roots=_load_str_list(raw_value.get("exec_allowed_roots"), defaults.exec_allowed_roots),
         exec_allowlist=_load_str_list(raw_value.get("exec_allowlist"), defaults.exec_allowlist),
+        authorized_user_ids=_load_str_list(raw_value.get("authorized_user_ids"), defaults.authorized_user_ids),
     )
 
 
@@ -277,6 +278,9 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     exec_allowlist = os.getenv("OPENQQWAIFU_TOOL_POLICY_EXEC_ALLOWLIST")
     if exec_allowlist is not None:
         tool_policy.exec_allowlist = _load_str_list(exec_allowlist, tool_policy.exec_allowlist)
+    authorized_user_ids = os.getenv("OPENQQWAIFU_TOOL_POLICY_AUTHORIZED_USER_IDS")
+    if authorized_user_ids is not None:
+        tool_policy.authorized_user_ids = _load_str_list(authorized_user_ids, tool_policy.authorized_user_ids)
 
     claw_runtime = config.claw_runtime
     claw_runtime.enabled = _env_bool("OPENQQWAIFU_CLAW_RUNTIME_ENABLED", claw_runtime.enabled)

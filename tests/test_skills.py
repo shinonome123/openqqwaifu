@@ -25,7 +25,7 @@ from waifu_standalone.cells.skill_registry import (
     build_skill_markdown_template,
     parse_skill_file,
 )
-from waifu_standalone.cells.tool_registry import ToolExecutionResult
+from waifu_standalone.cells.tool_registry import ToolExecutionResult, ToolInvocation
 from waifu_standalone.config import AppConfig, LLMConfig, ToolPolicyConfig
 from waifu_standalone.http_transport import HttpResponse
 from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment, SessionMemory
@@ -1027,6 +1027,53 @@ Use summarize for URLs.
         self.assertIn("工具未调用成功前", _TOOL_CALLING_SYSTEM_PROMPT)
         self.assertIn("不得说“我记住了”", _TOOL_CALLING_SYSTEM_PROMPT)
 
+    def test_high_risk_tools_require_authorized_user(self) -> None:
+        privileged_tools = {"exec-command", "read-file", "list-files", "write-file", "web-fetch"}
+        bot_id = "3956638110"
+
+        def mention_event(sender_id: str) -> InboundEvent:
+            return InboundEvent(
+                launcher_id="900001",
+                launcher_type="group",
+                sender_id=sender_id,
+                sender_name="member",
+                segments=[
+                    MessageSegment(kind="mention", mention_target=bot_id),
+                    MessageSegment(kind="text", text=" 帮我执行命令 python3 --version"),
+                ],
+            )
+
+        # Unauthorized sender: filesystem / command / network tools are withheld,
+        # while benign tools stay available.
+        service, _ = build_default_service(AppConfig(bot_account_id=bot_id))
+        unauth = service.tool_orchestrator._allowed_tool_ids(mention_event("30009"))
+        self.assertFalse(privileged_tools & unauth, msg=f"privileged tools leaked: {privileged_tools & unauth}")
+        self.assertIn("image", unauth)
+        self.assertIn("search", unauth)
+
+        # Execution layer refuses a withheld tool even if its id is emitted directly.
+        event = mention_event("30009")
+        session = service.memory.save_user_event(event, character_id=service._active_character_id())
+        blocked = service.tools.execute_model(
+            "exec-command",
+            ToolInvocation(
+                tool_id="exec-command",
+                raw_args="{}",
+                event=event,
+                session=session,
+                allowed_tool_ids=unauth,
+            ),
+        )
+        self.assertTrue(blocked.error)
+        self.assertIn("无权", blocked.error)
+
+        # Authorized sender: the same tools become available.
+        service2, _ = build_default_service(
+            AppConfig(bot_account_id=bot_id, tool_policy=ToolPolicyConfig(authorized_user_ids=["30009"]))
+        )
+        authed = service2.tool_orchestrator._allowed_tool_ids(mention_event("30009"))
+        self.assertTrue(privileged_tools <= authed, msg=f"authorized user missing tools: {privileged_tools - authed}")
+
     def test_skills_panel_exposes_normalized_capabilities_and_safety(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
@@ -1380,7 +1427,12 @@ Read files with the read alias.
 """,
                 encoding="utf-8",
             )
-            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    tool_policy=ToolPolicyConfig(authorized_user_ids=["783190298"]),
+                )
+            )
             self._install_tool_client(
                 service,
                 tool_name="read-command",
@@ -1569,7 +1621,15 @@ Write a file using structured arguments.
 """,
                 encoding="utf-8",
             )
-            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    tool_policy=ToolPolicyConfig(
+                        write_enabled=True,
+                        authorized_user_ids=["783190298"],
+                    ),
+                )
+            )
             self._install_tool_client(
                 service,
                 tool_name="json-write",
@@ -1625,6 +1685,8 @@ Write a file using structured arguments.
                     tool_policy=ToolPolicyConfig(
                         allowed_roots=["data"],
                         write_allowed_roots=["data"],
+                        write_enabled=True,
+                        authorized_user_ids=["783190298"],
                     ),
                 )
             )
@@ -1660,7 +1722,7 @@ Write a file using structured arguments.
             service, _ = build_default_service(
                 AppConfig(
                     data_root=tmpdir,
-                    tool_policy=ToolPolicyConfig(exec_allowlist=["python"]),
+                    tool_policy=ToolPolicyConfig(exec_allowlist=["python"], exec_enabled=True),
                 )
             )
 

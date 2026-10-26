@@ -375,7 +375,7 @@ def _build_service(
         },
         model_handler=service.dispatcher.use_web_fetch_tool,
         async_model_handler=service.dispatcher.ause_web_fetch_tool,
-        risk_level="safe",
+        risk_level="network",
     )
     tools.register(
         "read-file",

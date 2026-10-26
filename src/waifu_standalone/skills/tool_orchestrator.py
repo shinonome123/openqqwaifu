@@ -17,6 +17,10 @@ _NAMING_TOOL_IDS = {
     "clarify-naming-intent",
 }
 
+# Risk levels that touch the host filesystem, run commands, or reach the network.
+# Tools at these levels are only offered to users on the authorization allowlist.
+_PRIVILEGED_RISK_LEVELS = {"filesystem", "command", "network"}
+
 
 class ToolCallingOrchestrator:
     """Build the model-visible tool and skill surface for one reply turn."""
@@ -81,9 +85,10 @@ class ToolCallingOrchestrator:
 
     def _allowed_tool_ids(self, event: InboundEvent) -> set[str]:
         svc = self._service
+        items = svc.tools.describe().get("items", [])
         all_model_tools = {
             str(item.get("id", "") or "").strip().lower()
-            for item in svc.tools.describe().get("items", [])
+            for item in items
             if bool(item.get("model_callable"))
         }
         all_model_tools.discard("")
@@ -93,4 +98,29 @@ class ToolCallingOrchestrator:
             bot_account_id = str(svc.config.bot_account_id or "").strip()
             if not (bot_account_id and event.has_bot_mention(bot_account_id)):
                 allowed.difference_update(_NAMING_TOOL_IDS)
+
+        # High-risk tools (filesystem / command / network) are withheld unless the
+        # sender is explicitly authorized. Default allowlist is empty, so no QQ user
+        # can reach them until the owner opts specific accounts in.
+        if not self._is_tool_authorized(event):
+            privileged = {
+                str(item.get("id", "") or "").strip().lower()
+                for item in items
+                if bool(item.get("model_callable"))
+                and str(item.get("risk_level", "") or "").strip().lower() in _PRIVILEGED_RISK_LEVELS
+            }
+            privileged.discard("")
+            allowed.difference_update(privileged)
         return allowed
+
+    def _is_tool_authorized(self, event: InboundEvent) -> bool:
+        svc = self._service
+        authorized = {
+            str(uid).strip()
+            for uid in getattr(svc.config.tool_policy, "authorized_user_ids", []) or []
+            if str(uid).strip()
+        }
+        if not authorized:
+            return False
+        sender = str(getattr(event, "sender_id", "") or "").strip()
+        return bool(sender and sender in authorized)
