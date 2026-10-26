@@ -29,6 +29,7 @@ from waifu_standalone.cells.tool_registry import ToolExecutionResult
 from waifu_standalone.config import AppConfig, LLMConfig, ToolPolicyConfig
 from waifu_standalone.http_transport import HttpResponse
 from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment, SessionMemory
+from waifu_standalone.reply_flow.prompt_assembler import _TOOL_CALLING_SYSTEM_PROMPT
 from waifu_standalone.systems.searching import SearchResult
 
 
@@ -987,6 +988,44 @@ Use summarize for URLs.
             aliases_by_id["weather"],
             {"forecast", "weather-lookup", "weather-check", "weather-forecast"},
         )
+
+    def test_naming_tools_expose_strict_persistence_instructions(self) -> None:
+        service, _ = build_default_service(AppConfig(bot_account_id="3518944354"))
+        event = InboundEvent(
+            launcher_id="612475113",
+            launcher_type="group",
+            sender_id="783190298",
+            sender_name="tester",
+            segments=[
+                MessageSegment(kind="mention", mention_target="3518944354"),
+                MessageSegment(kind="text", text=" 我想叫你小母牛了现在"),
+            ],
+        )
+        session = service.memory.save_user_event(event, character_id=service._active_character_id())
+        context = service.tool_orchestrator.exposure_context(
+            event,
+            session,
+            latest_message=event.command_text(service.config.bot_account_id),
+            address="爸爸",
+            assistant_name="大母牛",
+        )
+
+        schemas = {str(item["name"]): item for item in service.tools.model_schemas(context)}
+        assistant_alias_schema = schemas["set-assistant-alias"]
+        preferred_name_schema = schemas["set-preferred-name"]
+        alias_parameters = assistant_alias_schema["parameters"]
+        alias_properties = alias_parameters["properties"]  # type: ignore[index]
+        alias_parameter = alias_properties["assistant_alias"]  # type: ignore[index]
+
+        alias_description = str(assistant_alias_schema["description"])
+        self.assertIn("必须调用此工具", alias_description)
+        self.assertIn("我想叫你 xx", alias_description)
+        self.assertIn("我想叫你 xx 了现在", alias_description)
+        self.assertIn("不能只用角色语气口头答应", alias_description)
+        self.assertIn("覆盖旧别名", str(alias_parameter["description"]))  # type: ignore[index]
+        self.assertIn("必须调用此工具", str(preferred_name_schema["description"]))
+        self.assertIn("工具未调用成功前", _TOOL_CALLING_SYSTEM_PROMPT)
+        self.assertIn("不得说“我记住了”", _TOOL_CALLING_SYSTEM_PROMPT)
 
     def test_skills_panel_exposes_normalized_capabilities_and_safety(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -16,6 +16,15 @@ from ..infra.llm_clients import LLMClientError
 from ..skills import SkillSpec, ToolExecutionResult, ToolExposureContext, ToolInvocation, ToolRegistry
 
 
+_TOOL_CALLING_SYSTEM_PROMPT = (
+    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
+    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
+    "如果工具返回 display_mode=raw_block，最终回复可以有角色语气承接，但原始结果必须保留在代码块中。"
+    "凡是涉及保存、修改、记住称呼、用户称呼、机器人别名、偏好或长期状态的请求，"
+    "必须先调用对应工具；工具未调用成功前，不得说“我记住了”“以后就叫我”“以后我叫你”或类似承诺。"
+)
+
+
 @dataclass(slots=True)
 class GeneratedReply:
     text: str = ""
@@ -472,11 +481,7 @@ class Generator:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
-                    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
-                    "如果工具返回 display_mode=raw_block，最终回复可以有角色语气承接，但原始结果必须保留在代码块中。"
-                ),
+                "content": _TOOL_CALLING_SYSTEM_PROMPT,
             },
             {"role": "user", "content": prompt},
         ]
@@ -541,11 +546,7 @@ class Generator:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
-                    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
-                    "如果工具返回 display_mode=raw_block，最终回复可以有角色语气承接，但原始结果必须保留在代码块中。"
-                ),
+                "content": _TOOL_CALLING_SYSTEM_PROMPT,
             },
             {"role": "user", "content": prompt},
         ]

@@ -456,7 +456,11 @@ def _build_service(
     tools.register(
         "set-preferred-name",
         name="设置用户称呼",
-        description="当用户明确要求机器人以后怎么称呼自己时，保存当前用户的 preferred_name。",
+        description=(
+            "当用户要求机器人以后怎么称呼自己时，必须调用此工具保存或覆盖 preferred_name。"
+            "包括“叫我 xx”“以后叫我 xx”“你以后叫我 xx”“我的名字是 xx”“我叫 xx”这类表达。"
+            "不能只口头答应，工具成功前不得说已经记住。"
+        ),
         handler=lambda invocation: service.dispatcher._emit_tool_execution_result(
             invocation,
             service.onboarding.use_set_preferred_name_tool(invocation),
@@ -468,7 +472,10 @@ def _build_service(
         parameters={
             "type": "object",
             "properties": {
-                "preferred_name": {"type": "string", "description": "用户要求保存的短称呼，只填称呼本身。"},
+                "preferred_name": {
+                    "type": "string",
+                    "description": "新的用户称呼，只填称呼本身。若之前已保存称呼，本次调用会覆盖旧称呼，允许反复修改。",
+                },
             },
             "required": ["preferred_name"],
         },
@@ -479,7 +486,12 @@ def _build_service(
     tools.register(
         "set-assistant-alias",
         name="设置机器人别名",
-        description="当用户明确说以后要怎么叫机器人时，按当前角色和当前用户保存 assistant_alias。",
+        description=(
+            "当用户定义、修改或确认以后要怎么叫机器人时，必须调用此工具保存或覆盖 assistant_alias。"
+            "包括“我想叫你 xx”“我现在想叫你 xx”“我想叫你 xx 了现在”“以后叫你 xx”"
+            "“以后就叫你 xx”“现在叫你 xx”“改叫你 xx”“你的名字是 xx”这类表达。"
+            "这是持久化状态修改，不能只用角色语气口头答应；工具成功前不得说“以后就叫我 xx”或类似承诺。"
+        ),
         handler=lambda invocation: service.dispatcher._emit_tool_execution_result(
             invocation,
             service.onboarding.use_set_assistant_alias_tool(invocation),
@@ -491,7 +503,10 @@ def _build_service(
         parameters={
             "type": "object",
             "properties": {
-                "assistant_alias": {"type": "string", "description": "用户给机器人起的短称呼，只填称呼本身。"},
+                "assistant_alias": {
+                    "type": "string",
+                    "description": "新的机器人称呼，只填称呼本身。若之前已保存别名，本次调用会覆盖旧别名，允许反复修改。",
+                },
             },
             "required": ["assistant_alias"],
         },
@@ -502,7 +517,10 @@ def _build_service(
     tools.register(
         "reject-third-party-naming",
         name="拒绝代第三方命名",
-        description="当用户试图替别人决定称呼，或要求机器人以后叫其他人某个名字时调用；不能保存任何称呼。",
+        description=(
+            "当用户试图替别人决定称呼，或要求机器人以后叫其他人某个名字时必须调用；不能保存任何称呼。"
+            "例如“叫他 xx”“以后你叫她 xx”“你以后叫别人 xx”。"
+        ),
         handler=lambda invocation: service.dispatcher._emit_tool_execution_result(
             invocation,
             service.onboarding.use_reject_third_party_naming_tool(invocation),
@@ -519,7 +537,10 @@ def _build_service(
     tools.register(
         "clarify-naming-intent",
         name="澄清命名意图",
-        description="当用户在问称呼规则或询问当前叫法，但没有明确命名时调用；不能保存任何称呼。",
+        description=(
+            "当用户在问称呼规则、询问当前叫法或表达不构成正式命名时调用；不能保存任何称呼。"
+            "例如“我现在应该叫你什么”“你该叫我什么”“别人都叫你 xx 吗”。"
+        ),
         handler=lambda invocation: service.dispatcher._emit_tool_execution_result(
             invocation,
             service.onboarding.use_clarify_naming_intent_tool(invocation),
