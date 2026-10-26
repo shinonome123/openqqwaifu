@@ -137,6 +137,24 @@ class ToolPolicyConfig:
 
 
 @dataclass(slots=True)
+class RateLimitConfig:
+    # 付费和外部工具的令牌桶：每个用户一个、每个群一个，两个都有余量才放行。
+    # image 管生图；network 管搜索、网页抓取、summarize（三者共用一个桶）。
+    # *_burst 是桶容量（可以连续用几次），*_per_hour 是每小时回填几次；burst 为 0 关掉这一层。
+    enabled: bool = True
+    image_user_burst: int = 3
+    image_user_per_hour: float = 10.0
+    image_group_burst: int = 6
+    image_group_per_hour: float = 30.0
+    network_user_burst: int = 8
+    network_user_per_hour: float = 60.0
+    network_group_burst: int = 16
+    network_group_per_hour: float = 180.0
+    # 这些 QQ 号不受限制（例如机器人主人）。
+    exempt_user_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ClawRuntimeConfig:
     enabled: bool = False
     mode: str = "managed"
@@ -211,6 +229,7 @@ class AppConfig:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     marketplace: MarketplaceConfig = field(default_factory=MarketplaceConfig)
     tool_policy: ToolPolicyConfig = field(default_factory=ToolPolicyConfig)
+    rate_limits: RateLimitConfig = field(default_factory=RateLimitConfig)
     claw_runtime: ClawRuntimeConfig = field(default_factory=ClawRuntimeConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     qq_sidecar: QQSidecarConfig = field(default_factory=QQSidecarConfig)

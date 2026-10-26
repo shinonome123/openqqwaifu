@@ -16,6 +16,7 @@ import asyncio
 import html
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote_plus, urlparse
 
 from ..infra import AsyncHttpTransport, SyncHttpTransport, TransportError
+from ..infra.rate_limit import TokenBucketLimiter
 from ..infra.safe_fetch import afetch_public_url, check_public_url, fetch_public_url
 from ..models import InboundEvent, OutboundMessage, SessionMemory
 from .messages import t
@@ -49,6 +51,11 @@ _SKILL_ICONS: dict[str, str] = {
 }
 
 _LOGGER = logging.getLogger(__name__)
+
+# Rate-limit category per tool (see RateLimitConfig); search, fetch and
+# summarize share the "network" buckets.
+_RATE_LIMIT_IMAGE = "image"
+_RATE_LIMIT_NETWORK = "network"
 
 
 def _skill_text(key: str, **params: object) -> str:
@@ -76,6 +83,7 @@ def _record_dispatch_error(
 class SkillDispatcher:
     def __init__(self, service: "WaifuService") -> None:
         self._service = service
+        self._rate_limiter = TokenBucketLimiter()
 
     @staticmethod
     def _search_sources_from_payload(payload: dict[str, object]) -> list[tuple[str, str]]:
@@ -298,6 +306,9 @@ class SkillDispatcher:
         active_skills: list[SkillSpec],
     ) -> OutboundMessage:
         service = self._service
+        limited = self._rate_limited_message(_RATE_LIMIT_IMAGE, event, address=address)
+        if limited is not None:
+            return service.emitter.emit(event, limited, assistant_name=assistant_name)
         try:
             image = service.generator.generate_image(prompt)
             caption_result = self.use_image_caption_tool(
@@ -345,6 +356,9 @@ class SkillDispatcher:
         background_delivery: bool = True,
     ) -> OutboundMessage:
         service = self._service
+        limited = self._rate_limited_message(_RATE_LIMIT_IMAGE, event, address=address)
+        if limited is not None:
+            return await service.emitter.aemit(event, limited, assistant_name=assistant_name)
         if not background_delivery:
             try:
                 image = await service.generator.agenerate_image(prompt)
@@ -550,6 +564,9 @@ class SkillDispatcher:
                 text=_skill_text("skill.search_missing_query", address=address),
             )
             return service.emitter.emit(event, message, assistant_name=assistant_name)
+        limited = self._rate_limited_message(_RATE_LIMIT_NETWORK, event, address=address)
+        if limited is not None:
+            return service.emitter.emit(event, limited, assistant_name=assistant_name)
 
         search_context = service.search.search_query(cleaned_query, reason="skill-dispatch")
         service._store_search_context(session, search_context)
@@ -592,6 +609,9 @@ class SkillDispatcher:
                 text=_skill_text("skill.search_missing_query", address=address),
             )
             return await service.emitter.aemit(event, message, assistant_name=assistant_name)
+        limited = self._rate_limited_message(_RATE_LIMIT_NETWORK, event, address=address)
+        if limited is not None:
+            return await service.emitter.aemit(event, limited, assistant_name=assistant_name)
 
         search_context = await service.search.asearch_query(cleaned_query, reason="skill-dispatch")
         await service._store_search_context_async(session, search_context)
@@ -910,6 +930,9 @@ class SkillDispatcher:
                 message,
                 assistant_name=invocation.assistant_name,
             )
+        limited = self._rate_limited_message(_RATE_LIMIT_NETWORK, invocation.event, address=invocation.address)
+        if limited is not None:
+            return service.emitter.emit(invocation.event, limited, assistant_name=invocation.assistant_name)
 
         payload, error = self._resolve_summarize_payload(target, invocation=invocation)
         if error:
@@ -1008,6 +1031,9 @@ class SkillDispatcher:
         ).strip()
         if not prompt:
             return ToolExecutionResult(error="missing prompt", text=_skill_text("skill.image_missing_prompt"))
+        limited = self._rate_limited_result(_RATE_LIMIT_IMAGE, invocation)
+        if limited is not None:
+            return limited
         try:
             image = service.generator.generate_image(prompt)
         except (RuntimeError, ValueError, OSError) as exc:
@@ -1035,6 +1061,9 @@ class SkillDispatcher:
         ).strip()
         if not prompt:
             return ToolExecutionResult(error="missing prompt", text=_skill_text("skill.image_missing_prompt"))
+        limited = self._rate_limited_result(_RATE_LIMIT_IMAGE, invocation)
+        if limited is not None:
+            return limited
         try:
             image = await service.generator.agenerate_image(prompt)
         except (RuntimeError, ValueError, OSError) as exc:
@@ -1062,6 +1091,9 @@ class SkillDispatcher:
         service.gate.clear_pending_search(invocation.session)
         if not query:
             return ToolExecutionResult(error="missing query", text=_skill_text("skill.search_tool_missing_query"))
+        limited = self._rate_limited_result(_RATE_LIMIT_NETWORK, invocation)
+        if limited is not None:
+            return limited
         search_context = service.search.search_query(query, reason="model-tool")
         service._store_search_context(invocation.session, search_context)
         if not search_context.active:
@@ -1094,6 +1126,9 @@ class SkillDispatcher:
         service.gate.clear_pending_search(invocation.session)
         if not query:
             return ToolExecutionResult(error="missing query", text=_skill_text("skill.search_tool_missing_query"))
+        limited = self._rate_limited_result(_RATE_LIMIT_NETWORK, invocation)
+        if limited is not None:
+            return limited
         search_context = await service.search.asearch_query(query, reason="model-tool")
         await service._store_search_context_async(invocation.session, search_context)
         if not search_context.active:
@@ -1192,6 +1227,9 @@ class SkillDispatcher:
         )
         if not target:
             return ToolExecutionResult(error="missing target", text="请提供要总结的链接或文件路径。")
+        limited = self._rate_limited_result(_RATE_LIMIT_NETWORK, invocation)
+        if limited is not None:
+            return limited
         payload, error = self._resolve_summarize_payload(target, invocation=invocation)
         if error:
             return ToolExecutionResult(error=error, text=f"summarize 执行失败：{error}")
@@ -1266,6 +1304,9 @@ class SkillDispatcher:
         payload = invocation.session.metadata.get("last_search", {})
         payload = payload if isinstance(payload, dict) else {}
         if query:
+            limited = self._rate_limited_result(_RATE_LIMIT_NETWORK, invocation)
+            if limited is not None:
+                return limited
             search_context = service.search.search_query(query, reason="model-link-sources")
             service._store_search_context(invocation.session, search_context)
             payload = search_context.as_dict()
@@ -1295,6 +1336,9 @@ class SkillDispatcher:
         payload = invocation.session.metadata.get("last_search", {})
         payload = payload if isinstance(payload, dict) else {}
         if query:
+            limited = self._rate_limited_result(_RATE_LIMIT_NETWORK, invocation)
+            if limited is not None:
+                return limited
             search_context = await service.search.asearch_query(query, reason="model-link-sources")
             await service._store_search_context_async(invocation.session, search_context)
             payload = search_context.as_dict()
@@ -1358,6 +1402,9 @@ class SkillDispatcher:
         url = self._normalized_tool_text(invocation.argument("url") or invocation.raw_args)
         if not re.match(r"^https?://", url, flags=re.IGNORECASE):
             return ToolExecutionResult(error="missing url", text="请提供 http 或 https 链接。")
+        limited = self._rate_limited_result(_RATE_LIMIT_NETWORK, invocation)
+        if limited is not None:
+            return limited
         try:
             response = fetch_public_url(
                 url,
@@ -1390,6 +1437,9 @@ class SkillDispatcher:
         url = self._normalized_tool_text(invocation.argument("url") or invocation.raw_args)
         if not re.match(r"^https?://", url, flags=re.IGNORECASE):
             return ToolExecutionResult(error="missing url", text="请提供 http 或 https 链接。")
+        limited = self._rate_limited_result(_RATE_LIMIT_NETWORK, invocation)
+        if limited is not None:
+            return limited
         try:
             response = await afetch_public_url(
                 url,
@@ -1623,6 +1673,12 @@ class SkillDispatcher:
         invocation: ToolInvocation,
         result: ToolExecutionResult,
     ) -> OutboundMessage:
+        if result.metadata.get("rate_limited"):
+            return self._service.emitter.emit(
+                invocation.event,
+                self._plain_reply(invocation.event, result.text),
+                assistant_name=invocation.assistant_name,
+            )
         reply = self._service.generator.generate_tool_reply_message(invocation, result)
         text = self._compose_tool_display_text(reply.text, result)
         message = OutboundMessage(
@@ -1642,6 +1698,12 @@ class SkillDispatcher:
         invocation: ToolInvocation,
         result: ToolExecutionResult,
     ) -> OutboundMessage:
+        if result.metadata.get("rate_limited"):
+            return await self._service.emitter.aemit(
+                invocation.event,
+                self._plain_reply(invocation.event, result.text),
+                assistant_name=invocation.assistant_name,
+            )
         reply = await self._service.generator.agenerate_tool_reply_message(invocation, result)
         text = self._compose_tool_display_text(reply.text, result)
         message = OutboundMessage(
@@ -1655,6 +1717,67 @@ class SkillDispatcher:
             message,
             assistant_name=invocation.assistant_name,
         )
+
+    def _rate_limit_wait(self, category: str, event: InboundEvent) -> float:
+        """Take a token for ``category`` from the sender's and the group's bucket."""
+        limits = self._service.config.rate_limits
+        if not limits.enabled:
+            return 0.0
+        sender_id = str(event.sender_id or "").strip()
+        if sender_id and sender_id in limits.exempt_user_ids:
+            return 0.0
+        rules = [
+            (
+                f"{category}:user:{sender_id}",
+                float(getattr(limits, f"{category}_user_burst")),
+                float(getattr(limits, f"{category}_user_per_hour")) / 3600.0,
+            )
+        ]
+        if event.launcher_type == "group":
+            rules.append(
+                (
+                    f"{category}:group:{event.launcher_id}",
+                    float(getattr(limits, f"{category}_group_burst")),
+                    float(getattr(limits, f"{category}_group_per_hour")) / 3600.0,
+                )
+            )
+        return self._rate_limiter.acquire(rules)
+
+    def _rate_limited_text(self, category: str, wait: float, *, address: str) -> str:
+        if math.isinf(wait):
+            wait_text = _skill_text("skill.rate_limit.later")
+        elif wait < 60:
+            wait_text = _skill_text("skill.rate_limit.seconds", count=max(1, math.ceil(wait)))
+        else:
+            wait_text = _skill_text("skill.rate_limit.minutes", count=math.ceil(wait / 60))
+        return _skill_text(
+            "skill.rate_limited",
+            address=address or "你",
+            tool=_skill_text(f"skill.rate_limit.{category}"),
+            wait=wait_text,
+        )
+
+    def _rate_limited_result(self, category: str, invocation: ToolInvocation) -> ToolExecutionResult | None:
+        wait = self._rate_limit_wait(category, invocation.event)
+        if wait <= 0:
+            return None
+        retry_after = None if math.isinf(wait) else math.ceil(wait)
+        when = f"in {retry_after}s" if retry_after is not None else "later"
+        return ToolExecutionResult(
+            error=f"rate limited: {category} tools are used too often, retry {when}",
+            text=self._rate_limited_text(category, wait, address=invocation.address),
+            metadata={"rate_limited": True, "category": category, "retry_after_seconds": retry_after},
+        )
+
+    def _rate_limited_message(self, category: str, event: InboundEvent, *, address: str) -> OutboundMessage | None:
+        wait = self._rate_limit_wait(category, event)
+        if wait <= 0:
+            return None
+        return self._plain_reply(event, self._rate_limited_text(category, wait, address=address))
+
+    @staticmethod
+    def _plain_reply(event: InboundEvent, text: str) -> OutboundMessage:
+        return OutboundMessage(launcher_id=event.launcher_id, launcher_type=event.launcher_type, text=text)
 
     @staticmethod
     def _compose_tool_display_text(prefix: str, result: ToolExecutionResult) -> str:
