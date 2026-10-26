@@ -9,13 +9,14 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from ..gateways.inbound_dedup import InboundDeduplicator
 from ..models import InboundEvent, MessageSegment
 from ..infra import MetricsRegistry, logging_is_configured
 from .auth import AuthManager
@@ -145,6 +146,8 @@ class HttpApi:
     service: Any
     auth: AuthManager | None = None
     metrics: MetricsRegistry | None = None
+    # Shared by the HTTP callback and reverse-WS paths, which both end in handle_json[_async].
+    dedup: InboundDeduplicator = field(default_factory=InboundDeduplicator)
 
     def __post_init__(self) -> None:
         if self.auth is None:
@@ -184,9 +187,14 @@ class HttpApi:
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 
             event = parse_onebot_event(payload)
+            claim = self.dedup.claim(event, event_time=payload.get("time"))
+            if claim is None:
+                outcome = "duplicate"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
             try:
                 message = self.service.handle_event(event)
             except Exception as exc:
+                self.dedup.release(claim)
                 outcome = "delivery_failed"
                 if logging_is_configured():
                     _LOGGER.exception(
@@ -243,6 +251,10 @@ class HttpApi:
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 
             event = parse_onebot_event(payload)
+            claim = self.dedup.claim(event, event_time=payload.get("time"))
+            if claim is None:
+                outcome = "duplicate"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
             try:
                 handle_event_async = getattr(self.service, "handle_event_async", None)
                 if callable(handle_event_async):
@@ -250,6 +262,7 @@ class HttpApi:
                 else:
                     message = await asyncio.to_thread(self.service.handle_event, event)
             except Exception as exc:
+                self.dedup.release(claim)
                 outcome = "delivery_failed"
                 if logging_is_configured():
                     _LOGGER.exception(

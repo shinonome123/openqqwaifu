@@ -187,6 +187,54 @@ class ServerIntegrationTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_http_callback_retry_does_not_reply_twice(self) -> None:
+        host, port = self.action_server.server_address
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                qq_sidecar=QQSidecarConfig(outbound_base_url=f"http://{host}:{port}"),
+            )
+            config.llm.enabled = True
+            config.llm.backend = "openai"
+            config.llm.base_url = "http://127.0.0.1:1"
+            config.llm.api_key = "test-key"
+            config.llm.model = "test-model"
+            service, _ = build_runtime_service(config)
+            service.generator._dify_client = _FakeChatClient()
+            api = HttpApi(service)
+            server = run_server(api, "127.0.0.1", 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request_host, request_port = server.server_address
+                payload = json.dumps(
+                    {
+                        "post_type": "message",
+                        "message_type": "group",
+                        "group_id": 612475113,
+                        "user_id": 783190298,
+                        "message_id": 90001,
+                        "sender": {"nickname": "tester"},
+                        "message": [{"type": "text", "data": {"text": "hello"}}],
+                    }
+                ).encode("utf-8")
+                for _ in range(2):
+                    request = urllib.request.Request(
+                        f"http://{request_host}:{request_port}/onebot/events",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        self.assertEqual(response.status, HTTPStatus.NO_CONTENT)
+
+                sends = [path for path, _ in _ActionCaptureHandler.requests if path == "/send_group_msg"]
+                self.assertEqual(len(sends), 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_health_endpoint_returns_ok(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, _ = build_runtime_service(AppConfig(data_root=tmpdir))

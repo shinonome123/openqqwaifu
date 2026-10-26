@@ -155,6 +155,29 @@ class OneBotWsHttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.sender_id, "783190298")
         await ws.close()
 
+    async def test_replayed_event_frame_is_handled_once(self) -> None:
+        ws = await self.client.ws_connect("/onebot/v11/ws")
+        frame = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 612475113,
+            "user_id": 783190298,
+            "message_id": 5001,
+            "sender": {"user_id": 783190298, "nickname": "tester"},
+            "raw_message": "hello from ws",
+        }
+        await ws.send_json(frame)
+        await ws.send_json(frame)
+        await ws.send_json({**frame, "message_id": 5002, "raw_message": "second message"})
+
+        first = await asyncio.wait_for(self.service.events.get(), timeout=1)
+        second = await asyncio.wait_for(self.service.events.get(), timeout=1)
+        await asyncio.sleep(0.1)
+
+        self.assertEqual({first.message_id, second.message_id}, {"5001", "5002"})
+        self.assertTrue(self.service.events.empty())
+        await ws.close()
+
 
 if __name__ == "__main__":
     unittest.main()
