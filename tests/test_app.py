@@ -1911,7 +1911,8 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(result["reason"], "bot_joined_group")
 
     def test_active_character_card_identity_wins_for_person_session(self) -> None:
-        service, _ = build_default_service(AppConfig())
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        service, _ = build_default_service(AppConfig(data_root=tmpdir))
         service.cards.save_editor_bundle(
             "aurora",
             shared_fields={
@@ -1934,7 +1935,7 @@ class WaifuServiceTests(unittest.TestCase):
                 "prologue": ["hello"],
             },
         )
-        service.cards.set_active_character("aurora")
+        service.activate_character("aurora")
         session = service.memory.load("783190298", "person", character_id="aurora")
         session.metadata["card"] = {
             "assistant_name": "neko",
@@ -1954,7 +1955,8 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(address, "Captain")
 
     def test_save_character_panel_can_edit_without_switching_active_character(self) -> None:
-        service, _ = build_default_service(AppConfig())
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        service, _ = build_default_service(AppConfig(data_root=tmpdir))
 
         saved = service.save_character_panel(
             {
