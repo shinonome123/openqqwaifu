@@ -158,16 +158,21 @@
 
 1. 单测：见第 1 节。新测试一律用临时目录。
 2. 不碰真实数据的实机冒烟。它会调用付费的模型和嵌入接口，每条消息约 3–4k 提示词 token、3–7 次调用：
-   - 把 `data/docker-compose-config.json` 复制到一个临时目录，把 `data_root` 改成该目录下的 `data`，`qq_sidecar.dry_run` 设为 `true`；同时拷贝 `data/cards` 和 `data/state` 过去。
+   - 把 `data/docker-compose-config.json` 复制到一个临时目录，把 `data_root` 改成该目录下的 `data`，`qq_sidecar.dry_run` 设为 `true`（或设环境变量 `OPENQQWAIFU_QQ_SIDECAR_DRY_RUN=true`）；同时拷贝 `data/cards` 和 `data/state` 过去。
    - 以这个临时目录作为工作目录运行。`ConfigManager.load()` 会按配置路径和当前目录去找 `napcat/config`，可能改写其中的 OneBot 配置，所以不要在仓库根目录跑。
+   - `dry_run` 现在真的生效（2026-10-26 修）：`build_runtime_service` 在 `dry_run` 为真时出站一律用 `CapturingOutboundPort`，配了 `outbound_base_url` 也不发；`reverse_ws` 模式仍保留网关，NapCat 照常连进来推事件，只是回复不发出去。其余按线上走：`_requires_live_llm()` 为真，模型没配好会回「AI 工具编排模型还没连上」，知识抽取不走正则回退。之前的说法「dry_run 已不改变行为」作废。
+   - 也可以直接 `serve`：`dry_run` 为真时启动日志里是 `outbound=capture(dry-run)`，控制台概览的出站模式显示 `dry-run (capture)`。
+   - 不想接 NapCat、只想喂几条消息时，用下面的脚本。`build_file_service` 本来就只捕获，但它按离线处理（允许回退）；要和线上一致就用 `build_runtime_service` 加 `dry_run`。
 
 ```python
 # PYTHONPATH=<repo>/src  <repo>/.venv/bin/python
 from waifu_standalone.settings_admin.config_manager import ConfigManager
-from waifu_standalone.runtime.container import build_file_service
+from waifu_standalone.runtime.container import build_runtime_service
 from waifu_standalone.models import InboundEvent, MessageSegment
 
-service, outbound = build_file_service(ConfigManager("<tmp>/data/config.json").load())
+config = ConfigManager("<tmp>/data/config.json").load()
+assert config.qq_sidecar.dry_run  # 否则会真发
+service, outbound = build_runtime_service(config)
 ev = InboundEvent(launcher_id="20001", launcher_type="person", sender_id="20001",
                   sender_name="测试用户", segments=[MessageSegment(kind="text", text="在吗")])
 reply = service.handle_event(ev)

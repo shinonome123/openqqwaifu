@@ -1087,12 +1087,16 @@ class WaifuService:
         )
 
     def _outbound_mode_label(self) -> str:
+        if self.config.qq_sidecar.dry_run:
+            return "dry-run (capture)"
         if not self.config.qq_sidecar.outbound_base_url:
             return "offline"
         return f"{self.config.qq_sidecar.adapter_name} -> {self.config.qq_sidecar.outbound_base_url}"
 
     def _requires_live_llm(self) -> bool:
-        return not isinstance(self.outbound, CapturingOutboundPort)
+        # A dry run rehearses the live path (real model, no offline fallbacks);
+        # only the delivery is captured.
+        return self.config.qq_sidecar.dry_run or not isinstance(self.outbound, CapturingOutboundPort)
 
     @staticmethod
     def _message_to_dict(message: OutboundMessage) -> dict[str, object]:

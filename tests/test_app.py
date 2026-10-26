@@ -2761,6 +2761,49 @@ class WaifuServiceTests(unittest.TestCase):
 
             self.assertIsInstance(outbound, OneBotHttpOutboundPort)
 
+    def test_runtime_service_dry_run_captures_even_with_sidecar_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                qq_sidecar=QQSidecarConfig(outbound_base_url="http://127.0.0.1:3000", dry_run=True),
+            )
+
+            service, outbound = build_runtime_service(config)
+            result = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="hello")],
+                )
+            )
+
+            self.assertIsInstance(outbound, CapturingOutboundPort)
+            self.assertIs(service.outbound, outbound)
+            # A dry run rehearses the live path, so a missing model is reported
+            # instead of falling back to the offline reply.
+            self.assertTrue(service._requires_live_llm())
+            assert result is not None
+            self.assertIn("AI 工具编排模型还没连上", result.text)
+            self.assertEqual([message.text for message in outbound.sent], [result.text])
+
+            service.config.qq_sidecar.dry_run = False
+            service._refresh_runtime_components(rebuild_outbound=True)
+            self.assertIsInstance(service.outbound, OneBotHttpOutboundPort)
+
+    def test_runtime_service_dry_run_keeps_reverse_ws_gateway_for_inbound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                qq_sidecar=QQSidecarConfig(gateway_mode="reverse_ws", dry_run=True),
+            )
+
+            service, outbound = build_runtime_service(config)
+
+            self.assertIsInstance(outbound, CapturingOutboundPort)
+            self.assertIsNotNone(service.reverse_ws_gateway)
+
     def test_live_runtime_service_requires_llm_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(

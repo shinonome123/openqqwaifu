@@ -57,7 +57,7 @@ docker compose -f compose.napcat.yml up -d
 | `state_store.py` | Persistent state for sessions, members, knowledge, runtime |
 | `memory.py` | `FileMemoryStore` for session history persistence |
 | `models.py` | Domain objects: inbound events, message segments |
-| `services.py` | Service interfaces and outbound ports (including `CapturingOutboundPort` for dry-run mode) |
+| `services.py` | Service interfaces and outbound ports (re-exports `CapturingOutboundPort` from `runtime/testing.py`, used for dry-run and offline mode) |
 | `contracts.py` | Shared interface/contract types |
 | `migration.py` | Legacy waifu data import via `WaifuDataImporter` |
 
@@ -89,7 +89,7 @@ docker compose -f compose.napcat.yml up -d
 
 ## Key Design Patterns
 
-- `QQSidecarConfig.dry_run = True` activates `CapturingOutboundPort` which captures outbound messages instead of sending them -- useful for testing without a live QQ connection
+- `QQSidecarConfig.dry_run = True` (env `OPENQQWAIFU_QQ_SIDECAR_DRY_RUN`) makes `build_runtime_service()` capture outbound messages in a `CapturingOutboundPort` instead of sending them, even when `outbound_base_url` is set; in `reverse_ws` mode NapCat still connects for inbound events. Everything else runs as live (real model calls, no offline fallbacks) -- useful for rehearsing against real QQ traffic without replying
 - The service uses `build_default_service()` for offline/CLI operations and `build_runtime_service()` for the live server with real outbound connectivity
 - Skills are markdown files that get registered in `skill_registry` and can be bundled/shared via skill packs
 - The web console is served as static files bundled as package data

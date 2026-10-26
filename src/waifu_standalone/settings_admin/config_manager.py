@@ -379,9 +379,8 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
         "OPENQQWAIFU_QQ_SIDECAR_REVERSE_WS_SEND_TIMEOUT_SECONDS",
         qq_sidecar.reverse_ws_send_timeout_seconds,
     )
-    # Kept for old config compatibility only. Delivery mode is derived from
-    # outbound_base_url; dry-run no longer changes runtime behavior.
-    _env_bool("OPENQQWAIFU_QQ_SIDECAR_DRY_RUN", qq_sidecar.dry_run)
+    # Dry run captures replies instead of sending them (see _build_runtime_outbound).
+    qq_sidecar.dry_run = _env_bool("OPENQQWAIFU_QQ_SIDECAR_DRY_RUN", qq_sidecar.dry_run)
     return config
 
 
