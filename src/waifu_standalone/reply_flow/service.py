@@ -42,7 +42,9 @@ class ReplyFlowService:
         svc._record_inbound(event, text)
         if not text and event.image_count == 0:
             return None
-        if text and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes):
+        # "/skill <name> ..." is a command even though "/" is an ignored prefix.
+        explicit_skill = svc.dispatcher.resolve_explicit_skill_request(text)
+        if explicit_skill is None and text and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes):
             return None
         # Keep ambient group chatter until the bot is addressed, so the next reply
         # has the surrounding conversation instead of only the @ message.
@@ -88,7 +90,9 @@ class ReplyFlowService:
 
         active_skills = svc.tool_orchestrator.prompt_skill_cards(latest_message)
         await svc._store_active_skills_async(session, active_skills)
-        explicit_skill = svc.dispatcher.resolve_explicit_skill_request(latest_message)
+        if explicit_skill is None:
+            # "生图 一只猫" generates the image directly instead of asking the model first.
+            explicit_skill = svc.dispatcher.resolve_image_command(text)
         if explicit_skill is not None:
             skill, raw_args = explicit_skill
             return await svc.dispatcher.adispatch_explicit_skill(
@@ -99,7 +103,7 @@ class ReplyFlowService:
                 address=address,
                 assistant_name=assistant_name,
                 active_skills=active_skills,
-                background_image_delivery=svc.config.background_image_delivery,
+                background_image_delivery=background_image_delivery,
             )
         tool_context = svc.tool_orchestrator.exposure_context(
             event,

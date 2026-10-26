@@ -1053,7 +1053,11 @@ class WaifuService:
             else:
                 self.gate.store_pending_search(session, query=search_context.query)
         else:
-            session.metadata.pop("last_search", None)
+            # A search with results stays for follow-ups such as "来源呢" (search-links);
+            # it expires on its own after LAST_SEARCH_TTL_SECONDS.
+            last_search = session.metadata.get("last_search")
+            if not (isinstance(last_search, dict) and last_search.get("results")):
+                session.metadata.pop("last_search", None)
             session.metadata.pop(PENDING_SEARCH_METADATA_KEY, None)
         self.session_repository.save(session)
 

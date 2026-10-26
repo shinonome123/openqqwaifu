@@ -189,10 +189,14 @@ class AppConfig:
     image_command_prefix: str = "生图"
     image_command_aliases: list[str] = field(default_factory=lambda: ["draw"])
     ignore_prefixes: list[str] = field(default_factory=lambda: ["!", "？", "/"])
+    # Commands that still run although they start with an ignored prefix ("/skill weather-command 上海").
+    explicit_skill_prefixes: list[str] = field(default_factory=lambda: ["/skill"])
     group_follow_up_window_seconds: float = 5.0
     group_response_delay_seconds: float = 0.0
     repeat_trigger_count: int = 0
     multimodal_enabled: bool = True
+    # Longer replies are sent as several QQ messages; 0 sends one message whatever the length.
+    outbound_message_max_chars: int = 900
     history_window_messages: int = 30
     history_window_chars: int = 2500
     memory_recall_limit: int = 3

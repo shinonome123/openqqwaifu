@@ -486,6 +486,8 @@ class Generator:
         if self._tools is None:
             raise LLMClientError("tool registry is not bound")
         tools = self._tools.model_schemas(tool_context)
+        # The model can call any exposed skill, not only the ranked prompt cards.
+        invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
         messages = [
             {
                 "role": "system",
@@ -512,7 +514,7 @@ class Generator:
                     session=session,
                     address=address,
                     assistant_name=assistant_name,
-                    active_skills=active_skills,
+                    active_skills=invocation_skills,
                     arguments=tool_call.arguments,
                     allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
@@ -552,6 +554,8 @@ class Generator:
         if self._tools is None:
             raise LLMClientError("tool registry is not bound")
         tools = self._tools.model_schemas(tool_context)
+        # The model can call any exposed skill, not only the ranked prompt cards.
+        invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
         messages = [
             {
                 "role": "system",
@@ -578,7 +582,7 @@ class Generator:
                     session=session,
                     address=address,
                     assistant_name=assistant_name,
-                    active_skills=active_skills,
+                    active_skills=invocation_skills,
                     arguments=tool_call.arguments,
                     allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
@@ -1699,7 +1703,7 @@ class Generator:
             latest_message=latest_message,
             current_time=self._prompt_time(),
         )
-        preview = self._clip(result.text or result.error or "", limit=1200)
+        preview = self._clip_multiline(result.text or result.error or "", limit=1200)
         metadata_preview = self._clip(
             json.dumps(result.metadata, ensure_ascii=False, default=str) if result.metadata else "",
             limit=800,
@@ -2454,12 +2458,26 @@ class Generator:
         }
 
     @staticmethod
+    def _merge_skills(first: list[SkillSpec], second: list[SkillSpec]) -> list[SkillSpec]:
+        merged = list(first)
+        seen = {skill.skill_id for skill in merged}
+        for skill in second:
+            if skill.skill_id not in seen:
+                seen.add(skill.skill_id)
+                merged.append(skill)
+        return merged
+
+    @staticmethod
     def _append_raw_tool_blocks(text: str, results: list[ToolExecutionResult]) -> str:
         lead = str(text or "").strip()
+        lead_compact = " ".join(lead.split())
         blocks: list[str] = []
         for result in results:
             payload = str(result.text or result.error or "").strip()
             if not payload:
+                continue
+            # The model already quoted the raw result itself; do not send it twice.
+            if " ".join(payload.split()) in lead_compact:
                 continue
             block = "```text\n" + payload + "\n```"
             if block not in blocks:
@@ -2561,9 +2579,13 @@ class Generator:
 
     @staticmethod
     def _clean_response(text: str) -> str:
-        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-        normalized = normalized.replace("<think>", "").replace("</think>", "").strip()
-        return normalized
+        # Keep the model's line breaks (lists, code blocks); only tidy spaces and blank lines.
+        normalized = str(text or "").replace("<think>", "").replace("</think>", "")
+        normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"(?<=\S)[ \t]+", " ", normalized)
+        normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
 
     @staticmethod
     def _asks_for_name(text: str) -> bool:

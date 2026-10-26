@@ -24,6 +24,8 @@ from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment
 from waifu_standalone.memory import FileMemoryStore, InMemoryStore
 from waifu_standalone.organs.memories import Memory
 from waifu_standalone.reply_flow import Generator
+from waifu_standalone.reply_flow.emitter import split_reply_text
+from waifu_standalone.skills import ToolExecutionResult
 from waifu_standalone.services import CapturingOutboundPort
 from waifu_standalone.state_store import SqliteRuntimeStateStore
 from waifu_standalone.systems.searching import SearchContext, SearchResult
@@ -2310,6 +2312,79 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(clip(thought, limit=30), thought[:30] + "…")
         self.assertEqual(clip("对方在问时间。语气轻松。然后接着聊明天的安排吧好不好", limit=16), "对方在问时间。语气轻松。")
         self.assertEqual(clip("很短", limit=80), "很短")
+
+    def test_reply_cleanup_keeps_line_breaks(self) -> None:
+        cleaned = Generator._clean_response("<think></think>第一行\r\n\n\n\n第二行  有\t空格  \n- 列表\n    缩进保留")
+        self.assertEqual(cleaned, "第一行\n\n第二行 有 空格\n- 列表\n    缩进保留")
+
+    def test_raw_tool_block_is_not_repeated_when_model_quoted_it(self) -> None:
+        result = ToolExecutionResult(text="query: x\n- 标题\nhttps://example.com/a", display_mode="raw_block")
+        quoted = "来源如下：\n```text\nquery: x\n- 标题\nhttps://example.com/a\n```"
+        self.assertEqual(Generator._append_raw_tool_blocks(quoted, [result]), quoted)
+        appended = Generator._append_raw_tool_blocks("来源如下：", [result])
+        self.assertEqual(appended.count("https://example.com/a"), 1)
+        self.assertIn("```text", appended)
+
+    def test_long_reply_is_sent_as_several_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, outbound = build_default_service(AppConfig(data_root=tmpdir, outbound_message_max_chars=60))
+            service.state_store.save_member(
+                {"group_id": "", "user_id": "783190298", "preferred_name": "tester", "onboarding_status": "ready"}
+            )
+            paragraphs = ["第一段" + "甲" * 40, "第二段" + "乙" * 40, "第三段" + "丙" * 40]
+            long_reply = "\n\n".join(paragraphs)
+            service.generator.generate_reply = lambda *args, **kwargs: long_reply  # type: ignore[method-assign]
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="讲长一点")],
+                )
+            )
+
+            assert reply is not None
+            self.assertEqual(reply.text, long_reply)
+            self.assertEqual([message.text for message in outbound.sent], paragraphs)
+            history = service.memory.load("783190298", "person").history
+            self.assertEqual(history[-1], f"assistant: {long_reply}")
+
+    def test_split_reply_text_prefers_sentence_ends_and_keeps_all_text(self) -> None:
+        text = "这是第一句话，内容比较长。" * 6
+        chunks = split_reply_text(text, 40)
+        self.assertTrue(all(len(chunk) <= 40 for chunk in chunks))
+        self.assertTrue(all(chunk.endswith("。") for chunk in chunks))
+        self.assertEqual("".join(chunks), text)
+        self.assertEqual(split_reply_text("短", 40), ["短"])
+        self.assertEqual(split_reply_text("x" * 50, 0), ["x" * 50])
+
+    def test_last_search_with_results_survives_the_next_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            session = service.memory.load("783190298", "person")
+            session.metadata["last_search"] = SearchContext(
+                query="拼多多 罚款",
+                summary="拼多多被罚。",
+                results=[SearchResult(title="通报", snippet="罚款", url="https://example.com/a")],
+                fetched_at=time.time(),
+                reason="manual",
+            ).as_dict()
+            service.memory.store.save(session)
+
+            service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="这事你怎么看")],
+                )
+            )
+
+            kept = service.memory.load("783190298", "person").metadata.get("last_search", {})
+            self.assertEqual(kept.get("query"), "拼多多 罚款")
 
     def test_group_ambient_messages_fold_into_next_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

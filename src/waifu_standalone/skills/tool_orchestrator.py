@@ -52,7 +52,7 @@ class ToolCallingOrchestrator:
             assistant_name=assistant_name,
             allowed_tool_ids=self._allowed_tool_ids(event),
             skill_cards_by_tool=self._skill_cards_by_tool(),
-            skill_manifests=svc.skills.candidate_manifests(latest_message),
+            skill_manifests=svc.skills.exposed_manifests(latest_message),
         )
 
     def model_schemas(self, context: ToolExposureContext) -> list[dict[str, object]]:
