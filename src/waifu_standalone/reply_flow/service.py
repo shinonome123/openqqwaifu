@@ -44,11 +44,21 @@ class ReplyFlowService:
             return None
         if text and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes):
             return None
+        # Keep ambient group chatter until the bot is addressed, so the next reply
+        # has the surrounding conversation instead of only the @ message.
+        svc._remember_ambient_event(event, character_id=current_character)
         if not svc.gate.should_reply(event):
             return None
 
         await svc.onboarding.aremember_directory_member(event)
-        session = await svc.memory.asave_user_event(event, character_id=current_character)
+        ambient_context = svc._peek_ambient_history(event, character_id=current_character)
+        session = await svc.memory.asave_user_event(
+            event,
+            character_id=current_character,
+            context_lines=ambient_context,
+            bot_account_id=svc.config.bot_account_id,
+        )
+        svc._clear_ambient_history(event, character_id=current_character)
         assistant_name = svc._resolve_assistant_name(event, session, character_id=current_character)
         session = await svc.persona.asanitize_session_state(session, assistant_name=assistant_name)
         await svc.persona.asanitize_member_state(
@@ -57,6 +67,14 @@ class ReplyFlowService:
             character_id=current_character,
         )
         address = await svc._resolve_address_async(event, session)
+        # In a group each member may call the bot by their own alias. Label the bot's
+        # history lines with the card name so the label stays the same whoever speaks;
+        # the current speaker's alias is passed as a speaker note instead.
+        dialogue_assistant_name = assistant_name
+        if event.launcher_type == "group":
+            dialogue_assistant_name = (
+                svc.generator.resolve_assistant_name(event.launcher_type, session) or assistant_name
+            )
         inbound_behavior = svc.event_engine.capture_inbound(
             event,
             text=latest_message,
@@ -104,8 +122,10 @@ class ReplyFlowService:
         conversation_view = await svc.memory.aformat_dialogue(
             event.launcher_id,
             event.launcher_type,
-            assistant_name=assistant_name,
+            assistant_name=dialogue_assistant_name,
             limit=svc.config.history_window_messages,
+            max_chars=svc.config.history_window_chars,
+            exclude_last=True,
             character_id=current_character,
         )
         recalled_memory_hints = await asyncio.to_thread(
@@ -131,6 +151,11 @@ class ReplyFlowService:
             behavior_events=behavior_context,
         )
         speaker_notes = await svc.knowledge._adirectory_member_notes(event)
+        if dialogue_assistant_name != assistant_name:
+            speaker_notes.insert(
+                0,
+                f"{address}叫你「{assistant_name}」；对话记录里「{dialogue_assistant_name}」的发言就是你说的。",
+            )
         for highlight in graph_snapshot.get("highlights", [])[:3] if isinstance(graph_snapshot, dict) else []:
             text_hint = str(highlight or "").strip()
             # The graph re-lists recalled memories as "相关记忆：…"; skip those already
@@ -200,7 +225,7 @@ class ReplyFlowService:
                 character_id=current_character,
             ),
             latest_message=latest_message,
-            assistant_name=assistant_name,
+            assistant_name=dialogue_assistant_name,
             address=address,
             conversation_view=conversation_view,
         )

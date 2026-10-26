@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -146,6 +147,9 @@ class WaifuService:
     _recent_outbound: list[OutboundMessage] = field(default_factory=list)
     _recent_events: list[dict[str, Any]] = field(default_factory=list)
     _recent_behavior_events: list[dict[str, Any]] = field(default_factory=list)
+    # Group messages that did not trigger a reply yet. They are kept in memory
+    # (not persisted per message) and merged into session history on the next reply.
+    _ambient_history: dict[tuple[str, str, str], deque[str]] = field(default_factory=dict, repr=False)
     _started_at: float = field(default_factory=time.monotonic, repr=False)
     _event_counter: int = 0
     _state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -544,9 +548,10 @@ class WaifuService:
         )
 
     def _latest_message_text(self, event: InboundEvent, command_text: str) -> str:
+        bot_account_id = self.config.bot_account_id
         if self.config.multimodal_enabled and event.image_count > 0:
-            return event.to_memory_text()
-        return command_text or event.to_memory_text()
+            return event.to_memory_text(bot_account_id=bot_account_id)
+        return command_text or event.to_memory_text(bot_account_id=bot_account_id)
 
     @staticmethod
     def _split_history_line(line: str) -> tuple[str, str]:
@@ -927,6 +932,57 @@ class WaifuService:
         self._bound_character_id = active_character
         self._reset_character_runtime_context(reset_sessions=reset_sessions)
 
+    def _ambient_history_key(
+        self,
+        event: InboundEvent,
+        *,
+        character_id: str = "",
+    ) -> tuple[str, str, str]:
+        return (
+            str(character_id or self._active_character_id()).strip(),
+            str(event.launcher_type or "").strip(),
+            str(event.launcher_id or "").strip(),
+        )
+
+    def _ambient_history_limit(self) -> int:
+        configured = int(self.config.short_term_memory_limit or 30)
+        return max(40, min(120, configured * 2))
+
+    def _remember_ambient_event(self, event: InboundEvent, *, character_id: str = "") -> None:
+        """Keep a group message that did not trigger a reply, until the next reply.
+
+        Writing every group message as a full session snapshot would cause heavy
+        write amplification on busy groups. The buffer is in-memory and bounded;
+        it is merged into the persisted session exactly once, on the next reply.
+        """
+        if event.launcher_type != "group":
+            return
+        bot_account_id = str(self.config.bot_account_id or "").strip()
+        if bot_account_id and str(event.sender_id or "").strip() == bot_account_id:
+            return
+        message_text = event.to_memory_text(bot_account_id=bot_account_id).strip()
+        if not message_text:
+            return
+        line = f"{event.sender_name}: {message_text}"
+        key = self._ambient_history_key(event, character_id=character_id)
+        limit = self._ambient_history_limit()
+        with self._state_lock:
+            buffer = self._ambient_history.get(key)
+            if buffer is None or buffer.maxlen != limit:
+                buffer = deque(buffer or (), maxlen=limit)
+                self._ambient_history[key] = buffer
+            buffer.append(line)
+
+    def _peek_ambient_history(self, event: InboundEvent, *, character_id: str = "") -> list[str]:
+        key = self._ambient_history_key(event, character_id=character_id)
+        with self._state_lock:
+            return list(self._ambient_history.get(key, ()))
+
+    def _clear_ambient_history(self, event: InboundEvent, *, character_id: str = "") -> None:
+        key = self._ambient_history_key(event, character_id=character_id)
+        with self._state_lock:
+            self._ambient_history.pop(key, None)
+
     def _reset_character_runtime_context(self, *, reset_sessions: bool = False) -> None:
         if reset_sessions:
             clear_sessions = getattr(self.memory.store, "clear", None)
@@ -936,6 +992,7 @@ class WaifuService:
             self.gate.clear_all_windows_locked()
             self._recent_behavior_events.clear()
             self._session_locks.clear()
+            self._ambient_history.clear()
 
     def _refresh_runtime_components(self, *, rebuild_generator: bool = False, rebuild_outbound: bool = False) -> None:
         set_active_metrics_registry(self.metrics)
@@ -1090,10 +1147,9 @@ class WaifuService:
         return lines
 
     def _preview_conversation_view(self, history_lines: list[str], *, assistant_name: str, limit: int = 8) -> str:
-        lines: list[str] = []
-        for raw_line in history_lines[-max(1, int(limit)):]:
-            speaker, content = self._split_history_line(raw_line)
-            if speaker == "assistant":
-                speaker = assistant_name
-            lines.append(f"{speaker}: {content}")
-        return "\n".join(lines)
+        # Same windowing as live replies, so the card test panel shows what the model would see.
+        return self.memory._format_dialogue_lines(
+            history_lines[-max(1, int(limit)):],
+            assistant_name=assistant_name,
+            max_chars=self.config.history_window_chars,
+        )

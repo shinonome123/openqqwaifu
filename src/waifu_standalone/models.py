@@ -65,16 +65,23 @@ class InboundEvent:
                     parts.append(f"@{display}")
         return "".join(parts).strip()
 
-    def to_memory_text(self) -> str:
+    def to_memory_text(self, *, bot_account_id: str = "") -> str:
         has_images = self.image_count > 0
+        bot_target = str(bot_account_id or "").strip()
         parts: list[str] = []
         for segment in self.segments:
             if segment.kind == "text" and segment.text:
                 parts.append(segment.text)
             elif segment.kind == "image":
                 continue
-            elif segment.kind == "mention" and not has_images:
-                display = segment.mention_display.strip() or segment.mention_target.strip()
+            elif segment.kind == "mention":
+                mention_target = segment.mention_target.strip()
+                # The bot's own @ is transport noise in history; other people's @ is context.
+                if bot_target and mention_target == bot_target:
+                    continue
+                if has_images:
+                    continue
+                display = segment.mention_display.strip() or mention_target
                 if display:
                     parts.append(f"@{display}")
         text = "".join(parts).strip()

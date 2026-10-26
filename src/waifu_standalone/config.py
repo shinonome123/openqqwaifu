@@ -193,7 +193,8 @@ class AppConfig:
     group_response_delay_seconds: float = 0.0
     repeat_trigger_count: int = 0
     multimodal_enabled: bool = True
-    history_window_messages: int = 8
+    history_window_messages: int = 30
+    history_window_chars: int = 2500
     memory_recall_limit: int = 3
     max_thinking_words: int = 30
     short_term_memory_limit: int = 30

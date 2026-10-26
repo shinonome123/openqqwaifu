@@ -23,6 +23,9 @@ _TOOL_CALLING_SYSTEM_PROMPT = (
     "凡是涉及保存、修改、记住称呼、用户称呼、机器人别名、偏好或长期状态的请求，"
     "必须先调用对应工具；工具未调用成功前，不得说“我记住了”“以后就叫我”“以后我叫你”或类似承诺。"
 )
+# The reply window can hold ~30 lines of group chatter; extraction only needs the
+# lines right before the latest message, so facts are not pinned on the wrong speaker.
+_KNOWLEDGE_CONTEXT_LINES = 8
 
 
 @dataclass(slots=True)
@@ -1739,8 +1742,9 @@ class Generator:
         profile_lines = [line for line in card.profile[:3] if str(line or "").strip()]
         if profile_lines:
             lines.append("Persona profile: " + " | ".join(profile_lines))
-        if conversation_view:
-            lines.append("[Recent conversation]\n" + conversation_view)
+        recent_lines = conversation_view.splitlines()[-_KNOWLEDGE_CONTEXT_LINES:] if conversation_view else []
+        if recent_lines:
+            lines.append("[Recent conversation]\n" + "\n".join(recent_lines))
         return "\n\n".join(lines)
 
     def _fallback_reply(

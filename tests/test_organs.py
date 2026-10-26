@@ -26,6 +26,32 @@ class MemoryOrganTests(unittest.TestCase):
         self.assertIn("tester", formatted)
         self.assertIn("Ruri", formatted)
 
+    def test_format_dialogue_exclude_last_keeps_full_window(self) -> None:
+        store = InMemoryStore()
+        memory = Memory(store)
+        session = memory.load("1", "person")
+        session.history = [f"tester: line-{index}" for index in range(6)]
+        store.save(session)
+
+        formatted = memory.format_dialogue("1", "person", assistant_name="Ruri", limit=3, exclude_last=True)
+
+        self.assertEqual(formatted.splitlines(), ["tester: line-2", "tester: line-3", "tester: line-4"])
+
+    def test_format_dialogue_truncates_long_line_without_dropping_context(self) -> None:
+        store = InMemoryStore()
+        memory = Memory(store)
+        session = memory.load("1", "person")
+        session.history = ["tester: earlier", "tester: " + "x" * 2000, "assistant: short reply"]
+        store.save(session)
+
+        formatted = memory.format_dialogue("1", "person", assistant_name="Ruri", limit=10, max_chars=2500)
+
+        lines = formatted.splitlines()
+        self.assertEqual(lines[0], "tester: earlier")
+        self.assertTrue(lines[1].endswith("…"))
+        self.assertLess(len(lines[1]), 2000)
+        self.assertEqual(lines[2], "Ruri: short reply")
+
     def test_maybe_archive_history_returns_summary_payload(self) -> None:
         store = InMemoryStore()
         memory = Memory(store)

@@ -152,6 +152,7 @@ class SettingsAdminService:
             "proactive_min_affinity": svc.config.proactive_min_affinity,
             "max_active_skills": svc.config.max_active_skills,
             "history_window_messages": svc.config.history_window_messages,
+            "history_window_chars": svc.config.history_window_chars,
             "memory_recall_limit": svc.config.memory_recall_limit,
             "max_thinking_words": svc.config.max_thinking_words,
             "short_term_memory_limit": svc.config.short_term_memory_limit,
@@ -219,6 +220,14 @@ class SettingsAdminService:
             payload,
             "history_window_messages",
             svc.config.history_window_messages,
+        )
+        svc.config.history_window_chars = max(
+            0,
+            _safe_int(
+                payload,
+                "history_window_chars",
+                svc.config.history_window_chars,
+            ),
         )
         svc.config.memory_recall_limit = _safe_int(payload, "memory_recall_limit", svc.config.memory_recall_limit)
         svc.config.max_thinking_words = _safe_int(payload, "max_thinking_words", svc.config.max_thinking_words)

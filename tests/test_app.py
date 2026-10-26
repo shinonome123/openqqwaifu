@@ -2217,6 +2217,188 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(service.state_store.knowledge_count(), 1)
         self.assertEqual(knowledge_entries[0]["memory_type"], "summary")
 
+    def test_group_ambient_messages_fold_into_next_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    bot_account_id="999",
+                    group_reply_requires_mention=True,
+                    history_window_messages=30,
+                    history_window_chars=2500,
+                )
+            )
+            captured: dict[str, str] = {}
+
+            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+                captured["conversation_view"] = str(kwargs.get("conversation_view", ""))
+                return "收到"
+
+            service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+            def event(text: str, mentions: tuple[tuple[str, str], ...] = ()) -> InboundEvent:
+                segments = [
+                    MessageSegment(kind="mention", mention_target=target, mention_display=display)
+                    for target, display in mentions
+                ]
+                segments.append(MessageSegment(kind="text", text=text))
+                return InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="小夏",
+                    segments=segments,
+                )
+
+            self.assertIsNone(service.handle_event(event("第一句")))
+            self.assertIsNone(service.handle_event(event("第二句", (("888", "朋友"),))))
+            self.assertIsNone(service.handle_event(event("第三句")))
+
+            reply = service.handle_event(event("第四句", (("999", "极光"), ("888", "朋友"))))
+
+            self.assertIsNotNone(reply)
+            view = captured["conversation_view"]
+            self.assertIn("第一句", view)
+            self.assertIn("第二句", view)
+            self.assertIn("第三句", view)
+            self.assertIn("@朋友", view)
+            self.assertNotIn("第四句", view)
+            self.assertNotIn("@999", view)
+            self.assertNotIn("@极光", view)
+
+            session = service.memory.load("612475113", "group")
+            self.assertEqual(sum(1 for line in session.history if "第四句" in line), 1)
+            self.assertFalse(any("@999" in line or "@极光" in line for line in session.history))
+
+    def test_group_dialogue_labels_bot_with_card_name_and_passes_alias_as_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(data_root=tmpdir, bot_account_id="999", group_reply_requires_mention=True)
+            )
+            current_character = service._active_character_id()
+            service.state_store.save_assistant_alias(
+                character_id=current_character,
+                user_id="783190298",
+                assistant_alias="阿璃",
+            )
+            session = service.memory.load("612475113", "group", character_id=current_character)
+            session.history = ["小冬: 早", "assistant: 早呀"]
+            service.memory.store.save(session)
+            card_name = service.generator.resolve_assistant_name("group", session)
+            self.assertNotEqual(card_name, "阿璃")
+            captured: dict[str, object] = {}
+
+            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                return "在的"
+
+            service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="小夏",
+                    segments=[
+                        MessageSegment(kind="mention", mention_target="999"),
+                        MessageSegment(kind="text", text="阿璃在吗"),
+                    ],
+                )
+            )
+
+            self.assertIsNotNone(reply)
+            view = str(captured["conversation_view"])
+            self.assertIn(f"{card_name}: 早呀", view)
+            self.assertNotIn("阿璃: 早呀", view)
+            # The speaker's alias still drives the persona; it is explained in Speaker Notes.
+            self.assertEqual(captured["assistant_name"], "阿璃")
+            notes = [str(note) for note in captured["speaker_notes"]]  # type: ignore[union-attr]
+            self.assertTrue(any("「阿璃」" in note and f"「{card_name}」" in note for note in notes))
+
+    def test_history_window_char_budget_drops_oldest_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    history_window_messages=10,
+                    history_window_chars=60,
+                )
+            )
+            service.state_store.save_member(
+                {
+                    "group_id": "",
+                    "user_id": "783190298",
+                    "preferred_name": "tester",
+                    "onboarding_status": "ready",
+                }
+            )
+            captured: dict[str, str] = {}
+
+            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+                captured["conversation_view"] = str(kwargs.get("conversation_view", ""))
+                return "ok"
+
+            service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+            for index in range(5):
+                service.handle_event(
+                    InboundEvent(
+                        launcher_id="783190298",
+                        launcher_type="person",
+                        sender_id="783190298",
+                        sender_name="tester",
+                        segments=[MessageSegment(kind="text", text=f"user-{index}-" + "x" * 20)],
+                    )
+                )
+
+            view = captured["conversation_view"]
+            self.assertLessEqual(len(view), 60)
+            self.assertIn("user-3-", view)
+            self.assertNotIn("user-0-", view)
+
+    def test_to_memory_text_drops_only_bot_self_mention(self) -> None:
+        event = InboundEvent(
+            launcher_id="612475113",
+            launcher_type="group",
+            sender_id="783190298",
+            sender_name="小夏",
+            segments=[
+                MessageSegment(kind="mention", mention_target="999", mention_display="极光"),
+                MessageSegment(kind="text", text="hi"),
+                MessageSegment(kind="mention", mention_target="888", mention_display="朋友"),
+            ],
+        )
+
+        self.assertEqual(event.to_memory_text(bot_account_id="999"), "hi@朋友")
+
+    def test_knowledge_query_only_sees_recent_conversation_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            event = InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="小夏",
+                segments=[MessageSegment(kind="text", text="我下周去杭州")],
+            )
+            session = service.memory.load("612475113", "group")
+            conversation_view = "\n".join(f"路人{index}: 闲聊-{index:02d}" for index in range(20))
+
+            prompt = service.generator._build_knowledge_query(
+                event,
+                session,
+                assistant_name="极光",
+                latest_message="我下周去杭州",
+                conversation_view=conversation_view,
+                address="小夏",
+                max_entries=3,
+            )
+
+            self.assertIn("闲聊-19", prompt)
+            self.assertIn("闲聊-12", prompt)
+            self.assertNotIn("闲聊-11", prompt)
+
     def test_session_preferred_name_is_resolved_from_directory(self) -> None:
         current_character = self.service._active_character_id()
         self.service.state_store.save_member(
