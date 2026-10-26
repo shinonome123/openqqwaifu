@@ -156,5 +156,61 @@ class FileMemoryStoreTests(unittest.TestCase):
             self.assertEqual(sessions[0].history, ["user: jsonl line"])
 
 
+class KnowledgeWritebackTests(unittest.TestCase):
+    def _service(self):
+        from waifu_standalone.app import build_default_service
+        from waifu_standalone.config import AppConfig
+
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        service, _ = build_default_service(AppConfig(data_root=tmpdir))
+        return service
+
+    @staticmethod
+    def _event(launcher_type: str = "person", launcher_id: str = "20001"):
+        from waifu_standalone.models import InboundEvent, MessageSegment
+
+        return InboundEvent(
+            launcher_id=launcher_id,
+            launcher_type=launcher_type,
+            sender_id="20001",
+            sender_name="阿林",
+            segments=[MessageSegment(kind="text", text="hi")],
+        )
+
+    def test_rephrased_fact_updates_existing_memory_instead_of_duplicating(self) -> None:
+        service = self._service()
+        event = self._event()
+        for summary in ("阿林最喜欢吃草莓蛋糕", "阿林喜欢吃草莓蛋糕"):
+            service.knowledge._persist_extracted_knowledge(
+                event,
+                {"summary": summary, "memory_type": "preference", "scope_hint": "person", "confidence": 0.9},
+            )
+        entries = service.knowledge_repository.list_knowledge_for_active(limit=20)
+        self.assertEqual([item["summary"] for item in entries], ["阿林最喜欢吃草莓蛋糕"])
+
+    def test_distinct_facts_are_kept_apart(self) -> None:
+        service = self._service()
+        event = self._event()
+        for summary in ("阿林喜欢猫", "阿林喜欢狗", "阿林不喜欢猫"):
+            service.knowledge._persist_extracted_knowledge(
+                event,
+                {"summary": summary, "memory_type": "preference", "scope_hint": "person", "confidence": 0.9},
+            )
+        entries = service.knowledge_repository.list_knowledge_for_active(limit=20)
+        self.assertEqual(
+            sorted(item["summary"] for item in entries),
+            sorted(["阿林喜欢猫", "阿林喜欢狗", "阿林不喜欢猫"]),
+        )
+
+    def test_global_scope_hint_stays_in_the_chat_it_came_from(self) -> None:
+        service = self._service()
+        saved = service.knowledge._persist_extracted_knowledge(
+            self._event("group", "900001"),
+            {"summary": "某条新闻标题", "memory_type": "fact", "scope_hint": "global", "confidence": 0.9},
+        )
+        assert saved is not None
+        self.assertEqual((saved["scope_type"], saved["scope_id"]), ("group", "900001"))
+
+
 if __name__ == "__main__":
     unittest.main()

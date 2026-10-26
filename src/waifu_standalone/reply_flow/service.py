@@ -10,6 +10,18 @@ from ..systems.searching import SearchContext
 if TYPE_CHECKING:
     from ..app import WaifuService
 
+_RECALLED_MEMORY_PREFIX = "相关记忆："
+
+
+def _restates_memory(highlight: str, memory_hints: list[str]) -> bool:
+    if not highlight.startswith(_RECALLED_MEMORY_PREFIX):
+        return False
+    # Graph highlights clip long summaries with a trailing "..."; compare the prefix.
+    body = highlight[len(_RECALLED_MEMORY_PREFIX):].rstrip(".…").strip()
+    if not body:
+        return True
+    return any(hint.startswith(body) or body.startswith(hint) for hint in memory_hints if hint)
+
 
 class ReplyFlowService:
     def __init__(self, service: WaifuService) -> None:
@@ -121,7 +133,9 @@ class ReplyFlowService:
         speaker_notes = await svc.knowledge._adirectory_member_notes(event)
         for highlight in graph_snapshot.get("highlights", [])[:3] if isinstance(graph_snapshot, dict) else []:
             text_hint = str(highlight or "").strip()
-            if text_hint:
+            # The graph re-lists recalled memories as "相关记忆：…"; skip those already
+            # in [Memories] so the same fact is not repeated three times in the prompt.
+            if text_hint and not _restates_memory(text_hint, memory_hints):
                 speaker_notes.append(text_hint)
         analysis_hint = await svc.thoughts.aanalyze(
             event,

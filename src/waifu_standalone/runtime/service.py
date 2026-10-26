@@ -40,6 +40,7 @@ from ..repositories import (
     SessionRepository,
     SqliteRuntimeStateStore,
 )
+from ..repositories.runtime_state import _extract_terms as extract_match_terms
 from ..settings_admin import SettingsAdminService
 from ..settings_admin.config_manager import ConfigManager, serialize_app_config
 from ..skills import (
@@ -977,18 +978,8 @@ class WaifuService:
 
     @staticmethod
     def _extract_terms(value: object) -> list[str]:
-        raw = str(value or "").strip().lower()
-        if not raw:
-            return []
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in raw)
-        terms: list[str] = []
-        seen: set[str] = set()
-        for part in cleaned.split():
-            if len(part) < 2 or part in seen:
-                continue
-            seen.add(part)
-            terms.append(part)
-        return terms
+        # Single tokenizer for all memory matching (CJK-aware; see runtime_state).
+        return extract_match_terms(value)
 
     def _store_active_skills(self, session: SessionMemory, active_skills: list[SkillSpec]) -> None:
         if active_skills:

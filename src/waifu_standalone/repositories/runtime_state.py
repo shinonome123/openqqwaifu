@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sqlite3
 import threading
@@ -10,6 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from .schema_migrations import run_migrations
+
+_LOGGER = logging.getLogger(__name__)
+
+# After this many consecutive embedding failures, stop calling the embedder for a
+# while instead of paying a failing network round trip on every recall and write.
+_EMBED_FAILURE_LIMIT = 3
+_EMBED_PAUSE_SECONDS = 300.0
 
 
 def _now() -> int:
@@ -91,33 +99,91 @@ def _decode_json_list(value: object) -> list[str]:
     return _normalize_tags(decoded)
 
 
+# Function-word / filler bigrams that carry no topic. Matching on them would make
+# nearly every memory look relevant ("主人"/"用户" are the placeholder names the
+# extractor writes into summaries).
+_STOP_BIGRAMS = frozenset(
+    {
+        "什么", "怎么", "为什", "这个", "那个", "一个", "一下", "我们", "你们", "他们", "她们", "它们",
+        "自己", "就是", "不是", "是不", "没有", "可以", "可能", "知道", "还是", "还有", "然后", "因为",
+        "所以", "但是", "如果", "已经", "现在", "时候", "一些", "这样", "那样", "这么", "那么", "怎样",
+        "哪里", "哪个", "的话", "我的", "你的", "他的", "她的", "是的", "好的", "一起", "有点", "一点",
+        "真的", "今天", "明天", "昨天", "主人", "用户", "哈哈", "嘿嘿", "呵呵", "嗯嗯", "啊啊",
+    }
+)
+
+# Cosine similarity below this is treated as unrelated. Calibrated on
+# text-embedding-v4: related memory/message pairs scored 0.42-0.64, unrelated 0.19-0.37.
+_SEMANTIC_RELEVANCE_MIN = 0.40
+
+def _is_cjk(ch: str) -> bool:
+    return "一" <= ch <= "鿿" or "㐀" <= ch <= "䶿"
+
+
 def _extract_terms(text: object) -> list[str]:
+    """Split text into match terms.
+
+    Latin/digit runs become whole words (len >= 2). Chinese has no spaces, so
+    CJK runs become overlapping two-character chunks; before this, a whole
+    Chinese sentence was one "term" and almost never matched anything.
+    """
     raw = _normalize_string(text).lower()
     if not raw:
         return []
-    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in raw)
-    unique: list[str] = []
+    terms: list[str] = []
     seen: set[str] = set()
-    for part in cleaned.split():
-        if len(part) < 2 or part in seen:
-            continue
-        seen.add(part)
-        unique.append(part)
-    return unique
+    word: list[str] = []
+    run: list[str] = []
+
+    def add(term: str) -> None:
+        if term not in seen:
+            seen.add(term)
+            terms.append(term)
+
+    def flush_word() -> None:
+        if len(word) >= 2:
+            add("".join(word))
+        word.clear()
+
+    def flush_run() -> None:
+        for index in range(len(run) - 1):
+            bigram = run[index] + run[index + 1]
+            if bigram not in _STOP_BIGRAMS:
+                add(bigram)
+        run.clear()
+
+    for ch in raw:
+        if _is_cjk(ch):
+            flush_word()
+            run.append(ch)
+        elif ch.isalnum():
+            flush_run()
+            word.append(ch)
+        else:
+            flush_word()
+            flush_run()
+    flush_word()
+    flush_run()
+    return terms
 
 
 def _score_knowledge(summary: str, tags: list[str], query_terms: list[str]) -> float:
+    """Lexical relevance on the same 0-4 scale as the semantic score; 0 means no overlap."""
     if not query_terms:
-        return 0.2
+        return 0.0
     haystack = summary.lower()
-    lowered_tags = [tag.lower() for tag in tags]
-    score = 0.0
+    lowered_tags = [tag.lower() for tag in tags if tag]
+    hits = 0.0
     for term in query_terms:
-        if any(term in tag or tag in term for tag in lowered_tags):
-            score += 2.5
+        if any(term == tag or (len(tag) >= 2 and (term in tag or tag in term)) for tag in lowered_tags):
+            hits += 1.0
         elif term in haystack:
-            score += 1.2
-    return score
+            hits += 0.8
+    if hits <= 0.0:
+        return 0.0
+    # Normalize by query size so a long message does not inflate the score.
+    coverage = min(1.0, hits / len(query_terms))
+    return 1.0 + 3.0 * coverage
 
 
 def _normalize_vector(values: object) -> list[float]:
@@ -166,6 +232,49 @@ def _embedding_input(summary: str, tags: list[str]) -> str:
     if tag_block:
         return f"{summary}\nTags: {tag_block}"
     return summary
+
+
+class _EmbeddingBreaker:
+    """Calls the embedder, logs failures, and pauses after repeated errors.
+
+    A misconfigured embedder (e.g. a model the endpoint does not serve) used to
+    fail silently on every call; semantic recall then quietly degraded to
+    keyword-only. This keeps the fallback but makes the failure visible and
+    stops hammering a broken endpoint.
+    """
+
+    def __init__(self) -> None:
+        self.failures = 0
+        self.paused_until = 0.0
+
+    def reset(self) -> None:
+        self.failures = 0
+        self.paused_until = 0.0
+
+    def embed(self, embedder: Any, text: str) -> list[float]:
+        if embedder is None or not getattr(embedder, "ready", False):
+            return []
+        if self.paused_until and time.monotonic() < self.paused_until:
+            return []
+        try:
+            vector = _normalize_vector(embedder.embed(text))
+        except Exception as exc:
+            self.failures += 1
+            if self.failures == 1:
+                _LOGGER.warning("embedding request failed, falling back to keyword recall: %s", exc)
+            if self.failures >= _EMBED_FAILURE_LIMIT:
+                self.paused_until = time.monotonic() + _EMBED_PAUSE_SECONDS
+                _LOGGER.warning(
+                    "embedding failed %d times in a row; pausing embedding calls for %.0fs (last error: %s)",
+                    self.failures,
+                    _EMBED_PAUSE_SECONDS,
+                    exc,
+                )
+            return []
+        if self.failures:
+            _LOGGER.info("embedding recovered after %d failed attempts", self.failures)
+        self.reset()
+        return vector
 
 
 def _coerce_confidence(value: object) -> float:
@@ -244,10 +353,12 @@ class InMemoryRuntimeStateStore:
         self._knowledge_id = 1
         self._lock = threading.Lock()
         self._embedder = embedder
+        self._embed_breaker = _EmbeddingBreaker()
         self._default_character_id = ""
 
     def set_embedder(self, embedder: Any) -> None:
         self._embedder = embedder
+        self._embed_breaker.reset()
 
     def close(self) -> None:
         close = getattr(self._embedder, "close", None)
@@ -879,6 +990,10 @@ class InMemoryRuntimeStateStore:
                 query_terms=query_terms,
                 query_embedding=query_embedding,
             )
+            # Only recall memories that relate to this message; confidence breaks ties
+            # but no longer pads the prompt with unrelated high-confidence entries.
+            if score <= 0.0:
+                continue
             score += _coerce_confidence(entry.get("confidence")) * 0.18
             if entry.get("archived"):
                 score -= 0.15
@@ -943,12 +1058,7 @@ class InMemoryRuntimeStateStore:
         return self._embed_text(_normalize_string(query))
 
     def _embed_text(self, text: str) -> list[float]:
-        if self._embedder is None or not getattr(self._embedder, "ready", False):
-            return []
-        try:
-            return _normalize_vector(self._embedder.embed(text))
-        except Exception:
-            return []
+        return self._embed_breaker.embed(self._embedder, text)
 
     @staticmethod
     def _score_entry(
@@ -961,8 +1071,9 @@ class InMemoryRuntimeStateStore:
     ) -> float:
         lexical_score = _score_knowledge(summary, tags, query_terms)
         if entry_embedding and query_embedding:
-            semantic_score = _cosine_similarity(entry_embedding, query_embedding)
-            return max(semantic_score * 4.0, lexical_score)
+            semantic = _cosine_similarity(entry_embedding, query_embedding)
+            if semantic >= _SEMANTIC_RELEVANCE_MIN:
+                return max(semantic * 4.0, lexical_score)
         return lexical_score
 
 
@@ -978,11 +1089,13 @@ class SqliteRuntimeStateStore:
         # Back-compat alias: some call sites still reference ``self._lock``.
         self._lock = self._write_lock
         self._embedder = embedder
+        self._embed_breaker = _EmbeddingBreaker()
         self._default_character_id = ""
         self._init_schema()
 
     def set_embedder(self, embedder: Any) -> None:
         self._embedder = embedder
+        self._embed_breaker.reset()
 
     def close(self) -> None:
         close = getattr(self._embedder, "close", None)
@@ -1766,18 +1879,12 @@ class SqliteRuntimeStateStore:
             entry_id = int(payload.get("id") or 0)
         except (TypeError, ValueError):
             entry_id = 0
+        # The embedding is a network call: compute it before taking the writer
+        # lock so a slow embedder never stalls every other write.
+        embedding_json = self._prepare_knowledge_embedding(payload, entry_id=entry_id, summary=summary)
         with self._lock, self._session() as connection:
             existing = self._fetch_knowledge(connection, entry_id) if entry_id > 0 else None
             tags = _normalize_tags(payload.get("tags", existing.get("tags") if existing else None))
-            embedding_json = _encode_embedding(
-                self._resolve_embedding(
-                    summary=summary,
-                    tags=tags,
-                    existing=existing.get("embedding") if existing else None,
-                    previous_summary=_normalize_string(existing.get("summary")) if existing else "",
-                    previous_tags=_normalize_tags(existing.get("tags")) if existing else [],
-                )
-            )
             if existing is None:
                 cursor = connection.execute(
                     """
@@ -1830,6 +1937,22 @@ class SqliteRuntimeStateStore:
                 )
             result = self._fetch_knowledge(connection, entry_id)
         return result or {}
+
+    def _prepare_knowledge_embedding(self, payload: dict[str, Any], *, entry_id: int, summary: str) -> str:
+        existing = None
+        if entry_id > 0:
+            with self._read_session() as connection:
+                existing = self._fetch_knowledge(connection, entry_id)
+        tags = _normalize_tags(payload.get("tags", existing.get("tags") if existing else None))
+        return _encode_embedding(
+            self._resolve_embedding(
+                summary=summary,
+                tags=tags,
+                existing=existing.get("embedding") if existing else None,
+                previous_summary=_normalize_string(existing.get("summary")) if existing else "",
+                previous_tags=_normalize_tags(existing.get("tags")) if existing else [],
+            )
+        )
 
     def delete_knowledge(self, entry_id: object, *, character_id: object = "") -> bool:
         try:
@@ -1948,6 +2071,10 @@ class SqliteRuntimeStateStore:
                 query_terms=query_terms,
                 query_embedding=query_embedding,
             )
+            # Only recall memories that relate to this message; confidence breaks ties
+            # but no longer pads the prompt with unrelated high-confidence entries.
+            if score <= 0.0:
+                continue
             score += _coerce_confidence(entry.get("confidence")) * 0.18
             if entry.get("archived"):
                 score -= 0.15
@@ -2108,12 +2235,7 @@ class SqliteRuntimeStateStore:
         return self._embed_text(_normalize_string(query))
 
     def _embed_text(self, text: str) -> list[float]:
-        if self._embedder is None or not getattr(self._embedder, "ready", False):
-            return []
-        try:
-            return _normalize_vector(self._embedder.embed(text))
-        except Exception:
-            return []
+        return self._embed_breaker.embed(self._embedder, text)
 
     @staticmethod
     def _score_entry(
@@ -2126,8 +2248,9 @@ class SqliteRuntimeStateStore:
     ) -> float:
         lexical_score = _score_knowledge(summary, tags, query_terms)
         if entry_embedding and query_embedding:
-            semantic_score = _cosine_similarity(entry_embedding, query_embedding)
-            return max(semantic_score * 4.0, lexical_score)
+            semantic = _cosine_similarity(entry_embedding, query_embedding)
+            if semantic >= _SEMANTIC_RELEVANCE_MIN:
+                return max(semantic * 4.0, lexical_score)
         return lexical_score
 
 

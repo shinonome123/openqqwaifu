@@ -16,7 +16,9 @@ from waifu_standalone.state_store import InMemoryRuntimeStateStore, SqliteRuntim
 
 class FakeEmbedder:
     def __init__(self, mapping: dict[str, list[float]]) -> None:
-        self.mapping = {key: list(value) for key, value in mapping.items()}
+        # Normalize keys the same way embed() normalizes its input, otherwise a key
+        # containing "\n" never matches and every entry silently gets __default__.
+        self.mapping = {" ".join(key.split()): list(value) for key, value in mapping.items()}
         self.ready = True
 
     def embed(self, text: str) -> list[float]:
@@ -35,6 +37,16 @@ class BlockingEmbedder:
         self.started.set()
         self.release.wait(timeout=1)
         return list(self.vector)
+
+
+class FailingEmbedder:
+    def __init__(self) -> None:
+        self.ready = True
+        self.calls = 0
+
+    def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        raise RuntimeError("Unsupported model for OpenAI compatibility mode")
 
 
 class RuntimeStateStoreTests(unittest.TestCase):
@@ -332,7 +344,7 @@ class RuntimeStateStoreTests(unittest.TestCase):
     def test_sqlite_store_persists_embedding_vectors(self) -> None:
         embedder = FakeEmbedder(
             {
-                "她偏爱深夜聊天和安静的雨声\nTags: 深夜, 雨天": [0.0, 1.0],
+                "她偏爱深夜聊天和安静的雨声\nTags: 深夜 雨天": [0.0, 1.0],
                 "夜雨": [0.0, 1.0],
                 "__default__": [1.0, 0.0],
             }
@@ -404,6 +416,99 @@ class RuntimeStateStoreTests(unittest.TestCase):
             mutation_thread.join(timeout=2)
 
             self.assertTrue(refresh_done.is_set())
+            self.assertEqual(store.embedded_knowledge_count(), 1)
+
+    def test_chinese_query_recalls_memory_by_keyword_without_embeddings(self) -> None:
+        store = InMemoryRuntimeStateStore()
+        store.add_knowledge(
+            scope_type="person",
+            scope_id="20001",
+            memory_type="preference",
+            summary="阿林最喜欢吃草莓蛋糕",
+            tags=["食物"],
+            confidence=0.9,
+        )
+        recalled = store.recall_knowledge(scopes=[("person", "20001")], query="你还记得我爱吃草莓蛋糕吗", limit=3)
+        self.assertEqual(recalled, ["阿林最喜欢吃草莓蛋糕"])
+
+    def test_unrelated_memory_is_not_recalled(self) -> None:
+        store = InMemoryRuntimeStateStore()
+        store.add_knowledge(
+            scope_type="person",
+            scope_id="20001",
+            memory_type="preference",
+            summary="阿林最喜欢吃草莓蛋糕",
+            tags=["食物"],
+            confidence=0.95,
+        )
+        # High confidence alone no longer earns a slot in the prompt.
+        self.assertEqual(store.recall_knowledge(scopes=[("person", "20001")], query="帮我搜一下天气", limit=3), [])
+        self.assertEqual(store.recall_knowledge(scopes=[("person", "20001")], query="哈哈哈", limit=3), [])
+
+    def test_broken_embedder_is_logged_and_paused_then_recovers(self) -> None:
+        failing = FailingEmbedder()
+        store = InMemoryRuntimeStateStore(embedder=failing)
+        with self.assertLogs("waifu_standalone.repositories.runtime_state", level="WARNING") as logs:
+            store.add_knowledge(
+                scope_type="group",
+                scope_id="612475113",
+                memory_type="fact",
+                summary="晴朗的天空带着薄云",
+                tags=["天气"],
+                confidence=0.4,
+            )
+            for _ in range(10):
+                store.recall_knowledge(scopes=[("group", "612475113")], query="蓝天白云", limit=3)
+
+        # Stops calling the broken endpoint after the failure limit instead of once per recall.
+        self.assertEqual(failing.calls, 3)
+        self.assertTrue(any("pausing embedding calls" in line for line in logs.output))
+
+        # Reconfiguring the embedder clears the pause, so a fixed model works immediately.
+        store.set_embedder(FakeEmbedder({"蓝天白云": [1.0, 0.0], "__default__": [1.0, 0.0]}))
+        store.refresh_knowledge_embeddings()
+        self.assertEqual(store.embedded_knowledge_count(), 1)
+
+    def test_sqlite_add_knowledge_does_not_hold_write_lock_during_embedding(self) -> None:
+        embedder = BlockingEmbedder([1.0, 0.0])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SqliteRuntimeStateStore(Path(tmpdir) / "runtime.sqlite3", embedder=embedder)
+            write_done = threading.Event()
+
+            def add_entry() -> None:
+                try:
+                    store.add_knowledge(
+                        scope_type="group",
+                        scope_id="612475113",
+                        memory_type="fact",
+                        summary="hello world",
+                        tags=["chat"],
+                        confidence=0.5,
+                    )
+                finally:
+                    write_done.set()
+
+            writer = threading.Thread(target=add_entry)
+            writer.start()
+            self.assertTrue(embedder.started.wait(timeout=1), "embedding should start")
+
+            mutation_done = threading.Event()
+
+            def mutate_store() -> None:
+                store.record_member_seen(group_id="612475113", user_id="783190298", qq_nickname="tester")
+                mutation_done.set()
+
+            mutator = threading.Thread(target=mutate_store)
+            mutator.start()
+            self.assertTrue(
+                mutation_done.wait(timeout=0.3),
+                "other writes should not wait on the knowledge embedding network call",
+            )
+            embedder.release.set()
+            writer.join(timeout=2)
+            mutator.join(timeout=2)
+
+            self.assertTrue(write_done.is_set())
             self.assertEqual(store.embedded_knowledge_count(), 1)
 
 if __name__ == "__main__":
