@@ -116,6 +116,23 @@ _STOP_BIGRAMS = frozenset(
 # text-embedding-v4: related memory/message pairs scored 0.42-0.64, unrelated 0.19-0.37.
 _SEMANTIC_RELEVANCE_MIN = 0.40
 
+# Events ("小夏2026-11-04去杭州") stop being worth recalling once they are this old.
+_EVENT_RECALL_MAX_AGE_SECONDS = 30 * 24 * 3600
+
+
+def excluded_from_recall(entry: dict[str, Any], *, now: int | None = None) -> bool:
+    """Entries that never go into [Memories]: old per-round chat summaries (archived
+    history now lives in the session's rolling summary) and long-past events."""
+    memory_type = _normalize_string(entry.get("memory_type")).lower()
+    if memory_type == "summary":
+        return True
+    if memory_type == "event":
+        updated_at = int(entry.get("updated_at") or entry.get("created_at") or 0)
+        current = _now() if now is None else now
+        return updated_at > 0 and current - updated_at > _EVENT_RECALL_MAX_AGE_SECONDS
+    return False
+
+
 def _is_cjk(ch: str) -> bool:
     return "一" <= ch <= "鿿" or "㐀" <= ch <= "䶿"
 
@@ -969,9 +986,12 @@ class InMemoryRuntimeStateStore:
         scope_set.add(("global", ""))
         with self._lock:
             entries = [dict(item) for item in self._knowledge.values()]
+        now = _now()
         scored: list[tuple[float, str]] = []
         for entry in entries:
             if _normalize_character_id(entry.get("character_id")) != safe_character_id:
+                continue
+            if excluded_from_recall(entry, now=now):
                 continue
             entry_scope = (
                 _normalize_string(entry.get("scope_type")).lower(),
@@ -2058,9 +2078,12 @@ class SqliteRuntimeStateStore:
             params = [safe_character_id, candidate_limit]
         with self._read_session() as connection:
             rows = connection.execute(sql, params).fetchall()
+        now = _now()
         scored: list[tuple[float, str]] = []
         for row in rows:
             entry = _row_to_knowledge(row)
+            if excluded_from_recall(entry, now=now):
+                continue
             summary = _normalize_string(entry.get("summary"))
             if not summary:
                 continue

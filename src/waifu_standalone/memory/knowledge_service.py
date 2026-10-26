@@ -4,7 +4,9 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from ..models import InboundEvent, SessionMemory
+from ..infra.clock import absolutize_relative_dates, local_now
 from ..repositories.runtime_state import _score_knowledge as score_knowledge_terms
+from ..repositories.runtime_state import excluded_from_recall
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -94,7 +96,9 @@ class KnowledgeService:
             conversation_view=conversation_view,
             address=address,
             max_entries=max(1, int(svc.config.knowledge_auto_extract_limit)),
-            allow_fallback=True,
+            # An empty model answer means "nothing worth keeping"; the regex fallback
+            # would store noise instead, so it only runs offline / in dry-run.
+            allow_fallback=not svc._requires_live_llm(),
         )
         entries = extracted.get("entries", []) if isinstance(extracted, dict) else []
         profile_summary = str(extracted.get("profile_summary", "") or "").strip() if isinstance(extracted, dict) else ""
@@ -143,7 +147,9 @@ class KnowledgeService:
             conversation_view=conversation_view,
             address=address,
             max_entries=max(1, int(svc.config.knowledge_auto_extract_limit)),
-            allow_fallback=True,
+            # An empty model answer means "nothing worth keeping"; the regex fallback
+            # would store noise instead, so it only runs offline / in dry-run.
+            allow_fallback=not svc._requires_live_llm(),
         )
         entries = extracted.get("entries", []) if isinstance(extracted, dict) else []
         profile_summary = str(extracted.get("profile_summary", "") or "").strip() if isinstance(extracted, dict) else ""
@@ -171,6 +177,8 @@ class KnowledgeService:
         summary = " ".join(str(entry.get("summary", "") or "").split()).strip()
         if not summary:
             return None
+        # "明天"/"下周三" are only true on the day they were said; store the date instead.
+        summary = absolutize_relative_dates(summary, local_now(svc.config.timezone).date())
         scope_type, scope_id = self._knowledge_scope_for_candidate(event, entry)
         memory_type = str(entry.get("memory_type", "") or "fact").strip().lower() or "fact"
         tags = (
@@ -299,7 +307,7 @@ class KnowledgeService:
                 str(entry.get("scope_type", "") or "").strip().lower() or "global",
                 str(entry.get("scope_id", "") or "").strip(),
             )
-            if scope not in scopes:
+            if scope not in scopes or excluded_from_recall(entry):
                 continue
             summary = str(entry.get("summary", "") or "").strip().lower()
             tags = [str(item or "").strip().lower() for item in entry.get("tags", []) if str(item or "").strip()]

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
+from datetime import timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,6 +204,46 @@ class KnowledgeWritebackTests(unittest.TestCase):
             sorted(item["summary"] for item in entries),
             sorted(["阿林喜欢猫", "阿林喜欢狗", "阿林不喜欢猫"]),
         )
+
+    def test_relative_dates_are_stored_as_absolute_dates(self) -> None:
+        from waifu_standalone.infra.clock import local_now
+
+        service = self._service()
+        today = local_now(service.config.timezone).date()
+        saved = service.knowledge._persist_extracted_knowledge(
+            self._event(),
+            {"summary": "阿林明天去杭州", "memory_type": "event", "scope_hint": "person", "confidence": 0.9},
+        )
+        assert saved is not None
+        tomorrow = today + timedelta(days=1)
+        self.assertEqual(saved["summary"], f"阿林{tomorrow:%Y-%m-%d}去杭州")
+
+    def test_live_runtime_does_not_fall_back_to_regex_extraction(self) -> None:
+        service = self._service()
+        seen: dict[str, object] = {}
+
+        async def fake_extract(*args, **kwargs):  # type: ignore[no-untyped-def]
+            seen.update(kwargs)
+            return {"entries": [], "profile_summary": ""}
+
+        service.generator.aextract_knowledge = fake_extract  # type: ignore[method-assign]
+        event = self._event()
+        session = service.memory.load(event.launcher_id, event.launcher_type)
+
+        with mock.patch.object(type(service), "_requires_live_llm", return_value=True):
+            asyncio.run(
+                service.knowledge._awriteback_knowledge_if_needed(
+                    event,
+                    session=session,
+                    latest_message="我最近在学吉他",
+                    assistant_name="极光",
+                    address="阿林",
+                    conversation_view="",
+                )
+            )
+
+        self.assertIs(seen["allow_fallback"], False)
+        self.assertEqual(service.knowledge_repository.list_knowledge_for_active(limit=20), [])
 
     def test_global_scope_hint_stays_in_the_chat_it_came_from(self) -> None:
         service = self._service()

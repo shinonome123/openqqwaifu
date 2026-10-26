@@ -84,9 +84,10 @@ class ConfigManager:
             history_window_messages=int(raw.get("history_window_messages", 30)),
             history_window_chars=int(raw.get("history_window_chars", 2500)),
             memory_recall_limit=int(raw.get("memory_recall_limit", 3)),
-            max_thinking_words=int(raw.get("max_thinking_words", 30)),
+            max_thinking_words=int(raw.get("max_thinking_words", 80)),
             short_term_memory_limit=int(raw.get("short_term_memory_limit", 30)),
             memory_summary_batch_size=int(raw.get("memory_summary_batch_size", 12)),
+            timezone=str(raw.get("timezone", "Asia/Shanghai") or "Asia/Shanghai").strip(),
             data_root=data_root,
             llm=llm,
             image_generation=image_generation,
@@ -244,6 +245,9 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
         if not root.is_absolute() and config_path is not None:
             root = (config_path.parent / root).resolve()
         config.data_root = str(root)
+    timezone_name = _env_str("OPENQQWAIFU_TIMEZONE")
+    if timezone_name:
+        config.timezone = timezone_name
 
     plugins = config.plugins
     plugins.enabled = _env_bool("OPENQQWAIFU_PLUGINS_ENABLED", plugins.enabled)

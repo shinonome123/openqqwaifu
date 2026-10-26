@@ -52,7 +52,7 @@ class OutboundEmitter:
             user_id=event.sender_id,
             character_id=resolved_character_id,
         )
-        self._service._archive_if_needed(
+        self._service._schedule_archive(
             event.launcher_id,
             event.launcher_type,
             assistant_name=assistant_name,
@@ -104,7 +104,7 @@ class OutboundEmitter:
             user_id=event.sender_id,
             character_id=resolved_character_id,
         )
-        await self._service._archive_if_needed_async(
+        self._service._schedule_archive(
             event.launcher_id,
             event.launcher_type,
             assistant_name=assistant_name,

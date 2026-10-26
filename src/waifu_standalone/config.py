@@ -196,9 +196,11 @@ class AppConfig:
     history_window_messages: int = 30
     history_window_chars: int = 2500
     memory_recall_limit: int = 3
-    max_thinking_words: int = 30
+    max_thinking_words: int = 80
     short_term_memory_limit: int = 30
     memory_summary_batch_size: int = 12
+    # IANA name; used for the prompt's current time and for dating extracted memories.
+    timezone: str = "Asia/Shanghai"
     data_root: str = "data"
     llm: LLMConfig = field(default_factory=LLMConfig)
     image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)

@@ -20,9 +20,10 @@ from waifu_standalone.config import AppConfig, QQSidecarConfig
 from waifu_standalone.contracts import GeneratedImage
 from waifu_standalone.gateways.onebot_actions import OneBotHttpOutboundPort
 from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
-from waifu_standalone.models import InboundEvent, MessageSegment
+from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment
 from waifu_standalone.memory import FileMemoryStore, InMemoryStore
 from waifu_standalone.organs.memories import Memory
+from waifu_standalone.reply_flow import Generator
 from waifu_standalone.services import CapturingOutboundPort
 from waifu_standalone.state_store import SqliteRuntimeStateStore
 from waifu_standalone.systems.searching import SearchContext, SearchResult
@@ -2190,32 +2191,125 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(preview["transcript"][0]["role"], "user")
         self.assertEqual(preview["transcript"][1]["role"], "assistant")
 
-    def test_summarization_mode_archives_older_history(self) -> None:
-        config = AppConfig(
-            summarization_mode=True,
-            short_term_memory_limit=4,
-            memory_summary_batch_size=2,
-        )
-        service, _ = build_default_service(config)
-
-        for index in range(3):
-            service.handle_event(
-                InboundEvent(
-                    launcher_id="783190298",
-                    launcher_type="person",
-                    sender_id="783190298",
-                    sender_name="tester",
-                    segments=[MessageSegment(kind="text", text=f"message-{index}")],
+    def test_summarization_mode_folds_overflow_into_rolling_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    summarization_mode=True,
+                    short_term_memory_limit=4,
+                    memory_summary_batch_size=3,
                 )
             )
+            service.state_store.save_member(
+                {
+                    "group_id": "",
+                    "user_id": "783190298",
+                    "preferred_name": "tester",
+                    "onboarding_status": "ready",
+                }
+            )
+            calls: list[tuple[list[str], str]] = []
 
-        session = service.memory.load("783190298", "person")
-        knowledge_entries = service.state_store.list_knowledge(limit=8)
+            def fake_summarize_rolling(history_lines, *, previous_summary, assistant_name):  # type: ignore[no-untyped-def]
+                calls.append((list(history_lines), previous_summary))
+                return f"{previous_summary} | 摘要{len(calls)}" if previous_summary else f"摘要{len(calls)}"
 
-        self.assertLessEqual(len(session.history), 4)
-        self.assertNotIn("long_term_memory", session.metadata)
-        self.assertEqual(service.state_store.knowledge_count(), 1)
-        self.assertEqual(knowledge_entries[0]["memory_type"], "summary")
+            service.generator.summarize_rolling = fake_summarize_rolling  # type: ignore[method-assign]
+
+            history_sizes: list[int] = []
+            for index in range(6):
+                service.handle_event(
+                    InboundEvent(
+                        launcher_id="783190298",
+                        launcher_type="person",
+                        sender_id="783190298",
+                        sender_name="tester",
+                        segments=[MessageSegment(kind="text", text=f"message-{index}")],
+                    )
+                )
+                service.flush_background_tasks(timeout=10)
+                history_sizes.append(len(service.memory.load("783190298", "person").history))
+
+            # Each reply adds 2 lines; archiving waits for 3 lines of overflow, then
+            # folds the whole overflow with one call (not one call per reply).
+            self.assertEqual(history_sizes, [2, 4, 6, 4, 6, 4])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][1], "")
+            self.assertEqual(calls[1][1], "摘要1")
+            session = service.memory.load("783190298", "person")
+            self.assertEqual(session.metadata["rolling_summary"], "摘要1 | 摘要2")
+            self.assertNotIn("long_term_memory", session.metadata)
+            # Archived history is no longer written as "summary" knowledge entries.
+            self.assertEqual(service.state_store.knowledge_count(), 0)
+
+    def test_chat_prompt_has_current_time_and_earlier_conversation_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            event = InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="现在几点了")],
+            )
+            session = service.memory.load("783190298", "person")
+            session.metadata["rolling_summary"] = "上次聊到周末去爬山。"
+            card = service.cards.load("person", session)
+
+            prompt = service.generator._build_chat_query(
+                event,
+                session,
+                EmotionState(),
+                card=card,
+                assistant_name=card.assistant_name,
+                address="tester",
+                search_hint="",
+                search_context="",
+                conversation_view="tester: 早",
+                memory_hints=[],
+                speaker_notes=[],
+                analysis_hint="",
+                latest_message="现在几点了",
+                active_skills=[],
+            )
+
+            self.assertRegex(prompt, r"当前时间：\d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（Asia/Shanghai）")
+            self.assertIn("[Earlier Conversation]\n上次聊到周末去爬山。", prompt)
+            self.assertLess(prompt.index("[Earlier Conversation]"), prompt.index("[Conversation]"))
+
+    def test_knowledge_query_gives_today_for_absolute_dates(self) -> None:
+        from waifu_standalone.infra.clock import local_now
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            event = InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="我下周三面试")],
+            )
+            prompt = service.generator._build_knowledge_query(
+                event,
+                service.memory.load("783190298", "person"),
+                assistant_name="极光",
+                latest_message="我下周三面试",
+                conversation_view="",
+                address="tester",
+                max_entries=2,
+            )
+
+            self.assertIn(f"Today is {local_now(service.config.timezone):%Y-%m-%d}", prompt)
+            self.assertIn("absolute dates", prompt)
+
+    def test_analysis_is_clipped_at_a_sentence_boundary(self) -> None:
+        clip = Generator._clip_at_sentence
+        thought = "对方在问时间。语气轻松，可以顺手提醒早点休息，然后接着聊明天的安排"
+        # The only sentence end is too early to cut at, so it falls back to a hard cut.
+        self.assertEqual(clip(thought, limit=30), thought[:30] + "…")
+        self.assertEqual(clip("对方在问时间。语气轻松。然后接着聊明天的安排吧好不好", limit=16), "对方在问时间。语气轻松。")
+        self.assertEqual(clip("很短", limit=80), "很短")
 
     def test_group_ambient_messages_fold_into_next_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

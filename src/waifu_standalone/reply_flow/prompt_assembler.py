@@ -11,8 +11,10 @@ from ..contracts import GeneratedImage
 from ..character import CardManager, CharacterCard
 from ..models import EmotionState, InboundEvent, SessionMemory
 from ..infra import ImageClient, LLMClient, build_image_client, build_llm_client
+from ..infra.clock import format_prompt_time, local_now
 from ..infra.image_clients import ImageClientError
 from ..infra.llm_clients import LLMClientError
+from ..memory import ROLLING_SUMMARY_KEY, clip_rolling_summary
 from ..skills import SkillSpec, ToolExecutionResult, ToolExposureContext, ToolInvocation, ToolRegistry
 
 
@@ -74,6 +76,9 @@ class Generator:
     def resolve_assistant_name(self, launcher_type: str, session: SessionMemory) -> str:
         card = self._cards.load(launcher_type, session)
         return card.assistant_name or self.config.assistant_name
+
+    def _prompt_time(self) -> str:
+        return format_prompt_time(local_now(self.config.timezone), self.config.timezone)
 
     @staticmethod
     def _card_with_assistant_name(card: CharacterCard, assistant_name: str) -> CharacterCard:
@@ -140,7 +145,7 @@ class Generator:
                 )
                 cleaned = self._clean_response(response)
                 if cleaned:
-                    return self._clip(cleaned, limit=self.config.max_thinking_words)
+                    return self._clip_at_sentence(cleaned, limit=self.config.max_thinking_words)
             except LLMClientError:
                 pass
         if allow_fallback:
@@ -199,7 +204,7 @@ class Generator:
                 )
                 cleaned = self._clean_response(response)
                 if cleaned:
-                    return self._clip(cleaned, limit=self.config.max_thinking_words)
+                    return self._clip_at_sentence(cleaned, limit=self.config.max_thinking_words)
             except LLMClientError:
                 pass
         if allow_fallback:
@@ -687,6 +692,33 @@ class Generator:
             except LLMClientError:
                 pass
         return self._fallback_summary(history_lines)
+
+    def summarize_rolling(
+        self,
+        history_lines: list[str],
+        *,
+        previous_summary: str,
+        assistant_name: str,
+    ) -> str:
+        """Merge archived history lines into the session's rolling summary."""
+        if not history_lines:
+            return previous_summary
+        if self.llm_ready:
+            prompt = self._build_rolling_summary_query(
+                history_lines,
+                previous_summary=previous_summary,
+                assistant_name=assistant_name,
+            )
+            try:
+                response = self._dify_client.invoke(prompt, user="rolling-summary")
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return clip_rolling_summary(cleaned)
+            except LLMClientError:
+                pass
+        fallback, _ = self._fallback_summary(history_lines)
+        merged = "；".join(part for part in (previous_summary.strip(), fallback) if part)
+        return clip_rolling_summary(merged)
 
     async def asummarize_history(
         self,
@@ -1343,6 +1375,7 @@ class Generator:
     ) -> str:
         lines = [
             f"你是{assistant_name}，正在分析当前对话。",
+            f"当前时间：{self._prompt_time()}",
             f"用户称呼倾向：{address}",
             f"当前最新消息：{latest_message}",
             f"角色设定摘要：{'；'.join(card.profile[:3]) or '无'}",
@@ -1388,6 +1421,8 @@ class Generator:
             conversation_view=conversation_view,
             speaker_notes=speaker_notes,
             latest_message=latest_message,
+            current_time=self._prompt_time(),
+            earlier_summary=str(session.metadata.get(ROLLING_SUMMARY_KEY, "") or "").strip(),
         )
         prompt_parts = [
             system_prompt,
@@ -1436,6 +1471,7 @@ class Generator:
             conversation_view=conversation_view,
             speaker_notes=[],
             latest_message=latest_message,
+            current_time=self._prompt_time(),
         )
         parts = [system_prompt, "[Onboarding]"]
         if stage == "ask_name":
@@ -1661,6 +1697,7 @@ class Generator:
             conversation_view="",
             speaker_notes=[],
             latest_message=latest_message,
+            current_time=self._prompt_time(),
         )
         preview = self._clip(result.text or result.error or "", limit=1200)
         metadata_preview = self._clip(
@@ -1710,6 +1747,27 @@ class Generator:
             f"[History]\n{payload}"
         )
 
+    def _build_rolling_summary_query(
+        self,
+        history_lines: list[str],
+        *,
+        previous_summary: str,
+        assistant_name: str,
+    ) -> str:
+        transcript = self._conversation_excerpt(
+            history_lines,
+            assistant_name=assistant_name,
+            limit=len(history_lines),
+        )
+        return (
+            f"你在为{assistant_name}整理更早的聊天记录，供之后回忆前情。\n"
+            "把「已有摘要」和「新的对话」合并成一段新的摘要：中文，不超过 300 字，按时间顺序；"
+            "保留谁说了什么、约定、正在讨论的话题和没解决的问题；具体日期照原文写，不要编造。"
+            "只输出摘要正文，不要标题、列表或解释。\n\n"
+            f"[已有摘要]\n{previous_summary.strip() or '无'}\n\n"
+            f"[新的对话]\n{transcript}"
+        )
+
     def _build_knowledge_query(
         self,
         event: InboundEvent,
@@ -1735,6 +1793,10 @@ class Generator:
             "Ignore greetings, transient commands, image requests, search requests, onboarding name collection, and meta instructions.",
             "Do not store preferred-name requests or the fact that the assistant asked for onboarding.",
             "The summary must be concise and self-contained.",
+            (
+                f"Today is {local_now(self.config.timezone):%Y-%m-%d (%A)}. Write dates in summaries as "
+                "absolute dates (YYYY-MM-DD); never keep relative words such as 今天, 明天, 下周三."
+            ),
             f"Speaker display name: {address or event.sender_name or event.sender_id}",
             f"Launcher type: {event.launcher_type}",
             f"Latest message: {latest_message}",
@@ -2412,7 +2474,8 @@ class Generator:
         if not isinstance(item, dict):
             return None
         memory_type = str(item.get("memory_type", "") or "").strip().lower() or "fact"
-        if memory_type not in {"fact", "preference", "relationship", "event", "summary"}:
+        # "summary" is reserved for archived chat history and is never recalled.
+        if memory_type not in {"fact", "preference", "relationship", "event"}:
             memory_type = "fact"
         scope_hint = str(item.get("scope_hint", "") or "").strip().lower() or "member"
         if scope_hint not in {"member", "group", "person", "global"}:
@@ -2514,6 +2577,18 @@ class Generator:
         if len(normalized) <= limit:
             return normalized
         return normalized[:limit].rstrip() + "..."
+
+    @staticmethod
+    def _clip_at_sentence(text: str, limit: int) -> str:
+        """Clip to ``limit`` chars, preferring to end on a sentence boundary."""
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(normalized) <= limit:
+            return normalized
+        head = normalized[:limit]
+        cut = max(head.rfind(mark) for mark in "。！？!?；;")
+        if cut + 1 >= limit // 2:
+            return head[: cut + 1]
+        return head.rstrip() + "…"
 
     @staticmethod
     def _clip_multiline(text: str, limit: int = 700) -> str:

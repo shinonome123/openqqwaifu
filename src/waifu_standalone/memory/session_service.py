@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -19,6 +20,18 @@ _LEGACY_SESSION_SUFFIX = ".json"
 _COMPACT_THRESHOLD_BYTES = 256 * 1024
 # Per-line cap inside the prompt's [Conversation] window when a char budget is set.
 _DIALOGUE_LINE_MAX_CHARS = 400
+# Archived history is folded into one summary kept on the session, shown to the
+# model as [Earlier Conversation].
+ROLLING_SUMMARY_KEY = "rolling_summary"
+ROLLING_SUMMARY_MAX_CHARS = 600
+
+
+def clip_rolling_summary(text: str) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= ROLLING_SUMMARY_MAX_CHARS:
+        return normalized
+    # Keep the newest part; the start of a rolling summary is the oldest context.
+    return "…" + normalized[-(ROLLING_SUMMARY_MAX_CHARS - 1) :].lstrip()
 
 
 def clone_session(session: SessionMemory) -> SessionMemory:
@@ -536,52 +549,42 @@ class Memory:
         batch_size: int,
         summarizer: Callable[[list[str]], tuple[str, list[str]]],
         character_id: str = "",
+        commit_lock: AbstractContextManager[object] | None = None,
     ) -> dict[str, object] | None:
+        """Fold overflowing history into the session's rolling summary.
+
+        Waits until at least ``batch_size`` lines overflow ``max_history_lines`` and
+        then archives the whole overflow with one summarizer call, instead of one
+        call per reply. ``summarizer`` gets the lines to archive and returns the new
+        rolling summary (it is expected to merge the previous one). It runs without
+        ``commit_lock``; only the re-read, trim and save happen under it.
+        """
         session = self.load(launcher_id, launcher_type, character_id=character_id)
-        if len(session.history) <= max_history_lines:
+        archive_count = len(session.history) - max_history_lines
+        if archive_count < max(1, batch_size):
             return None
 
-        archive_count = min(max(1, batch_size), max(1, len(session.history) - max_history_lines))
         history_batch = list(session.history[:archive_count])
         summary, tags = summarizer(history_batch)
-        summary = str(summary or "").strip()
+        summary = clip_rolling_summary(summary)
         if not summary:
             return None
 
-        current = self.load(launcher_id, launcher_type, character_id=character_id)
-        if len(current.history) < archive_count:
-            return None
-        if list(current.history[:archive_count]) != history_batch:
-            return None
-
-        current.history = current.history[archive_count:]
-        self.store.save(current)
+        with commit_lock if commit_lock is not None else nullcontext():
+            current = self.load(launcher_id, launcher_type, character_id=character_id)
+            # Lines may have been appended meanwhile; only trim if the archived
+            # prefix is still exactly where it was.
+            if list(current.history[:archive_count]) != history_batch:
+                return None
+            current.history = current.history[archive_count:]
+            current.metadata[ROLLING_SUMMARY_KEY] = summary
+            self.store.save(current)
         return {
             "summary": summary,
             "tags": [tag for tag in tags if str(tag).strip()],
             "archive_count": archive_count,
             "source": "archived_history",
         }
-
-    async def amaybe_archive_history(
-        self,
-        launcher_id: str,
-        launcher_type: str,
-        *,
-        max_history_lines: int,
-        batch_size: int,
-        summarizer: Callable[[list[str]], tuple[str, list[str]]],
-        character_id: str = "",
-    ) -> dict[str, object] | None:
-        return await asyncio.to_thread(
-            self.maybe_archive_history,
-            launcher_id,
-            launcher_type,
-            max_history_lines=max_history_lines,
-            batch_size=batch_size,
-            summarizer=summarizer,
-            character_id=character_id,
-        )
 
     def extract_preferred_name(self, content: str) -> str:
         raw = str(content or "").strip()

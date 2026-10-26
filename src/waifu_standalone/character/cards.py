@@ -50,6 +50,8 @@ class CharacterCard:
         conversation_view: str,
         speaker_notes: list[str],
         latest_message: str,
+        current_time: str = "",
+        earlier_summary: str = "",
     ) -> str:
         sections: list[str] = [
             f"你是{self.assistant_name}，正在通过 QQ 与用户交流。",
@@ -76,12 +78,15 @@ class CharacterCard:
             sections.append(_format_lines("Speaker Notes", speaker_notes))
 
         state_lines = [
+            *([f"当前时间：{current_time}"] if current_time else []),
             f"当前情绪判断：{emotion.primary}（强度 {emotion.intensity:.2f}）",
             f"当前对话对象偏好称呼：{address}",
         ]
         if search_hint:
             state_lines.append(f"联网提示：{search_hint}")
         sections.append(_format_lines("State", state_lines))
+        if earlier_summary:
+            sections.append(_format_block("Earlier Conversation", earlier_summary))
         sections.append(_format_block("Conversation", conversation_view or "暂无上下文。"))
         sections.append(_format_block("Latest Message", latest_message or "暂无内容。"))
         sections.append("只输出下一句回复，不要加说话人前缀，不要输出额外解释。")

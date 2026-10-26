@@ -445,6 +445,39 @@ class RuntimeStateStoreTests(unittest.TestCase):
         self.assertEqual(store.recall_knowledge(scopes=[("person", "20001")], query="帮我搜一下天气", limit=3), [])
         self.assertEqual(store.recall_knowledge(scopes=[("person", "20001")], query="哈哈哈", limit=3), [])
 
+    def test_chat_summaries_are_not_recalled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stores = [InMemoryRuntimeStateStore(), SqliteRuntimeStateStore(Path(tmpdir) / "runtime.sqlite3")]
+            for store in stores:
+                store.add_knowledge(
+                    scope_type="person",
+                    scope_id="20001",
+                    memory_type="summary",
+                    summary="阿林和机器人聊了很久草莓蛋糕",
+                    tags=["草莓蛋糕"],
+                    confidence=0.62,
+                )
+                store.add_knowledge(
+                    scope_type="person",
+                    scope_id="20001",
+                    memory_type="preference",
+                    summary="阿林最喜欢吃草莓蛋糕",
+                    tags=["食物"],
+                    confidence=0.9,
+                )
+                recalled = store.recall_knowledge(scopes=[("person", "20001")], query="草莓蛋糕", limit=3)
+                self.assertEqual(recalled, ["阿林最喜欢吃草莓蛋糕"], type(store).__name__)
+
+    def test_events_older_than_a_month_are_excluded_from_recall(self) -> None:
+        from waifu_standalone.repositories.runtime_state import excluded_from_recall
+
+        now = 2_000_000_000
+        day = 24 * 3600
+        self.assertTrue(excluded_from_recall({"memory_type": "event", "updated_at": now - 31 * day}, now=now))
+        self.assertFalse(excluded_from_recall({"memory_type": "event", "updated_at": now - day}, now=now))
+        self.assertFalse(excluded_from_recall({"memory_type": "fact", "updated_at": now - 400 * day}, now=now))
+        self.assertTrue(excluded_from_recall({"memory_type": "summary", "updated_at": now}, now=now))
+
     def test_broken_embedder_is_logged_and_paused_then_recovers(self) -> None:
         failing = FailingEmbedder()
         store = InMemoryRuntimeStateStore(embedder=failing)

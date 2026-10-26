@@ -84,7 +84,7 @@ class ReplyFlowService:
 
         repeat_reply = svc.gate.build_repeat_reply(event, session, address=address)
         if repeat_reply is not None:
-            return await svc.emitter.aemit(event, repeat_reply, assistant_name=assistant_name)
+            return await svc.emitter.aemit(event, repeat_reply, assistant_name=dialogue_assistant_name)
 
         active_skills = svc.tool_orchestrator.prompt_skill_cards(latest_message)
         await svc._store_active_skills_async(session, active_skills)
@@ -114,7 +114,7 @@ class ReplyFlowService:
                 launcher_type=event.launcher_type,
                 text=svc.tool_orchestrator.unavailable_reply(address),
             )
-            return await svc.emitter.aemit(event, unavailable, assistant_name=assistant_name)
+            return await svc.emitter.aemit(event, unavailable, assistant_name=dialogue_assistant_name)
 
         emotion = svc.emotions.analyze(event, session)
         search_context = SearchContext()
@@ -211,7 +211,8 @@ class ReplyFlowService:
         emitted = await svc.emitter.aemit(
             event,
             message,
-            assistant_name=assistant_name,
+            # The emitter only uses this to label the rolling summary.
+            assistant_name=dialogue_assistant_name,
             emotion=emotion,
             search_used=bool(search_context.active),
             behavior_reason="reply",
