@@ -1,10 +1,10 @@
 # 交接说明（2026-10-25，2026-10-26 更新）
 
-给新会话：这份文档只记录工程事实。先读第 1、2 节。第 4 节的 A、B、C 三块已在 2026-10-26 做完（未提交、未实机验证），剩下的事在各块的「没做的」和第 5 节。标注「（审计结论）」的条目来自代码审查，没有逐条复核，改之前先对一下代码。
+给新会话：这份文档只记录工程事实。先读第 1、2 节。第 4 节的 A、B、C 三块已在 2026-10-26 做完并提交（PR #27，未实机验证）；阶段 0 剩下的 P0 修复见第 2.1 节。剩下的事在各块的「没做的」、第 2.1 节的「要 owner 决定的」和第 5 节。标注「（审计结论）」的条目来自代码审查，没有逐条复核，改之前先对一下代码。
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，336 个，约 45 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，362 个（`fix/stage0-p0` 上；PR #27 上是 336 个），约 48 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复的最终输入是一条 system 消息加一条 user 消息：
   - system：`reply_flow/prompt_assembler.py` 顶部的 `_TOOL_CALLING_SYSTEM_PROMPT`。
@@ -13,11 +13,11 @@
 
 ## 2. 当前工作区状态
 
-分支 `codex/runtime-ui-and-image-fixes`，HEAD `5865fa9`，已并入 origin/main（本地 main 落后 3 个合并提交）。**全部改动未提交。** 提交前先 `git switch -c <新分支名>`，不要继续在这条已合并的分支上提交。
+- `feat/memory-and-skill-overhaul`：下面七组改动拆成的 8 个提交（含测试隔离和本文档），PR #27，未合入 main。
+- `fix/stage0-p0`：基于上一条分支的 `6645f05`，阶段 0 剩下的 P0 修复，5 个修复提交加 1 个文档提交，见第 2.1 节；没有推送。PR #27 合入后，把它 rebase 到 main 再开 PR。
+- `.env`（NapCat 令牌、账号）和 `output/`（截图和 PR 草稿）在 `fix/stage0-p0` 上已加入 `.gitignore`；这条分支合入之前，主检出里它们仍是未跟踪文件，不要 `git add .`。
 
-未跟踪文件 `.env`（NapCat 令牌、账号）没有被 `.gitignore` 忽略，另有 `output/`（截图和 PR 草稿）。不要 `git add .`。
-
-改动分七组，建议按这个顺序拆成七个提交。`prompt_assembler.py`、`runtime/container.py`、`runtime/service.py`、`reply_flow/service.py`、`skills/dispatcher.py`、`tests/test_skills.py`、`tests/test_app.py` 里几组改动混在一起，拆分要用 `git add -p`。
+改动分七组（已按这个顺序提交，下面留作每组改了什么的记录）：
 
 1. **称呼工具更严格**（本轮之前就有的未提交改动）
    - `reply_flow/prompt_assembler.py`：`_TOOL_CALLING_SYSTEM_PROMPT` 抽成常量，新增「保存类请求必须先调工具」。
@@ -79,6 +79,48 @@
    - `runtime/service.py`：有结果的 `last_search` 跨轮保留。
    - `infra/safe_fetch.py`（新文件）：`check_public_url`、`fetch_public_url`、`afetch_public_url`；`skills/dispatcher.py` 的 web-fetch、summarize 内置抓取改用它，summarize CLI 调用前先 `check_public_url`。测试 `tests/test_safe_fetch.py`。
    - 测试：`tests/test_skills.py` 把 `test_slash_skill_command_no_longer_bypasses_tool_orchestrator`、`test_ignored_slash_summarize_does_not_use_legacy_dispatch` 换成 `test_slash_skill_command_runs_with_default_ignore_prefixes`、`test_other_slash_messages_are_still_ignored`、`test_slash_skill_command_respects_tool_authorization`，`test_image_request_keeps_skill_match` 改断言，另加 3 个；`tests/test_app.py` 加 5 个。
+
+### 2.1 阶段 0 的 P0 修复（分支 `fix/stage0-p0`，2026-10-26）
+
+`REFACTOR_ROADMAP.md` 第 1 节第 4 步的剩余项。URL 抓取拦截在 PR #27 里已经做完，这里没再动。每项一个提交，都有测试；全量 362 个测试通过。都没有在真实 QQ 环境验证。
+
+1. **`dry_run` 生效**（`c28c520`）
+   - `runtime/container.py::_build_runtime_outbound`：`qq_sidecar.dry_run` 为真时返回 `CapturingOutboundPort`，配了 `outbound_base_url` 也不发；`reverse_ws` 模式保留网关，NapCat 照常连进来推事件，回复只捕获。控制台改 sidecar 配置后重建出站时同样生效。
+   - `settings_admin/config_manager.py`：环境变量 `OPENQQWAIFU_QQ_SIDECAR_DRY_RUN` 以前读了但结果被丢掉，现在会写回配置。
+   - `runtime/service.py`：`_requires_live_llm()` 在 `dry_run` 时为真，彩排走线上路径（模型没配好就回「AI 工具编排模型还没连上」，知识抽取不走正则回退、生图前缀要求 `image_ready`）；`_outbound_mode_label` 显示 `dry-run (capture)`。`serve` 的启动日志是 `outbound=capture(dry-run)`（已实测）。
+   - CLAUDE.md、AGENTS.md 和第 6 节的说法已改。
+   - 测试：`test_runtime_service_dry_run_captures_even_with_sidecar_url`、`test_runtime_service_dry_run_keeps_reverse_ws_gateway_for_inbound`（`tests/test_app.py`）、`test_env_override_turns_on_dry_run`（`tests/test_config_manager.py`）。
+2. **启用角色不再清空会话**（`077a26a`）
+   - `character/service.py`：`activate_character` 去掉 `reset_sessions` 参数，只切换当前角色；启用的就是已绑定的角色时不重建会话存储和 SQLite 连接。`runtime/service.py` 的 `_rebind_character_scoped_storage`、`_reset_character_runtime_context` 也不再带清空开关（仍会清跟进窗口、环境缓冲这些内存状态）。
+   - 清空会话改成单独的操作：`CharacterService.reset_character_sessions` / `POST /api/character/reset-sessions`，`{"character": X, "confirm": X}`，`confirm` 不等于角色代号、或角色不在 `cards.list_characters()` 里都返回 400（后者也挡住 `..` 这类代号去删别的目录）。只删这个角色的会话文件（含滚动摘要），知识库、成员、好感度不动。仅管理员可用。
+   - 控制台：人物卡页立绘卡片的按钮行多了「重置会话…」，弹窗说明删什么，要求输入角色代号；输错不发请求。已在浏览器里实测：输错被拒；「保存并启用」同一角色后会话文件还在；输对后会话文件被删、接口 200。
+   - 没做：重置时没有拿会话锁，正在生成的回复写回时会把那一个会话再存回来。
+   - 测试：`test_save_character_panel_switch_keeps_character_sessions`（原来的 `..._switch_resets_character_sessions` 反过来了）、`test_save_and_activate_same_character_keeps_sessions_and_storage`、`test_reset_character_sessions_requires_matching_confirmation`（`tests/test_app.py`）、`test_character_reset_sessions_endpoint_requires_confirmation`（`tests/test_server_integration.py`）。
+3. **入站消息去重**（`f76041e`）
+   - 新文件 `gateways/inbound_dedup.py::InboundDeduplicator`；`web/http_api.py::HttpApi` 持有一个实例，`handle_json` 和 `handle_json_async` 在解析出事件后先 `claim`。HTTP 回调和反向 WS（`_handle_reverse_ws_payload` → `handle_json_async`）都经过这里。
+   - 有 `message_id`：按（会话类型、会话 ID、`message_id`）记 10 分钟。没有：按（会话、发送者、内容哈希）记 10 秒；载荷里有 OneBot 的 `time` 时把它并进键并记 10 分钟（重试带原来的 `time`，同一句话再发一次 `time` 不同）。最多 4096 条，超出丢最旧的。参数是模块常量，没进配置。
+   - 重复的返回 `ignored` / `duplicate message`（HTTP 回调照常回 204），onebot 事件指标里的 outcome 是 `duplicate`。处理抛异常时释放这条记录，之后的重试还能处理。
+   - 没做：只在内存里，重启就忘；直接调用 `service.handle_event` 的路径（CLI、测试、控制台预览）不去重。
+   - 测试：新文件 `tests/test_inbound_dedup.py`；`test_replayed_event_frame_is_handled_once`（`tests/test_onebot_ws.py`，真实 WS 连接）、`test_http_callback_retry_does_not_reply_twice`（`tests/test_server_integration.py`，真实 HTTP，出站只发一次）。这两个端到端测试在去掉去重后都会失败（已验证）。
+4. **付费和外部工具限流**（`964d18a`）
+   - 新文件 `infra/rate_limit.py::TokenBucketLimiter`：一次调用要从发送者的桶和（群聊时）群的桶各拿一个令牌，两个都有才扣，否则都不扣并返回要等多久。桶在内存里，初始是满的，最多 1 万个。
+   - `config.py::RateLimitConfig`（`AppConfig.rate_limits`），`ConfigManager.load()` 的 `_load_rate_limits` 读取；负数按 0，非数字用默认值。环境变量 `OPENQQWAIFU_RATE_LIMITS_ENABLED`、`OPENQQWAIFU_RATE_LIMITS_EXEMPT_USER_IDS`。默认值：
+     - `image`（生图）：每人 3 次连发、每小时回填 10 次；每群 6 次、每小时 30 次。
+     - `network`（搜索、web-fetch、summarize、带新查询的 search-links，共用一个桶）：每人 8 次、每小时 60 次；每群 16 次、每小时 180 次。
+     - `*_burst` 为 0 关掉那一层；`exempt_user_ids` 里的人不受限；`enabled=false` 全关。
+   - `skills/dispatcher.py`：检查放在各个真正执行的函数里（`use_*`/`ause_*` 模型工具、`handle_image_request`/`handle_search_request` 及异步版、summarize 的离线路径），所以模型工具循环、`/skill`、`生图` 前缀、旧关键词分发都覆盖；放在参数校验之后，空请求不扣令牌。被限时回复「X，生图刚才用得有点多，30 分钟后再来吧。」；`/skill` 和 `生图` 直发时这句话原样发出，不再调一次模型来改写；模型工具循环里模型看到的是带 `rate_limited` 的错误结果。
+   - 不限：会话总结（`summary`）、天气、生图交付文案、普通聊天的模型调用；控制台的立绘生成。控制台没有改这些参数的界面，只能改配置文件或环境变量。重启后桶回到满的。
+   - 测试：新文件 `tests/test_rate_limit.py`（令牌桶、按人、按群、三种网络工具共用一个桶、豁免和关闭、配置读取与环境变量）。
+5. **仓库卫生**（`ce48bd2`）
+   - `.gitignore` 加上 `.env`、`.env.*`（保留 `!.env.example`，它是被跟踪的）和 `output/`。测试 `tests/test_repo_hygiene.py` 用 `git check-ignore --no-index` 检查，没有 git 或不在工作树里时跳过。
+   - 没做：`data/skills/` 下两个旧格式技能文件（路线图里也列在这一步）按约定留给 owner。
+
+要 owner 决定的：
+
+- 限流默认值合不合适，要不要把自己的 QQ 号放进 `rate_limits.exempt_user_ids`。线上的 `data/docker-compose-config.json` 没有 `rate_limits` 段，合入后直接按默认值生效。
+- `dry_run` 时 `_requires_live_llm()` 为真（按线上行为彩排）。如果更想要「dry_run = 离线模式」，改回去只需要删掉 `runtime/service.py::_requires_live_llm` 里的 `dry_run` 判断，并改掉 `test_runtime_service_dry_run_captures_even_with_sidecar_url` 的断言。
+- 去重的时间窗（10 分钟 / 10 秒）是常量；要调的话再挪进配置。
+- 顺带发现、没有修：`settings_admin/config_manager.py::ConfigManager.load()` 里 `assistant_name` 的默认值 `"鐞夌拑"`、`image_command_prefix` 和 `image_command_aliases` 的默认值 `"鐢熷浘"` 是乱码（UTF-8 被当成 GBK 读过一次，原文是「琉璃」「生图」）；`config.py` 里的默认值是对的。配置文件里没写这几项时，生图前缀会变成乱码。线上的 `data/docker-compose-config.json` 三项都写了，目前不受影响。
 
 ## 3. 运行数据与配置（`data/` 被 gitignore，不在 git 里）
 
