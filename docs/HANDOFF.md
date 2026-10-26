@@ -150,7 +150,7 @@
 
 - 机器人看不到图片：`InboundEvent.image_payloads()` 从没被调用，图片只存成「发送了图片」；`web/http_api.py`（105–115 行）只解析 text、image、at，引用回复、表情、语音、转发、小程序卡片会被丢掉。
 - 好感度只涨不跌（`systems/value_game.py`），情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`），主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
-- 激活角色会清空所有会话记录：`character/service.py::save_character_panel` 在 `set_active` 时调用 `activate_character(..., reset_sessions=True)`，即使是同一个角色（57 行）。
+- ~~激活角色会清空所有会话记录~~（2026-10-26 已修）：`activate_character` 不再带 `reset_sessions`，启用同一个角色时也不重建存储；清空会话改为单独的 `POST /api/character/reset-sessions`（`confirm` 必须等于角色代号），控制台人物卡页「重置会话…」按钮要求输入代号确认。只删会话文件（含滚动摘要），长期记忆、成员和好感度不动。
 - 群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）会让机器人接任何人的话；（审计结论）LLM 出错时异常被吞，机器人静默不回复。
 - 召回时同步发起一次嵌入调用，延迟约一次网络往返。
 

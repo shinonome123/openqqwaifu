@@ -420,6 +420,9 @@ class HttpApi:
     def save_character_panel(self, payload: dict[str, Any]) -> dict[str, Any]:
         return dict(self.service.save_character_panel(payload))
 
+    def reset_character_sessions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.service.reset_character_sessions(payload))
+
     def get_character_portrait(self, character: str) -> tuple[bytes, str] | None:
         return self.service.get_character_portrait(character)
 
@@ -665,6 +668,7 @@ def make_handler(api: HttpApi):
                 "/api/sidecar/test": self._post_test_sidecar,
                 "/api/panels/character": self._post_character_panel,
                 "/api/character/preview": self._post_character_preview,
+                "/api/character/reset-sessions": self._post_character_reset_sessions,
                 "/api/panels/ai": self._post_ai_panel,
                 "/api/panels/abilities": self._post_abilities_panel,
                 "/api/proactive/draft": self._post_proactive_draft,
@@ -1169,6 +1173,15 @@ def make_handler(api: HttpApi):
                 return
             try:
                 self._write_json(HTTPStatus.OK, api.preview_character_panel(payload))
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_character_reset_sessions(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                self._write_json(HTTPStatus.OK, api.reset_character_sessions(payload))
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
 

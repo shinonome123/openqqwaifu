@@ -759,6 +759,12 @@ Object.assign(EN, {
   "character.portrait.generated": "Portrait generated and bound.",
   "character.portrait.failed": "Portrait generation failed",
   "character.portrait.notice": "Portrait waiting for provider",
+  "character.sessions.reset": "Reset sessions…",
+  "character.sessions.resetTitle": "Reset sessions of {name}",
+  "character.sessions.resetConfirm": "Deletes every private and group chat history of {name}, including the rolling summary. Long-term knowledge, members and affinity stay. This cannot be undone. Activating a character never does this.",
+  "character.sessions.resetTypeName": "Type {name} to confirm",
+  "character.sessions.resetMismatch": "The name does not match; nothing was deleted.",
+  "character.sessions.resetDone": "Cleared {count} sessions of {name}",
 });
 
 Object.assign(ZH, {
@@ -824,6 +830,12 @@ Object.assign(ZH, {
   "character.portrait.generated": "立绘已经生成并绑定好了。",
   "character.portrait.failed": "立绘生成失败",
   "character.portrait.notice": "等待生图配置",
+  "character.sessions.reset": "重置会话…",
+  "character.sessions.resetTitle": "重置 {name} 的会话",
+  "character.sessions.resetConfirm": "会删除 {name} 的全部私聊和群聊记录（含滚动摘要）。长期记忆、成员资料和好感度不受影响。删除后不能恢复。启用角色不会做这件事。",
+  "character.sessions.resetTypeName": "输入角色代号 {name} 确认",
+  "character.sessions.resetMismatch": "代号不一致，没有删除任何内容。",
+  "character.sessions.resetDone": "已清空 {name} 的 {count} 个会话",
 });
 
 Object.assign(EN, {

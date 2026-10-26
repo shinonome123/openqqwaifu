@@ -761,6 +761,42 @@ class ServerIntegrationTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_character_reset_sessions_endpoint_requires_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_runtime_service(AppConfig(data_root=tmpdir))
+            session = service.memory.load("783190298", "person")
+            session.history = ["tester: hi", "assistant: hi"]
+            service.memory.store.save(session)
+            character = service.cards.active_character()
+            api = HttpApi(service)
+            server = run_server(api, "127.0.0.1", 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                host, port = server.server_address
+                opener = self._build_auth_opener(host, port)
+                url = f"http://{host}:{port}/api/character/reset-sessions"
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    self._open_json(opener, url, method="POST", payload={"character": character})
+
+                self.assertEqual(ctx.exception.code, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(len(service.memory.store.list_sessions()), 1)
+
+                status, body = self._open_json(
+                    opener,
+                    url,
+                    method="POST",
+                    payload={"character": character, "confirm": character},
+                )
+
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertEqual(body["cleared_sessions"], 1)
+                self.assertEqual(service.memory.store.list_sessions(), [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()
