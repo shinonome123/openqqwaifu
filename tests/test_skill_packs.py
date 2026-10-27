@@ -21,6 +21,61 @@ from waifu_standalone.config import AppConfig
 
 
 class SkillPackTests(unittest.TestCase):
+    def test_bundles_with_identical_source_filenames_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as destination:
+            registry = SkillRegistry(AppConfig(data_root=source))
+            for skill_id in ("alpha", "beta"):
+                folder = registry.workspace_root / skill_id
+                folder.mkdir(parents=True)
+                (folder / "SKILL.md").write_text(build_skill_markdown_template(
+                    skill_id=skill_id, name=skill_id, description=skill_id,
+                    triggers=[skill_id], body=skill_id), encoding="utf-8")
+            pack = export_skill_pack(registry)
+            self.assertEqual({item["filename"] for item in pack["skills"]}, {"alpha.md", "beta.md"})
+            # Also accept legacy packs which repeated SKILL.md for unrelated IDs.
+            for item in pack["skills"]:
+                item["filename"] = "SKILL.md"
+            target = SkillRegistry(AppConfig(data_root=destination))
+            result = import_skill_pack(target, pack)
+            self.assertEqual(result["imported_count"], 2)
+            self.assertIsNotNone(target.get_skill("alpha"))
+            self.assertIsNotNone(target.get_skill("beta"))
+
+    def test_invalid_pack_is_rejected_before_any_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = SkillRegistry(AppConfig(data_root=directory))
+            markdown = build_skill_markdown_template(skill_id="alpha", name="alpha", description="alpha", triggers=["alpha"], body="alpha")
+            for entries in (
+                [{"id": "alpha", "markdown": markdown}, {"id": "alpha", "markdown": markdown}],
+                [{"id": "alpha", "markdown": markdown}, {"id": "beta", "markdown": markdown}],
+            ):
+                with self.assertRaises(ValueError):
+                    import_skill_pack(registry, {"skills": entries})
+                self.assertIsNone(registry.get_skill("alpha"))
+
+    def test_import_cannot_overwrite_unrelated_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = SkillRegistry(AppConfig(data_root=directory))
+            original = build_skill_markdown_template(skill_id="original", name="original", description="original", triggers=["original"], body="original")
+            registry.install_workspace_skill(original, filename="incoming.md")
+            incoming = build_skill_markdown_template(skill_id="incoming", name="incoming", description="incoming", triggers=["incoming"], body="incoming")
+            with self.assertRaises(ValueError):
+                import_skill_pack(registry, {"skills": [{"id": "incoming", "markdown": incoming}]})
+            self.assertEqual(registry.get_skill("original").skill_id, "original")
+            self.assertIsNone(registry.get_skill("incoming"))
+
+    def test_updating_existing_skill_preserves_other_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = SkillRegistry(AppConfig(data_root=directory))
+            original = build_skill_markdown_template(skill_id="original", name="original", description="original", triggers=["original"], body="original")
+            incoming = build_skill_markdown_template(skill_id="incoming", name="incoming", description="incoming", triggers=["incoming"], body="incoming")
+            registry.install_workspace_skill(original, filename="incoming.md")
+            registry.install_workspace_skill(incoming, filename="another.md")
+            with self.assertRaises(ValueError):
+                import_skill_pack(registry, {"skills": [{"id": "incoming", "markdown": incoming}]})
+            self.assertEqual(registry.get_skill("original").skill_id, "original")
+            self.assertEqual(registry.get_skill("incoming").skill_id, "incoming")
+
     def test_template_contains_one_skill(self) -> None:
         template = build_skill_pack_template()
 

@@ -21,7 +21,9 @@ COPY examples ./examples
 RUN pip install --no-cache-dir .
 RUN npm i -g @steipete/summarize
 
-RUN useradd --create-home appuser
+RUN useradd --create-home appuser \
+    && mkdir -p /app/data \
+    && chown appuser:appuser /app/data
 USER appuser
 
 EXPOSE 8080

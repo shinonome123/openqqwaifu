@@ -98,6 +98,10 @@ class AuthManager:
             user["password_salt"] = password_salt
             user["updated_at"] = time.time()
             self._save_locked()
+            self._sessions = {
+                token: session for token, session in self._sessions.items()
+                if session["username"] != normalized
+            }
             return _public_user(user)
 
     def create_session(self, username: str) -> str:

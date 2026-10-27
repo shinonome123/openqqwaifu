@@ -129,15 +129,20 @@ export function openModal({ title, body, actions }) {
     root.innerHTML = "";
     root.appendChild(modal);
     root.hidden = false;
-    requestAnimationFrame(() => root.classList.add("is-open"));
+    requestAnimationFrame(() => {
+      if (!closed && root.firstElementChild === modal) root.classList.add("is-open");
+    });
 
     function finish(value) {
       if (closed) return;
       closed = true;
       root.classList.remove("is-open");
       setTimeout(() => {
-        root.hidden = true;
-        root.innerHTML = "";
+        // A new confirmation can open before this closing animation ends.
+        if (root.firstElementChild === modal) {
+          root.hidden = true;
+          root.replaceChildren();
+        }
       }, 200);
       document.removeEventListener("keydown", keyHandler);
       root.removeEventListener("click", clickHandler);

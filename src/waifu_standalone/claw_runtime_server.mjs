@@ -254,11 +254,7 @@ function listMcpServerEntries(rootPath) {
 }
 
 function encodeJsonRpcFrame(payload) {
-  const body = Buffer.from(JSON.stringify(payload), "utf-8");
-  return Buffer.concat([
-    Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "utf-8"),
-    body,
-  ]);
+  return Buffer.from(`${JSON.stringify(payload)}\n`, "utf-8");
 }
 
 function createJsonRpcFrameParser(onMessage) {
@@ -266,23 +262,13 @@ function createJsonRpcFrameParser(onMessage) {
   return (chunk) => {
     buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
     while (true) {
-      const headerEnd = buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) {
+      const lineEnd = buffer.indexOf("\n");
+      if (lineEnd < 0) {
         return;
       }
-      const headerText = buffer.slice(0, headerEnd).toString("utf-8");
-      const lengthMatch = /content-length:\s*(\d+)/i.exec(headerText);
-      if (!lengthMatch) {
-        throw new Error("missing Content-Length in MCP response");
-      }
-      const bodyLength = Number.parseInt(lengthMatch[1], 10);
-      const bodyStart = headerEnd + 4;
-      if (buffer.length < bodyStart + bodyLength) {
-        return;
-      }
-      const body = buffer.slice(bodyStart, bodyStart + bodyLength).toString("utf-8");
-      buffer = buffer.slice(bodyStart + bodyLength);
-      onMessage(JSON.parse(body));
+      const body = buffer.subarray(0, lineEnd).toString("utf-8").trim();
+      buffer = buffer.subarray(lineEnd + 1);
+      if (body) onMessage(JSON.parse(body));
     }
   };
 }
@@ -1092,7 +1078,7 @@ async function collectRuntimeTools() {
         : state.pluginToolsMcpBridge || state.acpEnabled
           ? CAPABILITY_WIRED
           : CAPABILITY_DETECT_ONLY;
-      if (!server.supported) {
+      if (!server.supported || exposureStatus === CAPABILITY_DETECT_ONLY) {
         continue;
       }
       let mcpTools = [];

@@ -129,6 +129,26 @@ python run_cli.py import-skill-bundle --config data/config.json --input C:\path\
 - 环境变量会以 `OPENQQWAIFU_` 前缀覆盖配置
 - 可通过 `dump-config` 生成带默认值的模板
 
+显式指定的配置文件必须存在；首次启动先执行 `dump-config`。HTTP 模式须设置独立的
+`qq_sidecar.inbound_access_token`（或 `OPENQQWAIFU_QQ_SIDECAR_INBOUND_ACCESS_TOKEN`）并在
+NapCat HTTP 客户端填写相同 token。控制台的 Sidecar 页面也可配置，程序会同步管理的
+NapCat 回调配置。回调接受 `Authorization: Bearer <token>` 或 OneBot `X-Signature`
+HMAC-SHA1 签名；未配置令牌会拒绝 HTTP 事件。`qq_sidecar.access_token` 仅用于调用
+NapCat 动作接口；`reverse_ws` 模式关闭 HTTP 事件入口并使用单独的反向 WebSocket 令牌。
+
+`tool_policy.authorized_user_ids` 指定允许读取、列出、写入本地文件、执行命令和抓取网页（web-fetch）的 QQ 用户 ID，默认空列表；
+本地文件摘要也需要这项授权，并受允许读取目录约束。远程网页摘要和正常会话摘要不需要这项本地文件授权。
+也可用 `OPENQQWAIFU_TOOL_POLICY_AUTHORIZED_USER_IDS` 设置以逗号分隔的 ID。
+执行命令使用服务进程的宿主权限；只应添加你信任拥有这些权限的用户。
+
+`qq_sidecar.dry_run = true` 会捕获出站消息，不发送到 QQ；HTTP 和反向 WebSocket 模式均适用，
+反向 WebSocket 仍可接收入站事件。也可设置 `OPENQQWAIFU_QQ_SIDECAR_DRY_RUN=true`。
+
+开启 `multimodal_enabled` 后，OpenAI 兼容接口和 Claude 接口会收到消息中的图片 URL 或 base64 数据；
+所选模型也必须支持图片输入。当前 Dify 适配器不支持这条图片理解路径，会明确提示不可用。
+生图须同时启用 `image_generation.enabled` 并配置可用提供商；禁用或未配置时会报告失败。
+关闭 `search_enabled` 后，搜索执行和搜索缓存结果都不可用。
+
 关键配置块：
 
 - `llm`

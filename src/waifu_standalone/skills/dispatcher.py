@@ -23,6 +23,7 @@ import shlex
 import shutil
 import subprocess
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -110,6 +111,8 @@ class SkillDispatcher:
         return None
 
     def resolve_explicit_skill_request(self, text: str) -> tuple[SkillSpec, str] | None:
+        if not self._service.config.skills_enabled:
+            return None
         normalized = " ".join(str(text or "").split()).strip()
         if not normalized:
             return None
@@ -126,7 +129,8 @@ class SkillDispatcher:
                 continue
             skill_name = str(slash_match.group("skill") or "").strip()
             skill = self._service.skills.find_by_name_or_id(skill_name)
-            if skill is not None and skill.user_invocable:
+            if (skill is not None and skill.user_invocable and skill.enabled
+                    and skill.eligible and not skill.validation_errors):
                 raw_args = str(slash_match.group("args") or "").strip()
                 return skill, raw_args
         return None
@@ -1469,6 +1473,8 @@ class SkillDispatcher:
         )
 
     def use_read_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if reason := self._service.tools.denial_reason("read-file", invocation):
+            return ToolExecutionResult(error=reason, text=reason)
         raw_path = self._normalized_tool_text(invocation.argument("path") or invocation.raw_args)
         if not raw_path:
             return ToolExecutionResult(error="missing path", text="请提供文件路径。")
@@ -1494,6 +1500,8 @@ class SkillDispatcher:
         return await asyncio.to_thread(self.use_read_file_tool, invocation)
 
     def use_list_files_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if reason := self._service.tools.denial_reason("list-files", invocation):
+            return ToolExecutionResult(error=reason, text=reason)
         raw_path = self._normalized_tool_text(invocation.argument("path") or invocation.raw_args or ".")
         recursive = bool(invocation.argument("recursive", False))
         limit = self._bounded_int(invocation.argument("limit"), default=20, minimum=1, maximum=200)
@@ -1519,6 +1527,8 @@ class SkillDispatcher:
         return await asyncio.to_thread(self.use_list_files_tool, invocation)
 
     def use_write_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if reason := self._service.tools.denial_reason("write-file", invocation):
+            return ToolExecutionResult(error=reason, text=reason)
         raw_path = self._normalized_tool_text(invocation.argument("path") or "")
         content = str(invocation.argument("content", "") or "")
         if not raw_path:
@@ -1557,6 +1567,8 @@ class SkillDispatcher:
         return await asyncio.to_thread(self.use_write_file_tool, invocation)
 
     def use_exec_command_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        if reason := self._service.tools.denial_reason("exec-command", invocation):
+            return ToolExecutionResult(error=reason, text=reason)
         raw_command = invocation.argument("command")
         argv = invocation.argument("argv")
         if isinstance(argv, list):
@@ -2259,8 +2271,19 @@ class SkillDispatcher:
         invocation: ToolInvocation,
     ) -> tuple[dict[str, object], str]:
         is_url = re.match(r"^https?://", target, flags=re.IGNORECASE) is not None
-        if not is_url and not self._service.tool_orchestrator._is_tool_authorized(invocation.event):
-            return {}, "本地文件只对授权用户开放。"
+        if not is_url:
+            if not self._service.tool_orchestrator._is_tool_authorized(invocation.event):
+                return {}, "本地文件只对授权用户开放。"
+            # Validate local access before invoking either the optional CLI or fallback:
+            # the read-file policy applies and the path must sit inside the allowed roots.
+            read_invocation = replace(invocation, tool_id="read-file", skill=None)
+            reason = self._service.tools.denial_reason("read-file", read_invocation)
+            if reason:
+                return {}, reason
+            try:
+                target = str(self._resolve_tool_path(target, allow_missing=False, purpose="read"))
+            except ValueError as exc:
+                return {}, str(exc)
         payload, error = self._invoke_summarize_cli(target, invocation=invocation)
         if not error:
             return payload, ""
@@ -2346,7 +2369,10 @@ class SkillDispatcher:
                 "transcriptSource": "internal-fallback",
             }, ""
 
-        path = Path(target)
+        try:
+            path = self._resolve_tool_path(target, allow_missing=False, purpose="read")
+        except ValueError as exc:
+            return "", "", {}, str(exc)
         if not path.exists() or not path.is_file():
             return "", "", {}, f"文件不存在：{target}"
         try:

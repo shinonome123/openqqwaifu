@@ -53,7 +53,7 @@ export function mount(root) {
       nextInput.value = "";
       confirmInput.value = "";
       toastOk(t("user.passwordUpdated"));
-      await load();
+      window.location.reload();
     } catch (err) {
       toastError(err?.message || String(err));
     }

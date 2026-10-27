@@ -81,6 +81,7 @@ export const api = {
 
   getMemoryPanel: () => request("GET", "/api/panels/memory"),
   saveKnowledgeEntry: (payload) => request("POST", "/api/knowledge/save", payload),
+  purgeMemory: () => request("POST", "/api/memory/purge", {}),
   deleteKnowledgeEntry: (id) => request("DELETE", `/api/knowledge/${encodeURIComponent(id)}`),
   getAbilitiesPanel: () => request("GET", "/api/panels/abilities"),
   saveAbilitiesPanel: (payload) => request("POST", "/api/panels/abilities", payload),

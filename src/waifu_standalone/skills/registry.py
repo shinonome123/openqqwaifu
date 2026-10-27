@@ -458,6 +458,8 @@ class SkillRegistry:
         skill = parse_skill_markdown(raw, source=str(self._workspace_root / tentative_name))
         resolved_name = _normalize_workspace_filename(filename or f"{skill.skill_id}.md")
         resolved_path = self._workspace_root / resolved_name
+        if resolved_path.exists() and parse_skill_file(resolved_path).skill_id != skill.skill_id:
+            raise ValueError(f"skill filename already belongs to another skill: {resolved_name}")
         self._workspace_root.mkdir(parents=True, exist_ok=True)
         resolved_path.write_text(raw.rstrip() + "\n", encoding="utf-8")
         self._touch_reload()
@@ -487,6 +489,8 @@ class SkillRegistry:
         else:
             next_name = _normalize_workspace_filename(f"{parsed.skill_id}.md")
             next_path = self._workspace_root / next_name
+        if next_path != current_path and next_path.exists():
+            raise ValueError(f"skill filename already exists: {next_path.name}")
         self._workspace_root.mkdir(parents=True, exist_ok=True)
         next_path.parent.mkdir(parents=True, exist_ok=True)
         next_path.write_text(raw.rstrip() + "\n", encoding="utf-8")

@@ -5,6 +5,7 @@ import json
 import logging
 import socket
 import time
+import zlib
 from http import HTTPStatus
 from typing import Any
 from urllib.parse import unquote
@@ -20,6 +21,7 @@ from .http_api import (
     _SESSION_COOKIE_NAME,
     _STATIC_FILES,
     _WEB_DIR,
+    _build_session_cookie,
     _coerce_limit,
     _decode_request_body,
     _parse_cookie_header,
@@ -113,6 +115,7 @@ async def _read_json_body(
     request: web.Request,
     *,
     allow_empty: bool = False,
+    onebot_api: HttpApi | None = None,
 ) -> tuple[dict[str, Any] | None, web.Response | None]:
     try:
         raw = await _read_request_body(request)
@@ -124,6 +127,10 @@ async def _read_json_body(
     except ValueError:
         return None, _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})
 
+    if onebot_api is not None:
+        error = onebot_api.onebot_auth_error(request.headers, raw)
+        if error is not None:
+            return None, _json_response(*error)
     if allow_empty and not raw:
         return {}, None
 
@@ -135,7 +142,7 @@ async def _read_json_body(
             HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             {"status": "payload_too_large", "reason": str(exc)},
         )
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError, EOFError, zlib.error):
         preview = raw[:200].decode("utf-8", errors="replace")
         _LOGGER.warning("bad request body preview=%r", preview)
         return None, _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})
@@ -237,6 +244,7 @@ class _AioHttpDispatcher:
             "/api/users/directory/reset-persona": self._post_directory_member_reset_persona,
             "/api/users/directory/sync": self._post_directory_sync,
             "/api/knowledge/save": self._post_knowledge_save,
+            "/api/memory/purge": self._post_memory_purge,
             "/api/marketplace/import": self._post_marketplace_import,
             "/api/skill-packs/export": self._post_skill_pack_export,
             "/api/skill-packs/import": self._post_skill_pack_import,
@@ -256,7 +264,10 @@ class _AioHttpDispatcher:
 
     async def handle_delete(self, request: web.Request) -> web.Response:
         if request.path.startswith("/api/"):
-            _, response = await self._require_auth(request)
+            current_user, response = await self._require_auth(request)
+            if response is not None:
+                return response
+            response = self._authorize_api_request("DELETE", request.path, current_user)
             if response is not None:
                 return response
         response = await self._dispatch_dynamic_delete(request)
@@ -624,13 +635,26 @@ class _AioHttpDispatcher:
         )
 
     async def _post_onebot_events(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
-        payload, response = await _read_json_body(request)
+        error = self.api.onebot_auth_error(request.headers)
+        if error is not None:
+            return _json_response(*error)
+        payload, response = await _read_json_body(request, onebot_api=self.api)
         if response is not None:
             return response
         status, body = await self.api.handle_json_async(payload or {})
         if status < HTTPStatus.BAD_REQUEST:
             return _no_content_response(HTTPStatus.NO_CONTENT)
         return _json_response(status, body)
+
+    async def _post_memory_purge(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        _, response = await _read_json_body(request, allow_empty=True)
+        if response is not None:
+            return response
+        try:
+            result = await self._call_api_in_thread(self.api.purge_memory)
+        except ValueError as exc:
+            return _json_response(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
 
     async def _post_auth_bootstrap(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
@@ -671,7 +695,7 @@ class _AioHttpDispatcher:
             )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
-        return _json_response(HTTPStatus.OK, body)
+        return _json_response(HTTPStatus.OK, body, headers={"Set-Cookie": _build_session_cookie("", max_age=0)})
 
     async def _post_reload_skills(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         _, response = await _read_json_body(request, allow_empty=True)
@@ -699,10 +723,12 @@ class _AioHttpDispatcher:
         payload, response = await _read_json_body(request)
         if response is not None:
             return response
-        return _json_response(
-            HTTPStatus.OK,
-            await self._call_api_in_thread(self.api.save_character_panel, payload or {}),
-        )
+        try:
+            result = await self._call_api_in_thread(self.api.save_character_panel, payload or {})
+        except ValueError as exc:
+            status = HTTPStatus.CONFLICT if str(exc).startswith("runtime busy:") else HTTPStatus.BAD_REQUEST
+            return _json_response(status, {"status": "conflict" if status == HTTPStatus.CONFLICT else "bad_request", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
 
     async def _post_character_preview(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         payload, response = await _read_json_body(request)
@@ -1050,7 +1076,10 @@ def _build_application(api: HttpApi) -> web.Application:
         )
         return response
 
-    app = web.Application(client_max_size=_MAX_REQUEST_BYTES, middlewares=[_observability_middleware])
+    # Keep the wire bytes for OneBot HMAC verification and bounded decompression.
+    # _decode_request_body performs the sole gzip decode for both HTTP servers.
+    app = web.Application(client_max_size=_MAX_REQUEST_BYTES, middlewares=[_observability_middleware],
+                          handler_args={"auto_decompress": False})
     if reverse_ws_gateway is not None:
         app.router.add_get("/onebot/v11/ws", reverse_ws_gateway.handle)
     app.router.add_route("GET", "/", dispatcher.handle_get)
@@ -1090,6 +1119,7 @@ class AsyncCompatServer:
         self._stop_event: asyncio.Event | None = None
         self._resources_closed = False
         self._shutdown_requested = False
+        self._shutdown_failed = False
 
     def serve_forever(self) -> None:
         if self._resources_closed:
@@ -1135,6 +1165,22 @@ class AsyncCompatServer:
         await self._site.start()
 
     async def _cleanup(self) -> None:
+        begin_shutdown = getattr(self._api.service, "begin_shutdown", None)
+        if callable(begin_shutdown):
+            begin_shutdown()
+        if self._site is not None:
+            await self._site.stop()
+        gateway = getattr(self._api.service, "reverse_ws_gateway", None)
+        if gateway is not None:
+            await gateway.close()
+        wait_idle = getattr(self._api.service, "wait_idle", None)
+        if callable(wait_idle):
+            try:
+                await wait_idle(timeout=60.0)
+            except TimeoutError:
+                # Do not close the store beneath a worker that still owns it.
+                self._shutdown_failed = True
+                raise
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -1156,6 +1202,8 @@ class AsyncCompatServer:
             self._socket.close()
         except OSError:
             pass
+        if self._shutdown_failed:
+            return
         close = getattr(self._api.service, "close", None)
         if callable(close):
             close()

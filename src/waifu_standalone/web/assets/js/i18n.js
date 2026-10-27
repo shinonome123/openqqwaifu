@@ -295,6 +295,8 @@ const EN = {
   "sidecar.field.outboundUrl": "Outbound URL",
   "sidecar.field.outboundTimeout": "Outbound timeout (s)",
   "sidecar.field.accessToken": "Access token",
+  "sidecar.field.inboundToken": "HTTP callback token",
+  "sidecar.field.inboundToken.hint": "Use a separate secret for NapCat HTTP callbacks. Empty disables HTTP callbacks.",
   "sidecar.field.reverseWs": "Reverse WebSocket",
 
   "events.autorefresh": "Auto refresh",
@@ -640,6 +642,8 @@ const ZH = {
   "sidecar.field.outboundUrl": "出站地址",
   "sidecar.field.outboundTimeout": "出站超时（秒）",
   "sidecar.field.accessToken": "访问令牌",
+  "sidecar.field.inboundToken": "HTTP 回调令牌",
+  "sidecar.field.inboundToken.hint": "为 NapCat HTTP 回调设置独立密钥；留空会禁用 HTTP 回调。",
   "sidecar.field.reverseWs": "反向 WebSocket",
 
   "events.autorefresh": "自动刷新",

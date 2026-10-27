@@ -191,6 +191,16 @@ class WaifuServiceTests(unittest.TestCase):
         target_service.generator._dify_client = client  # type: ignore[assignment]
         return client
 
+    def _install_image_client(self) -> None:
+        class ImageClient:
+            enabled = True
+
+            async def agenerate(self, prompt):
+                return "https://images.example.test/generated.png"
+
+        self.service.config.image_generation.enabled = True
+        self.service.generator._image_client = ImageClient()
+
     @staticmethod
     def _write_group_cards(root: Path) -> None:
         cards_dir = root / "cards"
@@ -244,8 +254,9 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(member["preferred_name"], "luna")
 
     def test_image_request_uses_generator(self) -> None:
+        self._install_image_client()
         self._install_tool_client(
-            tool_name="image",
+            tool_name="image-command",
             arguments={"prompt": "catgirl under sunlight"},
             final_text="图片生成好了。",
         )
@@ -261,15 +272,16 @@ class WaifuServiceTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(result.images, ["generated://catgirl under sunlight"])
+        self.assertEqual(result.images, ["https://images.example.test/generated.png"])
         self.assertIn("图片生成好了", result.text)
         self.assertEqual(len(self.outbound.sent), 1)
-        self.assertEqual(self.outbound.sent[0].images, ["generated://catgirl under sunlight"])
+        self.assertEqual(self.outbound.sent[0].images, ["https://images.example.test/generated.png"])
         self.assertIn("图片生成好了", self.outbound.sent[0].text)
 
-    def test_async_image_request_acknowledges_before_background_delivery(self) -> None:
+    def test_async_image_request_delivers_only_after_generation(self) -> None:
+        self._install_image_client()
         self._install_tool_client(
-            tool_name="image",
+            tool_name="image-command",
             arguments={"prompt": "catgirl under sunlight"},
             final_text="图片生成好了。",
         )
@@ -281,9 +293,13 @@ class WaifuServiceTests(unittest.TestCase):
             segments=[MessageSegment(kind="text", text="draw: catgirl under sunlight")],
         )
 
+        generation_started = asyncio.Event()
+        release_generation = asyncio.Event()
+
         async def slow_generate(prompt: str) -> GeneratedImage:
-            await asyncio.sleep(0.05)
-            return GeneratedImage(prompt=prompt.strip(), image_ref="generated://catgirl under sunlight")
+            generation_started.set()
+            await release_generation.wait()
+            return GeneratedImage(prompt=prompt.strip(), image_ref="https://images.example.test/generated.png")
 
         async def caption(prompt: str, **kwargs: object) -> str:
             return "图片生成好了。"
@@ -293,11 +309,10 @@ class WaifuServiceTests(unittest.TestCase):
 
         async def run_flow() -> OutboundMessage | None:
             task = asyncio.create_task(self.service.handle_event_async(event))
-            deadline = time.monotonic() + 0.3
-            while len(self.outbound.sent) < 1 and time.monotonic() < deadline:
-                await asyncio.sleep(0.01)
-            self.assertGreaterEqual(len(self.outbound.sent), 1)
-            self.assertIn("图片生成好了", self.outbound.sent[0].text)
+            await asyncio.wait_for(generation_started.wait(), 3)
+            self.assertEqual(self.outbound.sent, [])
+            self.assertFalse(task.done())
+            release_generation.set()
             return await task
 
         result = asyncio.run(run_flow())
@@ -306,7 +321,7 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIn("图片生成好了", result.text)
         self.service.flush_background_tasks(timeout=1.0)
         self.assertEqual(len(self.outbound.sent), 1)
-        self.assertEqual(self.outbound.sent[0].images, ["generated://catgirl under sunlight"])
+        self.assertEqual(self.outbound.sent[0].images, ["https://images.example.test/generated.png"])
 
     def test_extract_image_prompt_accepts_fullwidth_colon(self) -> None:
         prompt = self.service.dispatcher.extract_image_prompt("生图：生成一个晴朗的天空")

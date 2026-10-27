@@ -54,14 +54,18 @@ class MemoryAdminService:
         clean_metadata = self._sanitize_session_metadata(session.metadata)
         if not session.history and not clean_metadata:
             return None
+        return self._session_detail(session)
+
+    def _session_detail(self, session: SessionMemory) -> dict[str, object]:
+        svc = self.service
         return {
-            "character_id": str(session.character_id or current_character).strip(),
+            "character_id": str(session.character_id or svc._active_character_id()).strip(),
             "launcher_id": session.launcher_id,
             "launcher_type": session.launcher_type,
             "preferred_name": svc.member_service.session_preferred_name(session),
             "assistant_alias": svc.member_service.session_assistant_alias(session),
             "history": list(session.history),
-            "metadata": clean_metadata,
+            "metadata": self._sanitize_session_metadata(session.metadata),
             "memory_graph": self._session_detail_graph(session),
         }
 
@@ -99,7 +103,29 @@ class MemoryAdminService:
         if isinstance(metadata_value, dict):
             session.metadata = self._sanitize_session_metadata(metadata_value)
         svc.session_repository.save(session)
-        return self.get_session_detail(launcher_type, launcher_id)
+        return self._session_detail(session)
+
+    def purge_memory(self) -> dict[str, object]:
+        svc = self.service
+        with svc.runtime_mutation():
+            character_id = svc._active_character_id()
+            sessions_cleared = 0
+            for session in svc.session_repository.list_sessions():
+                if str(session.character_id or character_id).strip() != character_id:
+                    continue
+                session.history = []
+                session.metadata = {}
+                session.preferred_name = ""
+                svc.session_repository.save(session)
+                sessions_cleared += 1
+            knowledge_deleted = 0
+            while entries := svc.knowledge_repository.list_knowledge(limit=200, character_id=character_id):
+                for entry in entries:
+                    if not svc.knowledge_repository.delete_knowledge(entry["id"], character_id=character_id):
+                        raise ValueError("Knowledge changed while clearing memory; retry the operation")
+                    knowledge_deleted += 1
+            return {"status": "ok", "character_id": character_id,
+                    "sessions_cleared": sessions_cleared, "knowledge_deleted": knowledge_deleted}
 
     def save_knowledge_entry(self, payload: dict[str, object]) -> dict[str, object]:
         return self.service.knowledge_repository.save_knowledge_for_active(payload)

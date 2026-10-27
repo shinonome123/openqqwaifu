@@ -150,6 +150,7 @@ class ServerIntegrationTests(unittest.TestCase):
             config.llm.model = "test-model"
             service, _ = build_runtime_service(config)
             service.generator._dify_client = _FakeChatClient()
+            service.config.qq_sidecar.inbound_access_token = "test-callback"
             api = HttpApi(service)
             server = run_server(api, "127.0.0.1", 0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -168,7 +169,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 request = urllib.request.Request(
                     f"http://{request_host}:{request_port}/onebot/events",
                     data=payload,
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer test-callback"},
                     method="POST",
                 )
 
@@ -201,6 +202,7 @@ class ServerIntegrationTests(unittest.TestCase):
             config.llm.model = "test-model"
             service, _ = build_runtime_service(config)
             service.generator._dify_client = _FakeChatClient()
+            service.config.qq_sidecar.inbound_access_token = "test-callback"
             api = HttpApi(service)
             server = run_server(api, "127.0.0.1", 0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -222,7 +224,7 @@ class ServerIntegrationTests(unittest.TestCase):
                     request = urllib.request.Request(
                         f"http://{request_host}:{request_port}/onebot/events",
                         data=payload,
-                        headers={"Content-Type": "application/json"},
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer test-callback"},
                         method="POST",
                     )
                     with urllib.request.urlopen(request, timeout=5) as response:
@@ -690,6 +692,7 @@ class ServerIntegrationTests(unittest.TestCase):
             service, _ = build_runtime_service(
                 AppConfig(data_root=tmpdir, qq_sidecar=QQSidecarConfig(outbound_base_url=""))
             )
+            service.config.qq_sidecar.inbound_access_token = "test-callback"
             api = HttpApi(service)
             server = run_server(api, "127.0.0.1", 0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -708,7 +711,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 request = urllib.request.Request(
                     f"http://{host}:{port}/onebot/events",
                     data=payload,
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer test-callback"},
                     method="POST",
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
@@ -726,6 +729,7 @@ class ServerIntegrationTests(unittest.TestCase):
             service, _ = build_runtime_service(
                 AppConfig(data_root=tmpdir, qq_sidecar=QQSidecarConfig(outbound_base_url=""))
             )
+            service.config.qq_sidecar.inbound_access_token = "test-callback"
             api = HttpApi(service)
             server = run_server(api, "127.0.0.1", 0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -744,6 +748,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 connection = http.client.HTTPConnection(host, port, timeout=5)
                 connection.putrequest("POST", "/onebot/events")
                 connection.putheader("Content-Type", "application/json")
+                connection.putheader("Authorization", "Bearer test-callback")
                 connection.putheader("Transfer-Encoding", "chunked")
                 connection.endheaders()
                 midpoint = len(payload) // 2
@@ -766,6 +771,7 @@ class ServerIntegrationTests(unittest.TestCase):
     def test_http_server_rejects_large_content_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, _ = build_runtime_service(AppConfig(data_root=tmpdir))
+            service.config.qq_sidecar.inbound_access_token = "test-callback"
             api = HttpApi(service)
             server = run_server(api, "127.0.0.1", 0)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -775,6 +781,7 @@ class ServerIntegrationTests(unittest.TestCase):
                 connection = http.client.HTTPConnection(host, port, timeout=5)
                 connection.putrequest("POST", "/onebot/events")
                 connection.putheader("Content-Type", "application/json")
+                connection.putheader("Authorization", "Bearer test-callback")
                 connection.putheader("Content-Length", str(10 * 1024 * 1024 + 1))
                 connection.endheaders()
                 response = connection.getresponse()

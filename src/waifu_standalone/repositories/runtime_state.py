@@ -875,13 +875,22 @@ class InMemoryRuntimeStateStore:
         if not summary:
             raise ValueError("summary is required")
         now = _now()
+        try:
+            entry_id = int(payload.get("id") or 0)
+        except (TypeError, ValueError):
+            entry_id = 0
         with self._lock:
-            raw_id = payload.get("id")
-            try:
-                entry_id = int(raw_id or 0)
-            except (TypeError, ValueError):
-                entry_id = 0
+            snapshot = dict(self._knowledge.get(entry_id, {})) if entry_id else {}
+        tags = _normalize_tags(payload.get("tags", snapshot.get("tags")))
+        embedding = self._resolve_embedding(
+            summary=summary, tags=tags, existing=snapshot.get("embedding"),
+            previous_summary=_normalize_string(snapshot.get("summary")),
+            previous_tags=_normalize_tags(snapshot.get("tags")),
+        )
+        with self._lock:
             existing = dict(self._knowledge.get(entry_id, {})) if entry_id else {}
+            if existing != snapshot:
+                raise ValueError("knowledge changed during embedding; retry the update")
             if entry_id <= 0:
                 entry_id = self._knowledge_id
                 self._knowledge_id += 1
@@ -901,13 +910,7 @@ class InMemoryRuntimeStateStore:
                 "created_at": int(existing.get("created_at") or now),
                 "updated_at": now,
             }
-            entry["embedding"] = self._resolve_embedding(
-                summary=summary,
-                tags=entry["tags"],
-                existing=existing.get("embedding"),
-                previous_summary=_normalize_string(existing.get("summary")),
-                previous_tags=_normalize_tags(existing.get("tags")),
-            )
+            entry["embedding"] = embedding
             self._knowledge[entry_id] = entry
             return dict(entry)
 
@@ -1901,9 +1904,11 @@ class SqliteRuntimeStateStore:
             entry_id = 0
         # The embedding is a network call: compute it before taking the writer
         # lock so a slow embedder never stalls every other write.
-        embedding_json = self._prepare_knowledge_embedding(payload, entry_id=entry_id, summary=summary)
+        embedding_json, snapshot = self._prepare_knowledge_embedding(payload, entry_id=entry_id, summary=summary)
         with self._lock, self._session() as connection:
             existing = self._fetch_knowledge(connection, entry_id) if entry_id > 0 else None
+            if existing != snapshot:
+                raise ValueError("knowledge changed during embedding; retry the update")
             tags = _normalize_tags(payload.get("tags", existing.get("tags") if existing else None))
             if existing is None:
                 cursor = connection.execute(
@@ -1958,13 +1963,16 @@ class SqliteRuntimeStateStore:
             result = self._fetch_knowledge(connection, entry_id)
         return result or {}
 
-    def _prepare_knowledge_embedding(self, payload: dict[str, Any], *, entry_id: int, summary: str) -> str:
+    def _prepare_knowledge_embedding(
+        self, payload: dict[str, Any], *, entry_id: int, summary: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Return the embedding and the row it was computed from, to compare under the lock."""
         existing = None
         if entry_id > 0:
             with self._read_session() as connection:
                 existing = self._fetch_knowledge(connection, entry_id)
         tags = _normalize_tags(payload.get("tags", existing.get("tags") if existing else None))
-        return _encode_embedding(
+        embedding_json = _encode_embedding(
             self._resolve_embedding(
                 summary=summary,
                 tags=tags,
@@ -1973,6 +1981,7 @@ class SqliteRuntimeStateStore:
                 previous_tags=_normalize_tags(existing.get("tags")) if existing else [],
             )
         )
+        return embedding_json, existing
 
     def delete_knowledge(self, entry_id: object, *, character_id: object = "") -> bool:
         try:

@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .registry import SkillRegistry, build_skill_markdown_template
+from .registry import (
+    SkillRegistry, build_skill_markdown_template, parse_skill_markdown,
+    parse_skill_file, _normalize_workspace_filename,
+)
 
 
 @dataclass(slots=True)
@@ -96,7 +99,7 @@ def export_skill_pack(
         entries.append(
             SkillPackEntry(
                 skill_id=skill.skill_id,
-                filename=Path(skill.source).name or f"{skill.skill_id}.md",
+                filename=_normalize_workspace_filename(f"{skill.skill_id}.md"),
                 markdown=markdown,
                 name=skill.name,
                 description=skill.description,
@@ -122,7 +125,20 @@ def import_skill_pack(
     pack = parse_skill_pack(payload)
     imported: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
+    planned: list[tuple[SkillPackEntry, str, bool]] = []
+    seen_ids: set[str] = set()
+    seen_paths: set[str] = set()
     for entry in pack.skills:
+        # Old packs may give every bundle the filename SKILL.md. Derive destinations
+        # from validated identities and validate the entire pack before writing.
+        filename = _normalize_workspace_filename(f"{entry.skill_id}.md")
+        parsed = parse_skill_markdown(entry.markdown, source=filename)
+        if parsed.skill_id != entry.skill_id:
+            raise ValueError(f"skill pack id does not match markdown: {entry.skill_id}")
+        if entry.skill_id.casefold() in seen_ids or filename.casefold() in seen_paths:
+            raise ValueError(f"duplicate skill pack destination: {entry.skill_id}")
+        seen_ids.add(entry.skill_id.casefold())
+        seen_paths.add(filename.casefold())
         existing = registry.get_skill(entry.skill_id)
         if existing is not None and not overwrite:
             skipped.append(
@@ -132,7 +148,21 @@ def import_skill_pack(
                 }
             )
             continue
-        skill = registry.install_workspace_skill(entry.markdown, filename=entry.filename)
+        update_existing = existing is not None and existing.source_kind == "workspace"
+        destination = registry.workspace_root / filename
+        if update_existing and Path(existing.source).parent != registry.workspace_root:
+            destination = Path(existing.source)
+        if destination.exists():
+            if parse_skill_file(destination).skill_id != entry.skill_id:
+                raise ValueError(f"skill pack destination belongs to another skill: {filename}")
+            if update_existing and destination != Path(existing.source):
+                raise ValueError(f"skill pack destination already exists: {filename}")
+        planned.append((entry, filename, update_existing))
+    for entry, filename, update_existing in planned:
+        skill = (registry.save_workspace_skill(entry.skill_id, entry.markdown) if update_existing
+                 else registry.install_workspace_skill(entry.markdown, filename=filename))
+        if skill is None:
+            raise ValueError(f"skill disappeared during import: {entry.skill_id}")
         imported.append(skill.as_dict())
     return {
         "format": pack.format_name,

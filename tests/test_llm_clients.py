@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import sys
 import unittest
 from pathlib import Path
@@ -17,9 +18,54 @@ from waifu_standalone.cells.llm_clients import (
     UnifiedLLMClient,
     build_llm_client_from_values,
 )
+from waifu_standalone.infra.llm_clients import LLMClientError, normalize_image_reference
 
 
 class LlmClientsTests(unittest.TestCase):
+    def test_multimodal_payload_preserves_urls_and_base64_for_supported_providers(self) -> None:
+        encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nlocal-test").decode()
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "describe both images"},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/photo.jpg"}},
+            {"type": "image_url", "image_url": {"url": "base64://" + encoded}},
+        ]}]
+        openai = OpenAILLMClient(base_url="https://example.invalid/v1", api_key="test", model="test", backend="openai")
+        claude = ClaudeLLMClient(base_url="https://example.invalid", api_key="test", model="test")
+        self.addCleanup(openai.close)
+        self.addCleanup(claude.close)
+        first = openai._tool_payload(messages, tools=[], user="test")
+        self.assertNotIn("tools", first)
+        self.assertNotIn("tool_choice", first)
+        self.assertEqual(first["messages"][0]["content"][1]["image_url"]["url"], "https://example.invalid/photo.jpg")
+        self.assertEqual(first["messages"][0]["content"][2]["image_url"]["url"], "data:image/png;base64," + encoded)
+        second = claude._tool_payload(messages, tools=[], user="test")
+        self.assertNotIn("tools", second)
+        blocks = second["messages"][0]["content"]
+        self.assertEqual(blocks[1], {"type": "image", "source": {"type": "url", "url": "https://example.invalid/photo.jpg"}})
+        self.assertEqual(blocks[2], {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encoded}})
+
+    def test_invalid_image_reference_is_not_silently_discarded(self) -> None:
+        for reference in ("file:///secret.png", "http://[", "https:///empty-host", "base64://not base64", "data:text/plain;base64,aGVsbG8="):
+            with self.subTest(reference=reference), self.assertRaises(LLMClientError):
+                normalize_image_reference(reference)
+
+    def test_final_synthesis_keeps_tool_history_without_exposing_tools(self) -> None:
+        messages = [
+            {"role": "user", "content": "look up a fact"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "call_1", "name": "search", "content": "FACT_MARKER"},
+        ]
+        clients = [OpenAILLMClient(base_url="https://example.invalid/v1", api_key="test", model="test", backend="openai"),
+                   ClaudeLLMClient(base_url="https://example.invalid", api_key="test", model="test")]
+        for client in clients:
+            self.addCleanup(client.close)
+            payload = client._tool_payload(messages, tools=[], user="test")
+            self.assertNotIn("tools", payload)
+            self.assertIn("FACT_MARKER", str(payload["messages"]))
+            self.assertIn("call_1", str(payload["messages"]))
+
     def test_build_llm_client_returns_strategy_for_backend(self) -> None:
         self.assertIsInstance(
             build_llm_client_from_values(

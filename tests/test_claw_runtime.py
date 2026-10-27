@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from waifu_standalone.app import build_default_service
-from waifu_standalone.config import AppConfig, ClawRuntimeConfig
+from waifu_standalone.config import AppConfig, ClawRuntimeConfig, ToolPolicyConfig
 from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
 from waifu_standalone.models import InboundEvent, MessageSegment
 
@@ -44,6 +44,7 @@ class ClawRuntimeTests(unittest.TestCase):
                 return self._next_response()
 
             async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
+                self.last_tool_message = messages[-1]
                 return self._next_response()
 
             def _next_response(self):
@@ -76,6 +77,7 @@ class ClawRuntimeTests(unittest.TestCase):
 
         service.config.llm.enabled = True
         service.generator._dify_client = _SingleToolClient()  # type: ignore[assignment]
+        return service.generator._dify_client
 
     @staticmethod
     def _write_mcp_echo_server(path: Path) -> None:
@@ -84,31 +86,19 @@ class ClawRuntimeTests(unittest.TestCase):
 const fs = require("node:fs");
 
 function send(payload) {
-  const body = Buffer.from(JSON.stringify(payload), "utf8");
-  process.stdout.write(`Content-Length: ${body.length}\r\n\r\n`);
-  process.stdout.write(body);
+  process.stdout.write(JSON.stringify(payload) + "\n");
 }
 
 let buffer = Buffer.alloc(0);
 process.stdin.on("data", (chunk) => {
   buffer = Buffer.concat([buffer, chunk]);
   while (true) {
-    const headerEnd = buffer.indexOf("\r\n\r\n");
-    if (headerEnd < 0) {
-      return;
-    }
-    const header = buffer.slice(0, headerEnd).toString("utf8");
-    const match = /content-length:\s*(\d+)/i.exec(header);
-    if (!match) {
-      throw new Error("missing content length");
-    }
-    const length = Number.parseInt(match[1], 10);
-    const bodyStart = headerEnd + 4;
-    if (buffer.length < bodyStart + length) {
-      return;
-    }
-    const message = JSON.parse(buffer.slice(bodyStart, bodyStart + length).toString("utf8"));
-    buffer = buffer.slice(bodyStart + length);
+    const lineEnd = buffer.indexOf("\n");
+    if (lineEnd < 0) return;
+    const line = buffer.subarray(0, lineEnd).toString("utf8");
+    buffer = buffer.subarray(lineEnd + 1);
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
     if (message.method === "initialize") {
       send({
         jsonrpc: "2.0",
@@ -225,7 +215,9 @@ Summarize carefully.
                 encoding="utf-8",
             )
             (bundle_root / ".mcp.json").write_text(
-                json.dumps({"servers": {"weather-server": {"command": "python", "args": ["-m", "weather"]}}}),
+                json.dumps({"servers": {"weather-server": {"command": sys.executable, "args": [
+                    "-c", f"from pathlib import Path; Path({str(Path(tmpdir) / 'mcp-started')!r}).write_text('started')"
+                ]}}}),
                 encoding="utf-8",
             )
             (bundle_root / "settings.json").write_text(
@@ -262,6 +254,9 @@ Summarize carefully.
                 self.assertEqual(statuses["claude_settings"], "wired")
                 self.assertEqual(statuses["lsp"], "wired")
                 self.assertEqual(statuses["claude_agents"], "detect_only")
+                runtime_tools = service.claw_runtime.list_tools()["items"]
+                self.assertTrue(any(item["kind"] == "mcp-server" and item["status"] == "detect_only" for item in runtime_tools))
+                self.assertFalse((Path(tmpdir) / "mcp-started").exists())
             finally:
                 service.close()
 
@@ -384,6 +379,7 @@ Use the runtime echo tool.
             service, _ = build_default_service(
                 AppConfig(
                     data_root=tmpdir,
+                    tool_policy=ToolPolicyConfig(authorized_user_ids=["runtime-echo"], exec_enabled=True),
                     claw_runtime=ClawRuntimeConfig(
                         enabled=True,
                         mode="managed",
@@ -395,9 +391,9 @@ Use the runtime echo tool.
             try:
                 result = service.import_skill_bundle(bundle_root)
                 self.assertEqual(result["claw_runtime"]["status"], "ok")
-                self._install_tool_client(
+                client = self._install_tool_client(
                     service,
-                    tool_name="echo-server__echo_text",
+                    tool_name="runtime-echo",
                     arguments={"input": "hello runtime"},
                     final_text="echo:hello runtime",
                 )
@@ -415,6 +411,8 @@ Use the runtime echo tool.
                 self.assertIsNotNone(reply)
                 assert reply is not None
                 self.assertIn("echo:hello runtime", reply.text)
+                self.assertIn("status: ok", str(client.last_tool_message))
+                self.assertIn("echo:hello runtime", str(client.last_tool_message))
             finally:
                 service.close()
 

@@ -155,6 +155,8 @@ class SearchDecider:
         return await self.asearch_query(query, reason="keyword-hit")
 
     def search_query(self, query: str, *, reason: str = "manual") -> SearchContext:
+        if not self.config.search_enabled:
+            return SearchContext(query=self._normalize_query(query), summary="联网搜索已禁用。", reason="disabled")
         query = self._normalize_query(query)
         if not query:
             return SearchContext()
@@ -165,6 +167,8 @@ class SearchDecider:
         return self._finalize_query(query, results, reason=reason)
 
     async def asearch_query(self, query: str, *, reason: str = "manual") -> SearchContext:
+        if not self.config.search_enabled:
+            return SearchContext(query=self._normalize_query(query), summary="联网搜索已禁用。", reason="disabled")
         search_state = getattr(self, "__dict__", {})
         if "search_query" in search_state and "asearch_query" not in search_state:
             return await asyncio.to_thread(self.search_query, query, reason=reason)

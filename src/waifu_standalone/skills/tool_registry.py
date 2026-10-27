@@ -135,6 +135,28 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolSpec] = {}
         self._aliases: dict[str, str] = {}
+        self.execution_policy: Callable[[ToolSpec, ToolInvocation], str] | None = None
+
+    def denial_reason(self, tool_id: str, invocation: ToolInvocation) -> str:
+        """Check runtime permission independently of model/manifest declarations."""
+        spec = self.get(tool_id)
+        if spec is None:
+            return f"tool is not registered: {tool_id}"
+        if self.execution_policy is not None:
+            return self.execution_policy(spec, invocation)
+        if (spec.tool_id in {"read-file", "list-files", "write-file", "exec-command"} or spec.risk_level == "command"
+                or (invocation.skill is not None and invocation.skill.policy.requires_authorization)):
+            return f"permission denied: {spec.tool_id} requires an authorized caller policy"
+        return ""
+
+    def _exposure_denied(self, spec: ToolSpec, context: ToolExposureContext | None,
+                         skill: SkillSpec | None = None) -> bool:
+        if context is None:
+            return bool(self.execution_policy or spec.tool_id in {"read-file", "list-files", "write-file", "exec-command"}
+                        or spec.risk_level == "command")
+        return bool(self.denial_reason(spec.tool_id, ToolInvocation(
+            tool_id=spec.tool_id, raw_args="", event=context.event, session=context.session, skill=skill,
+        )))
 
     def register(
         self,
@@ -231,12 +253,16 @@ class ToolRegistry:
         spec = self.get(tool_id)
         if spec is None:
             return None
+        if reason := self.denial_reason(tool_id, invocation):
+            raise PermissionError(reason)
         return spec.handler(invocation)
 
     async def aexecute(self, tool_id: str, invocation: ToolInvocation) -> OutboundMessage | None:
         spec = self.get(tool_id)
         if spec is None:
             return None
+        if reason := self.denial_reason(tool_id, invocation):
+            raise PermissionError(reason)
         if spec.async_handler is not None:
             return await spec.async_handler(invocation)
         return await asyncio.to_thread(spec.handler, invocation)
@@ -270,6 +296,8 @@ class ToolRegistry:
         spec = self.get(tool_id)
         if spec is None:
             return ToolExecutionResult(error=f"tool is not registered: {tool_id}")
+        if reason := self.denial_reason(tool_id, invocation):
+            return ToolExecutionResult(error=reason, text=reason)
         if not spec.model_callable or spec.model_handler is None:
             return ToolExecutionResult(error=f"tool is not available for model invocation: {spec.tool_id}")
         return spec.model_handler(invocation)
@@ -286,6 +314,8 @@ class ToolRegistry:
         spec = self.get(tool_id)
         if spec is None:
             return ToolExecutionResult(error=f"tool is not registered: {tool_id}")
+        if reason := self.denial_reason(tool_id, invocation):
+            return ToolExecutionResult(error=reason, text=reason)
         if not spec.model_callable:
             return ToolExecutionResult(error=f"tool is not available for model invocation: {spec.tool_id}")
         if spec.async_model_handler is not None:
@@ -306,6 +336,8 @@ class ToolRegistry:
                 tool = self.get(skill.handler_target)
                 if tool is None or not tool.model_callable:
                     continue
+                if self._exposure_denied(tool, context, skill):
+                    continue
                 if tool.exposure_policy is not None and not tool.exposure_policy(context):
                     continue
                 skill_bound_tool_ids.add(tool.tool_id)
@@ -319,6 +351,8 @@ class ToolRegistry:
                 )
         for tool in sorted(self._tools.values(), key=lambda item: item.name.lower()):
             if not tool.model_callable:
+                continue
+            if self._exposure_denied(tool, context):
                 continue
             if context is not None and tool.tool_id in context.skill_cards_by_tool:
                 continue

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
+import hmac
 import io
 import json
 import logging
 import re
 import time
+import zlib
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -80,6 +83,7 @@ def parse_onebot_event(payload: dict[str, Any]) -> InboundEvent:
         segments=segments,
         message_id=str(payload.get("message_id") or ""),
         raw_message=raw_message,
+        occurred_at=payload.get("time") if isinstance(payload.get("time"), (int, float)) else None,
     )
 
 
@@ -147,9 +151,13 @@ class HttpApi:
     auth: AuthManager | None = None
     metrics: MetricsRegistry | None = None
     # Shared by the HTTP callback and reverse-WS paths, which both end in handle_json[_async].
-    dedup: InboundDeduplicator = field(default_factory=InboundDeduplicator)
+    # Defaults to the service's deduplicator, which the emitter marks once a reply is sent.
+    dedup: InboundDeduplicator | None = None
 
     def __post_init__(self) -> None:
+        if self.dedup is None:
+            shared = getattr(self.service, "inbound_dedup", None)
+            self.dedup = shared if isinstance(shared, InboundDeduplicator) else InboundDeduplicator()
         if self.auth is None:
             data_root = getattr(getattr(self.service, "config", None), "data_root", "data")
             self.auth = AuthManager(data_root)
@@ -451,6 +459,31 @@ class HttpApi:
     def get_memory_panel(self) -> dict[str, Any]:
         return dict(self.service.get_memory_panel())
 
+    def purge_memory(self) -> dict[str, Any]:
+        return dict(self.service.memory_admin_service.purge_memory())
+
+    def onebot_auth_error(self, headers: Any, raw: bytes | None = None) -> tuple[int, dict[str, Any]] | None:
+        sidecar = self.service.config.qq_sidecar
+        if str(sidecar.gateway_mode).lower() != "http":
+            return HTTPStatus.NOT_FOUND, {"status": "not_found"}
+        token = str(sidecar.inbound_access_token or "")
+        if not token:
+            return HTTPStatus.SERVICE_UNAVAILABLE, {
+                "status": "callback_disabled",
+                "reason": "Configure qq_sidecar.inbound_access_token and the matching NapCat HTTP client token",
+            }
+        authorization = str(headers.get("Authorization", ""))
+        if hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
+            return None
+        signature = str(headers.get("X-Signature", ""))
+        if signature and raw is None:
+            return None  # Validate the signature after reading the bounded wire body.
+        if signature and raw is not None:
+            expected = "sha1=" + hmac.new(token.encode(), raw, hashlib.sha1).hexdigest()
+            if hmac.compare_digest(signature.encode(), expected.encode()):
+                return None
+        return HTTPStatus.UNAUTHORIZED, {"status": "unauthorized", "reason": "invalid OneBot callback token"}
+
     def save_memory_session(self, launcher_type: str, launcher_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         detail = self.service.save_memory_session(launcher_type, launcher_id, payload)
         return dict(detail) if detail else None
@@ -693,6 +726,7 @@ def make_handler(api: HttpApi):
                 "/api/users/directory/reset-persona": self._post_directory_member_reset_persona,
                 "/api/users/directory/sync": self._post_directory_sync,
                 "/api/knowledge/save": self._post_knowledge_save,
+                "/api/memory/purge": self._post_memory_purge,
                 "/api/marketplace/import": self._post_marketplace_import,
                 "/api/skill-packs/export": self._post_skill_pack_export,
                 "/api/skill-packs/import": self._post_skill_pack_import,
@@ -1106,7 +1140,12 @@ def make_handler(api: HttpApi):
             self._write_json(HTTPStatus.OK, {"sessions": api.list_sessions(limit=limit)})
 
         def _post_onebot_events(self, parsed) -> None:
-            payload = self._read_json_body()
+            error = api.onebot_auth_error(self.headers)
+            if error is not None:
+                self.close_connection = True
+                self._write_json(*error)
+                return
+            payload = self._read_json_body(onebot=True)
             if payload is None:
                 return
             status, body = api.handle_json(payload)
@@ -1115,6 +1154,16 @@ def make_handler(api: HttpApi):
                 self.end_headers()
                 return
             self._write_json(status, body)
+
+        def _post_memory_purge(self, parsed) -> None:
+            if self._read_json_body(allow_empty=True) is None:
+                return
+            try:
+                result = api.purge_memory()
+            except ValueError as exc:
+                self._write_json(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
 
         def _post_auth_bootstrap(self, parsed) -> None:
             payload = self._read_json_body()
@@ -1153,7 +1202,7 @@ def make_handler(api: HttpApi):
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                 return
-            self._write_json(HTTPStatus.OK, body)
+            self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": _build_session_cookie("", max_age=0)})
 
         def _post_reload_skills(self, parsed) -> None:
             self._read_json_body(allow_empty=True)
@@ -1178,7 +1227,13 @@ def make_handler(api: HttpApi):
             payload = self._read_json_body()
             if payload is None:
                 return
-            self._write_json(HTTPStatus.OK, api.save_character_panel(payload))
+            try:
+                result = api.save_character_panel(payload)
+            except ValueError as exc:
+                status = HTTPStatus.CONFLICT if str(exc).startswith("runtime busy:") else HTTPStatus.BAD_REQUEST
+                self._write_json(status, {"status": "conflict" if status == HTTPStatus.CONFLICT else "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
 
         def _post_character_preview(self, parsed) -> None:
             payload = self._read_json_body()
@@ -1482,7 +1537,7 @@ def make_handler(api: HttpApi):
             )
             return False
 
-        def _read_json_body(self, *, allow_empty: bool = False) -> dict[str, Any] | None:
+        def _read_json_body(self, *, allow_empty: bool = False, onebot: bool = False) -> dict[str, Any] | None:
             try:
                 raw = _read_request_body(self)
             except RequestTooLarge as exc:
@@ -1492,6 +1547,11 @@ def make_handler(api: HttpApi):
             except ValueError:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})
                 return None
+            if onebot:
+                error = api.onebot_auth_error(self.headers, raw)
+                if error is not None:
+                    self._write_json(*error)
+                    return None
             if allow_empty and not raw:
                 return {}
             try:
@@ -1500,7 +1560,7 @@ def make_handler(api: HttpApi):
             except RequestTooLarge as exc:
                 self._write_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"status": "payload_too_large", "reason": str(exc)})
                 return None
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, OSError, EOFError, zlib.error):
                 preview = raw[:200].decode("utf-8", errors="replace")
                 _LOGGER.warning("bad request body preview=%r", preview)
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})

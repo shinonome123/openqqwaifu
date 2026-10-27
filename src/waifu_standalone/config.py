@@ -16,6 +16,7 @@ class QQSidecarConfig:
     adapter_name: str = "napcat"
     inbound_host: str = "127.0.0.1"
     inbound_port: int = 8080
+    inbound_access_token: str = ""
     outbound_base_url: str = "http://127.0.0.1:3000"
     outbound_timeout_seconds: float = 10.0
     access_token: str = ""

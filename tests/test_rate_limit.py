@@ -83,11 +83,25 @@ def _invocation(tool_id: str, event: InboundEvent, **arguments: object) -> ToolI
     )
 
 
+class _FakeImageClient:
+    """Image generation is off by default and then refuses, so the tests plug in a provider."""
+
+    enabled = True
+
+    def generate(self, prompt: str) -> str:
+        return f"generated://{prompt}"
+
+    async def agenerate(self, prompt: str) -> str:
+        return f"generated://{prompt}"
+
+
 class DispatcherRateLimitTests(unittest.TestCase):
     def _service(self, tmpdir: str, **limits: object):  # type: ignore[no-untyped-def]
         service, outbound = build_default_service(
             AppConfig(data_root=tmpdir, rate_limits=RateLimitConfig(**limits))
         )
+        service.config.image_generation.enabled = True
+        service.generator._image_client = _FakeImageClient()
         return service, outbound
 
     def test_image_prefix_is_limited_per_user(self) -> None:

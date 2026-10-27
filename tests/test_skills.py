@@ -5,7 +5,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -442,6 +443,11 @@ Use summarize for URLs.
 
     def test_image_request_keeps_skill_match(self) -> None:
         service, _ = build_default_service()
+        image_ref = "https://images.example.test/warm-spring-sky.png"
+        service.config.image_generation.enabled = True
+        service.generator._image_client = SimpleNamespace(
+            enabled=True, agenerate=AsyncMock(return_value=image_ref),
+        )
         client = self._install_tool_client(
             service,
             tool_name="image-command",
@@ -465,7 +471,8 @@ Use summarize for URLs.
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(result.images, ["generated://warm spring sky"])
+        self.assertEqual(result.images, [image_ref])
+        service.generator._image_client.agenerate.assert_awaited_once_with("warm spring sky")
         # The image prefix runs the image skill directly, without a model tool call.
         self.assertEqual(client.calls, 0)
         self.assertTrue(names)
@@ -1176,6 +1183,11 @@ Use summarize for URLs.
     def test_chinese_image_prefix_generates_without_model_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            image_ref = "https://images.example.test/cat.png"
+            service.config.image_generation.enabled = True
+            service.generator._image_client = SimpleNamespace(
+                enabled=True, agenerate=AsyncMock(return_value=image_ref),
+            )
             client = self._install_tool_client(service, tool_name="search-command", arguments={"query": "x"})
 
             result = service.handle_event(
@@ -1189,7 +1201,8 @@ Use summarize for URLs.
             )
 
             assert result is not None
-            self.assertEqual(result.images, ["generated://一只橘猫在窗台上"])
+            self.assertEqual(result.images, [image_ref])
+            service.generator._image_client.agenerate.assert_awaited_once_with("一只橘猫在窗台上")
             self.assertEqual(client.calls, 0)
 
     def test_image_prefix_needs_a_word_boundary_for_ascii_aliases(self) -> None:
@@ -1226,6 +1239,54 @@ Use summarize for URLs.
             # High-risk tools stay behind the authorization gate.
             self.assertNotIn("read-file-command", names)
             self.assertNotIn("exec-command", names)
+
+    def test_slash_summarize_reads_local_file_for_authorized_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir) / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            document = Path(tmpdir) / "notes.txt"
+            document.write_text(
+                "OpenQQWaifu can now summarize local files without requiring the external summarize CLI.",
+                encoding="utf-8",
+            )
+            (skills_dir / "skill.md").write_text(
+                build_skill_markdown_template(
+                    skill_id="slash-summarize", name="summarize", description="Summarize content.",
+                    command_tool="summarize", body="Summarize the supplied target.",
+                ),
+                encoding="utf-8",
+            )
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            service.config.tool_policy.authorized_user_ids = ["783190298"]
+            self._install_tool_client(
+                service,
+                tool_name="summarize-command",
+                arguments={"target": str(document)},
+                final_text="按 summarize 技能真的跑：without requiring the external summarize CLI.",
+            )
+            service.dispatcher._invoke_summarize_cli = lambda target, invocation: ({}, "当前运行时还没安装 summarize CLI。")  # type: ignore[method-assign]
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[
+                        MessageSegment(
+                            kind="text",
+                            text=f"/skill summarize {document}",
+                        )
+                    ],
+                )
+            )
+
+            self.assertIsNotNone(reply)
+            self.assertIn("without requiring the external summarize CLI", reply.text)
+            execution = service.state_store.skill_telemetry_summary("slash-summarize")["last"]
+            self.assertEqual(execution["tool_id"], "summarize")
+            self.assertEqual(execution["status"], "ok")
+            self.assertEqual(execution["trigger_source"], "command")
 
     def test_explicit_weather_skill_dispatches_real_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1552,79 +1613,6 @@ Read files with the read alias.
                     assistant_message={"role": "assistant", "content": "北京今天晴，最高气温 26 度。"},
                 )
 
-        service, _ = build_default_service()
-        service.config.llm.enabled = True
-        service.generator._dify_client = _FakeToolClient()  # type: ignore[assignment]
-        service.search._fetcher = lambda query: [
-            SearchResult(title="北京天气", snippet="北京今天晴，最高气温 26 度", url="https://example.com/weather")
-        ]
-
-        reply = service.handle_event(
-            InboundEvent(
-                launcher_id="783190298",
-                launcher_type="person",
-                sender_id="783190298",
-                sender_name="tester",
-                segments=[MessageSegment(kind="text", text="北京天气怎么样")],
-            )
-        )
-
-        self.assertIsNotNone(reply)
-        assert reply is not None
-        self.assertIn("北京今天晴", reply.text)
-        self.assertIn("search-command", service.generator._dify_client.seen_tools)  # type: ignore[attr-defined]
-        self.assertEqual(service.generator._dify_client.last_tool_message["role"], "tool")  # type: ignore[attr-defined]
-
-    def test_generator_tool_loop_executes_registered_search_tool(self) -> None:
-        class _FakeToolClient:
-            enabled = True
-            supports_tool_calling = True
-            base_url = "https://example.com/v1"
-            api_key = "secret"
-            model = "tool-model"
-            backend = "openai"
-            timeout_seconds = 45.0
-            app_type = "chat"
-
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def invoke(self, query: str, *, user: str = "waifu-standalone") -> str:
-                return "先查天气再回答"
-
-            async def ainvoke(self, query: str, *, user: str = "waifu-standalone") -> str:
-                return "先查天气再回答"
-
-            def invoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
-                raise AssertionError("sync tool loop should not run in async event path")
-
-            async def ainvoke_with_tools(self, messages, *, tools, user: str = "waifu-standalone"):
-                self.calls += 1
-                if self.calls == 1:
-                    self.seen_tools = {item["name"] for item in tools}
-                    return LLMToolResponse(
-                        tool_calls=[LLMToolCall(call_id="call_1", tool_name="search-command", arguments={"query": "北京天气"})],
-                        assistant_message={
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": "call_1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "search-command",
-                                        "arguments": '{"query":"北京天气"}',
-                                    },
-                                }
-                            ],
-                        },
-                    )
-                self.last_tool_message = messages[-1]
-                return LLMToolResponse(
-                    text="北京今天晴，最高气温 26 度。",
-                    assistant_message={"role": "assistant", "content": "北京今天晴，最高气温 26 度。"},
-                )
-
         service, _ = build_default_service(AppConfig(data_root=tempfile.mkdtemp()))
         service.config.llm.enabled = True
         service.generator._dify_client = _FakeToolClient()  # type: ignore[assignment]
@@ -1720,7 +1708,7 @@ input_schema: {"type":"object","properties":{"path":{"type":"string"},"content":
 output_schema: {"type":"object","properties":{}}
 trigger: {"command":"json-write","llm_tool":true,"keywords":["jsonwrite"]}
 handler: {"type":"tool_id","target":"write-file","arg_mode":"json"}
-policy: {"priority":9,"user_invocable":true,"risk_level":"filesystem","timeout_seconds":30,"max_output_chars":6000}
+policy: {"priority":9,"user_invocable":true,"risk_level":"filesystem","timeout_seconds":30,"max_output_chars":6000,"requires_authorization":true}
 default_args: {}
 ---
 Write a file using structured arguments.
@@ -1731,10 +1719,10 @@ Write a file using structured arguments.
                 AppConfig(
                     data_root=str(data_root),
                     tool_policy=ToolPolicyConfig(
+                        authorized_user_ids=["783190298"],
                         allowed_roots=["data"],
                         write_allowed_roots=["data"],
                         write_enabled=True,
-                        authorized_user_ids=["783190298"],
                     ),
                 )
             )
@@ -1770,7 +1758,9 @@ Write a file using structured arguments.
             service, _ = build_default_service(
                 AppConfig(
                     data_root=tmpdir,
-                    tool_policy=ToolPolicyConfig(exec_allowlist=["python"], exec_enabled=True),
+                    tool_policy=ToolPolicyConfig(
+                        exec_allowlist=["python"], exec_enabled=True, authorized_user_ids=["783190298"],
+                    ),
                 )
             )
 
@@ -1784,7 +1774,7 @@ Write a file using structured arguments.
                         segments=[MessageSegment(kind="text", text="run blockedcmd")],
                     ),
                     SessionMemory(launcher_id="783190298", launcher_type="person", history=[]),
-                    skill=service.skills.get_skill("search-command"),
+                    skill=service.skills.get_skill("exec-command"),
                     raw_args="blockedcmd --help",
                     address="tester",
                     assistant_name="Assistant",

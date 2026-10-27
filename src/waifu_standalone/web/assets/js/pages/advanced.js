@@ -267,19 +267,7 @@ export function mount(root) {
     });
     if (!ok) return;
     try {
-      const memoryPanel = await api.getMemoryPanel();
-      const sessions = memoryPanel?.sessions || [];
-      const knowledgeEntries = (memoryPanel?.knowledge_entries || []).filter((entry) => !!entry?.id);
-      await Promise.all([
-        ...sessions.map((session) =>
-          api.saveSession(session.launcher_type, session.launcher_id, {
-            history: [],
-            preferred_name: session.preferred_name || "",
-            metadata: session.metadata || {},
-          }),
-        ),
-        ...knowledgeEntries.map((entry) => api.deleteKnowledgeEntry(entry.id)),
-      ]);
+      await api.purgeMemory();
       toastOk(t("memory.detail.cleared"));
       await load();
     } catch (err) {

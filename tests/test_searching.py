@@ -155,7 +155,7 @@ class SearchDeciderTests(unittest.TestCase):
             ]
             self._install_tool_client(
                 service,
-                tool_name="search",
+                tool_name="search-command",
                 arguments={"query": "今天北京天气怎么样"},
                 final_text="我刚查了一下，北京天气：今天晴，最高温 26 度。",
             )
@@ -166,7 +166,7 @@ class SearchDeciderTests(unittest.TestCase):
                     launcher_type="person",
                     sender_id="783190298",
                     sender_name="tester",
-                    segments=[MessageSegment(kind="text", text="今天北京天气怎么样")],
+                    segments=[MessageSegment(kind="text", text="搜索今天北京天气怎么样")],
                 )
             )
 
