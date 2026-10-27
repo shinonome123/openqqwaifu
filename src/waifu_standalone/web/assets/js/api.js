@@ -49,6 +49,18 @@ export const api = {
   dashboard: () => request("GET", "/api/dashboard"),
   console: () => request("GET", "/api/console"),
   runtime: () => request("GET", "/api/runtime"),
+  runtimeConversations: (afterId = "") => request("GET", `/api/v2/runtime/conversations?after_id=${encodeURIComponent(afterId)}`),
+  runtimeConversation: (conversationId, beforeSeq = "") => request("GET",
+    `/api/v2/runtime/conversation?conversation_id=${encodeURIComponent(conversationId)}&before_seq=${encodeURIComponent(beforeSeq)}`),
+  runtimeDelivery: (outboxId) => request("GET", `/api/v2/runtime/delivery?outbox_id=${encodeURIComponent(outboxId)}`),
+  runtimeCommand: (payload) => request("POST", "/api/v2/runtime/commands", payload),
+  runtimePrivacy: conversationId => request("GET", `/api/v2/runtime/privacy?conversation_id=${encodeURIComponent(conversationId)}`),
+  runtimeContactPolicy: conversationId => request("GET", `/api/v2/runtime/contact-policy?conversation_id=${encodeURIComponent(conversationId)}`),
+  runtimeFollowups: (conversationId, options = {}) => request("GET", `/api/v2/runtime/followups?${new URLSearchParams({conversation_id: conversationId, ...options})}`),
+  runtimeReminders: (conversationId, options = {}) => request("GET",
+    `/api/v2/runtime/reminders?${new URLSearchParams({conversation_id: conversationId, ...options})}`),
+  runtimeMemories: (conversationId, characterId, options = {}) => request("GET",
+    `/api/v2/runtime/memories?${new URLSearchParams({conversation_id: conversationId, character_id: characterId, ...options})}`),
   getObservabilityPanel: (logLimit = 120, rowLimit = 60) =>
     request(
       "GET",

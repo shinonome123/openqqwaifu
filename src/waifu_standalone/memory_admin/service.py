@@ -107,6 +107,8 @@ class MemoryAdminService:
 
     def purge_memory(self) -> dict[str, object]:
         svc = self.service
+        if svc.private_runtime is not None:
+            raise ValueError("新版试运行数据独立保存；当前清空入口仅支持旧版，不能用它清除新版会话")
         with svc.runtime_mutation():
             character_id = svc._active_character_id()
             sessions_cleared = 0

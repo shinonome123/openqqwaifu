@@ -174,6 +174,24 @@ class ClawRuntimeConfig:
 
 
 @dataclass(slots=True)
+class RuntimeV2Config:
+    enabled: bool = False
+    private_user_ids: list[str] = field(default_factory=list)
+    workers: int = 4
+    max_pending_events: int = 1000
+    context_window_tokens: int = 16384
+    max_output_tokens: int = 1024
+    image_token_reserve: int = 2048
+    max_context_images: int = 4
+    openai_instruction_role: str = "system"
+    openai_output_token_parameter: str = "max_completion_tokens"
+    structured_memory_enabled: bool = False
+    reminders_enabled: bool = False
+    reminder_timezone: str = ""
+    reminder_grace_seconds: int = 300
+
+
+@dataclass(slots=True)
 class AppConfig:
     service_name: str = "waifu-standalone"
     config_path: str = ""
@@ -234,3 +252,4 @@ class AppConfig:
     claw_runtime: ClawRuntimeConfig = field(default_factory=ClawRuntimeConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     qq_sidecar: QQSidecarConfig = field(default_factory=QQSidecarConfig)
+    runtime_v2: RuntimeV2Config = field(default_factory=RuntimeV2Config)

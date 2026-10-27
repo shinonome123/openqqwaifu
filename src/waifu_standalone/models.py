@@ -27,6 +27,7 @@ class InboundEvent:
     segments: list[MessageSegment]
     message_id: str = ""
     raw_message: str = ""
+    source_account_id: str = ""
     occurred_at: float | None = None
 
     @property

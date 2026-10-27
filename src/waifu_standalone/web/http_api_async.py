@@ -179,6 +179,15 @@ class _AioHttpDispatcher:
             "/api/portraits": self._get_portrait,
             "/api/console": self._get_console,
             "/api/runtime": self._get_runtime,
+            "/api/v2/runtime": self._get_runtime_v2,
+            "/api/v2/runtime/delivery": self._get_runtime_v2_delivery,
+            "/api/v2/runtime/conversations": self._get_runtime_v2_conversations,
+            "/api/v2/runtime/conversation": self._get_runtime_v2_conversation,
+            "/api/v2/runtime/memories": self._get_runtime_v2_memories,
+            "/api/v2/runtime/reminders": self._get_runtime_v2_reminders,
+            "/api/v2/runtime/privacy": self._get_runtime_v2_privacy,
+            "/api/v2/runtime/contact-policy": self._get_runtime_v2_contact_policy,
+            "/api/v2/runtime/followups": self._get_runtime_v2_followups,
             "/api/panels/observability": self._get_observability_panel,
             "/api/events/recent": self._get_recent_events,
             "/api/events/behavior": self._get_behavior_events,
@@ -227,6 +236,7 @@ class _AioHttpDispatcher:
 
         routes = {
             "/api/auth/change-password": self._post_change_password,
+            "/api/v2/runtime/commands": self._post_runtime_v2_command,
             "/api/skills/reload": self._post_reload_skills,
             "/api/providers/test": self._post_test_provider,
             "/api/sidecar/test": self._post_test_sidecar,
@@ -480,6 +490,96 @@ class _AioHttpDispatcher:
 
     async def _get_runtime(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.runtime_stats))
+
+    async def _get_runtime_v2(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        return _json_response(HTTPStatus.OK, await self._call_api_in_thread(self.api.runtime_v2_status))
+
+    async def _get_runtime_v2_delivery(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_delivery, request.query.get("outbox_id", ""))
+        except ValueError as exc:
+            return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _post_runtime_v2_command(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        payload, response = await _read_json_body(request)
+        if response is not None:
+            return response
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_command, payload or {},
+                                                  actor=str((current_user or {}).get("username", "")))
+        except (ValueError, RuntimeError) as exc:
+            return _json_response(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _get_runtime_v2_conversations(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_conversations,
+                limit=request.query.get("limit", "30"), after_id=request.query.get("after_id", ""))
+        except ValueError as exc:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _get_runtime_v2_conversation(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_conversation,
+                request.query.get("conversation_id", ""), limit=request.query.get("limit", "30"),
+                before_seq=request.query.get("before_seq"))
+        except LookupError as exc:
+            return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+        except ValueError as exc:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _get_runtime_v2_memories(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_memories,
+                request.query.get("conversation_id", ""), request.query.get("character_id", ""),
+                memory_id=request.query.get("memory_id", ""), limit=request.query.get("limit", "30"),
+                before_id=request.query.get("before_id"))
+        except LookupError as exc:
+            return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+        except ValueError as exc:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _get_runtime_v2_privacy(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_privacy, request.query.get("conversation_id", ""))
+        except LookupError as exc:
+            return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+        except (ValueError, RuntimeError) as exc:
+            return _json_response(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _get_runtime_v2_reminders(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_reminders, request.query.get("conversation_id", ""),
+                task_id=request.query.get("task_id", ""), limit=request.query.get("limit", "30"), before_id=request.query.get("before_id"))
+        except LookupError as exc:
+            return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+        except ValueError as exc:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _get_runtime_v2_followups(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_followups, request.query.get("conversation_id", ""),
+                candidate_id=request.query.get("candidate_id", ""), limit=request.query.get("limit", "30"), before_id=request.query.get("before_id"))
+        except LookupError as exc:
+            return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+        except (ValueError, RuntimeError) as exc:
+            return _json_response(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
+
+    async def _get_runtime_v2_contact_policy(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
+        try:
+            result = await self._call_api_in_thread(self.api.runtime_v2_contact_policy, request.query.get("conversation_id", ""))
+        except LookupError as exc:
+            return _json_response(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+        except (ValueError, RuntimeError) as exc:
+            return _json_response(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+        return _json_response(HTTPStatus.OK, result)
 
     async def _get_observability_panel(self, request: web.Request, current_user: dict[str, Any] | None) -> web.Response:
         log_limit = _coerce_limit(request.query.get("log_limit", "120"))

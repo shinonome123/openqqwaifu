@@ -19,6 +19,7 @@ from ..config import (
     PluginsConfig,
     QQSidecarConfig,
     RateLimitConfig,
+    RuntimeV2Config,
     ToolPolicyConfig,
 )
 
@@ -52,6 +53,8 @@ class ConfigManager:
         rate_limits = _load_rate_limits(raw.get("rate_limits"))
         claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
+        runtime_v2 = RuntimeV2Config(**raw.get("runtime_v2", {}))
+        runtime_v2.private_user_ids = _load_str_list(runtime_v2.private_user_ids, [])
         config = AppConfig(
             service_name=str(raw.get("service_name", "waifu-standalone")),
             config_path=str(self.path.resolve()),
@@ -109,6 +112,7 @@ class ConfigManager:
             claw_runtime=claw_runtime,
             plugins=plugins,
             qq_sidecar=qq_sidecar,
+            runtime_v2=runtime_v2,
         )
         config = _apply_env_overrides(config, config_path=self.path)
         config = _apply_napcat_autodiscovery(config, config_path=self.path)
@@ -283,6 +287,14 @@ def serialize_app_config(config: AppConfig) -> dict[str, object]:
 
 
 def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> AppConfig:
+    config.runtime_v2.enabled = _env_bool("OPENQQWAIFU_RUNTIME_V2_ENABLED", config.runtime_v2.enabled)
+    config.runtime_v2.structured_memory_enabled = _env_bool(
+        "OPENQQWAIFU_RUNTIME_V2_STRUCTURED_MEMORY_ENABLED", config.runtime_v2.structured_memory_enabled)
+    config.runtime_v2.reminders_enabled = _env_bool("OPENQQWAIFU_RUNTIME_V2_REMINDERS_ENABLED", config.runtime_v2.reminders_enabled)
+    config.runtime_v2.reminder_timezone = _env_str("OPENQQWAIFU_RUNTIME_V2_REMINDER_TIMEZONE") or config.runtime_v2.reminder_timezone
+    private_users = os.getenv("OPENQQWAIFU_RUNTIME_V2_PRIVATE_USER_IDS")
+    if private_users is not None:
+        config.runtime_v2.private_user_ids = _load_str_list(private_users, [])
     data_root = _env_str("OPENQQWAIFU_DATA_ROOT")
     if data_root:
         root = Path(data_root)

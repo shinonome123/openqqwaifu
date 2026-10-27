@@ -77,6 +77,7 @@ from .container import (
 )
 from .legacy_migrator import LegacyMigrator
 from .testing import CapturingOutboundPort
+from ..runtime_v2.contracts import Admission
 
 _MASK_SENTINEL = "..."
 _BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openqqwaifu-bg")
@@ -148,6 +149,7 @@ class WaifuService:
     outbound: OutboundPort
     reverse_ws_gateway: OneBotWsGateway | None = None
     napcat_login: NapCatLoginBridge | None = None
+    private_runtime: Any = field(default=None, repr=False)
     _recent_outbound: list[OutboundMessage] = field(default_factory=list)
     _recent_events: list[dict[str, Any]] = field(default_factory=list)
     _recent_behavior_events: list[dict[str, Any]] = field(default_factory=list)
@@ -251,7 +253,7 @@ class WaifuService:
             return
         self._rebind_character_scoped_storage(active_character)
 
-    def handle_event(self, event: InboundEvent) -> OutboundMessage | None:
+    def handle_event(self, event: InboundEvent) -> OutboundMessage | Admission | None:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -260,10 +262,14 @@ class WaifuService:
             raise RuntimeError("use await handle_event_async() inside an event loop")
         return _ASYNC_RUNTIME.submit(self._process_event_async(event, background_image_delivery=False)).result()
 
-    async def handle_event_async(self, event: InboundEvent) -> OutboundMessage | None:
+    async def handle_event_async(self, event: InboundEvent) -> OutboundMessage | Admission | None:
         return await self._process_event_async(event, background_image_delivery=True)
 
-    async def _process_event_async(self, event: InboundEvent, *, background_image_delivery: bool) -> OutboundMessage | None:
+    async def _process_event_async(self, event: InboundEvent, *, background_image_delivery: bool) -> OutboundMessage | Admission | None:
+        if self.private_runtime is not None and self.private_runtime.routes(event):
+            if self._closing:
+                raise RuntimeError("service is shutting down")
+            return await asyncio.to_thread(self.private_runtime.accept, event)
         # Never wait on a threading lock in the event loop or its worker pool.
         while not self._runtime_guard.acquire(blocking=False):
             await asyncio.sleep(0.01)
@@ -439,6 +445,8 @@ class WaifuService:
 
     def close(self, *, timeout: float | None = None) -> None:
         self.begin_shutdown()
+        if self.private_runtime is not None:
+            self.private_runtime.close(timeout=60.0 if timeout is None else timeout)
         with self._runtime_guard:
             if self._active_events:
                 raise RuntimeError("cannot close storage while replies are active; await wait_idle first")
@@ -463,10 +471,14 @@ class WaifuService:
 
     def begin_shutdown(self) -> None:
         self._closing = True
+        if self.private_runtime is not None:
+            self.private_runtime.host.begin_shutdown()
 
     async def wait_idle(self, *, timeout: float = 60.0) -> None:
         self.begin_shutdown()
         deadline = time.monotonic() + timeout
+        if self.private_runtime is not None:
+            await asyncio.to_thread(self.private_runtime.host.wait_idle, timeout)
         while True:
             with self._background_lock:
                 pending = any(not task.done() for task in self._background_tasks)
@@ -956,6 +968,7 @@ class WaifuService:
                 "active_followups": active,
                 "total_events": self._event_counter,
                 "claw_runtime": self.claw_runtime.describe(refresh=False),
+                "runtime_v2": self.private_runtime.host.status() if self.private_runtime is not None else {"enabled": False},
             }
 
     def _persist_config(self) -> None:

@@ -15,6 +15,31 @@ class LLMClientError(RuntimeError):
     pass
 
 
+class UnsupportedMessageRoles(LLMClientError):
+    pass
+
+
+class IncompleteModelResponse(LLMClientError):
+    pass
+
+
+def _validate_message_options(max_output_tokens: int, instruction_role: str, output_token_parameter: str):
+    if type(max_output_tokens) is not int or max_output_tokens < 1:
+        raise ValueError("max_output_tokens must be a positive integer")
+    if instruction_role not in {"system", "developer"}:
+        raise ValueError("instruction_role must be system or developer")
+    if output_token_parameter not in {"max_completion_tokens", "max_tokens"}:
+        raise ValueError("unsupported output token parameter")
+
+
+def _validate_conversation_messages(messages):
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("a conversation request must end with the current user input")
+    for message in messages:
+        if message.get("role") not in {"system", "user", "assistant"} or message.get("tool_calls"):
+            raise ValueError("this conversation interface does not accept tools or unknown roles")
+
+
 def normalize_image_reference(value: str) -> str:
     """Normalize OneBot image bytes/URLs without fetching remote content."""
     value = str(value or "").strip()
@@ -84,6 +109,19 @@ class LLMClient(Protocol):
     app_type: str
 
     @property
+    def supports_message_roles(self) -> bool:
+        ...
+
+    @property
+    def supports_json_object(self) -> bool:
+        ...
+
+    async def ainvoke_messages(self, messages: list[dict[str, object]], *, max_output_tokens: int,
+                               user: str = "waifu-standalone", instruction_role: str = "system",
+                               output_token_parameter: str = "max_completion_tokens", json_object: bool = False) -> str:
+        ...
+
+    @property
     def supports_images(self) -> bool:
         ...
 
@@ -145,6 +183,19 @@ class _BaseHTTPClient:
         )
         self._transport = SyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
         self._async_transport = AsyncHttpTransport(timeout_seconds=self.timeout_seconds, metrics_scope=scope)
+
+    @property
+    def supports_message_roles(self) -> bool:
+        return False
+
+    @property
+    def supports_json_object(self) -> bool:
+        return False
+
+    async def ainvoke_messages(self, messages: list[dict[str, object]], *, max_output_tokens: int,
+                               user: str = "waifu-standalone", instruction_role: str = "system",
+                               output_token_parameter: str = "max_completion_tokens", json_object: bool = False) -> str:
+        raise UnsupportedMessageRoles(f"{self.backend} cannot preserve conversation roles")
 
     @property
     def supports_images(self) -> bool:
@@ -361,6 +412,39 @@ class DifyLLMClient(_BaseHTTPClient):
 
 class OpenAILLMClient(_BaseHTTPClient):
     @property
+    def supports_json_object(self) -> bool:
+        return True
+
+    @property
+    def supports_message_roles(self) -> bool:
+        return True
+
+    async def ainvoke_messages(self, messages: list[dict[str, object]], *, max_output_tokens: int,
+                               user: str = "waifu-standalone", instruction_role: str = "system",
+                               output_token_parameter: str = "max_completion_tokens", json_object: bool = False) -> str:
+        _validate_message_options(max_output_tokens, instruction_role, output_token_parameter)
+        _validate_conversation_messages(messages)
+        if not self.enabled:
+            raise LLMClientError("openai-compatible client is not configured")
+        payload = self._tool_payload(messages, tools=[], user=user)
+        payload[output_token_parameter] = max_output_tokens
+        if type(json_object) is not bool:
+            raise ValueError("json_object must be a boolean")
+        if json_object:
+            payload["response_format"] = {"type": "json_object"}
+        if instruction_role == "developer":
+            for message in payload["messages"]:
+                if message["role"] == "system":
+                    message["role"] = "developer"
+        raw = await self._apost_json(self._endpoint("chat/completions"), payload, headers=self._headers())
+        response = self._parse_tool_response(raw)
+        data = json.loads(raw)
+        reason = data["choices"][0].get("finish_reason")
+        if reason in {"length", "content_filter", "tool_calls", "function_call"} or response.tool_calls or not response.text.strip():
+            raise IncompleteModelResponse("model did not return a complete plain-text reply")
+        return response.text
+
+    @property
     def supports_images(self) -> bool:
         return True
 
@@ -575,6 +659,27 @@ class OpenAILLMClient(_BaseHTTPClient):
 
 
 class ClaudeLLMClient(_BaseHTTPClient):
+    @property
+    def supports_message_roles(self) -> bool:
+        return True
+
+    async def ainvoke_messages(self, messages: list[dict[str, object]], *, max_output_tokens: int,
+                               user: str = "waifu-standalone", instruction_role: str = "system",
+                               output_token_parameter: str = "max_completion_tokens", json_object: bool = False) -> str:
+        _validate_message_options(max_output_tokens, instruction_role, output_token_parameter)
+        if json_object:
+            raise ValueError("this Claude adapter does not support JSON object response_format")
+        _validate_conversation_messages(messages)
+        if not self.enabled:
+            raise LLMClientError("claude client is not configured")
+        payload = self._tool_payload(messages, tools=[], user=user)
+        payload["max_tokens"] = max_output_tokens
+        raw = await self._apost_json(self._endpoint("messages", add_v1=True), payload, headers=self._headers())
+        response = self._parse_tool_response(raw)
+        if (json.loads(raw).get("stop_reason") in {"max_tokens", "tool_use", "pause_turn"}
+                or response.tool_calls or not response.text.strip()):
+            raise IncompleteModelResponse("model did not return a complete plain-text reply")
+        return response.text
 
     @property
     def supports_images(self) -> bool:
@@ -827,6 +932,25 @@ class ClaudeLLMClient(_BaseHTTPClient):
 
 
 class UnifiedLLMClient(_BaseHTTPClient):
+    @property
+    def supports_message_roles(self) -> bool:
+        return str(self.backend or "dify").strip().lower() != "dify"
+
+    @property
+    def supports_json_object(self) -> bool:
+        return str(self.backend or "dify").strip().lower() not in {"dify", "claude"}
+
+    async def ainvoke_messages(self, messages: list[dict[str, object]], *, max_output_tokens: int,
+                               user: str = "waifu-standalone", instruction_role: str = "system",
+                               output_token_parameter: str = "max_completion_tokens", json_object: bool = False) -> str:
+        client = build_llm_client_from_values(base_url=self.base_url, api_key=self.api_key, model=self.model,
+            backend=self.backend, timeout_seconds=self.timeout_seconds, app_type=self.app_type)
+        try:
+            return await client.ainvoke_messages(messages, max_output_tokens=max_output_tokens, user=user,
+                instruction_role=instruction_role, output_token_parameter=output_token_parameter, json_object=json_object)
+        finally:
+            client.close()
+
     @property
     def supports_images(self) -> bool:
         return str(self.backend or "dify").strip().lower() != "dify"

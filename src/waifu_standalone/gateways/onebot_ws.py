@@ -222,13 +222,17 @@ class OneBotWsOutboundPort(OutboundPort):
     def __init__(self, gateway: OneBotWsGateway) -> None:
         self._gateway = gateway
 
-    def send(self, message: OutboundMessage) -> None:
-        self._gateway.run_sync(lambda: self.send_async(message))
+    def is_ready(self) -> bool:
+        ws = self._gateway._active_ws
+        return ws is not None and not ws.closed
 
-    async def send_async(self, message: OutboundMessage) -> None:
+    def send(self, message: OutboundMessage) -> dict[str, Any]:
+        return self._gateway.run_sync(lambda: self.send_async(message))
+
+    async def send_async(self, message: OutboundMessage) -> dict[str, Any]:
         action, params = build_onebot_action(message)
         response = await self._gateway.send_action(action, params)
-        ensure_onebot_action_result(response)
+        return ensure_onebot_action_result(response)
 
     def close(self) -> None:
         self._gateway.close_sync()

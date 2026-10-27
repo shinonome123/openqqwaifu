@@ -11,9 +11,16 @@ class OneBotActionError(RuntimeError):
     pass
 
 
+class OneBotActionRejected(OneBotActionError):
+    """The platform explicitly returned an unsuccessful action result."""
+
+
 def ensure_onebot_action_result(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("status") not in {None, "ok"} or result.get("retcode") not in {None, 0}:
-        raise OneBotActionError("onebot action failed")
+        if result.get("status") == "failed":
+            raise OneBotActionRejected("onebot action failed")
+        # OneBot's async status may mean accepted but not yet completed.
+        raise OneBotActionError("onebot action result is not a confirmed success")
     return result
 
 
@@ -137,13 +144,13 @@ class OneBotHttpOutboundPort:
     def __init__(self, client: OneBotActionClient):
         self.client = client
 
-    def send(self, message: OutboundMessage) -> None:
+    def send(self, message: OutboundMessage) -> dict[str, object]:
         action, payload = build_onebot_action(message)
-        self.client.post_action(action, payload)
+        return self.client.post_action(action, payload)
 
-    async def send_async(self, message: OutboundMessage) -> None:
+    async def send_async(self, message: OutboundMessage) -> dict[str, object]:
         action, payload = build_onebot_action(message)
-        await self.client.apost_action(action, payload)
+        return await self.client.apost_action(action, payload)
 
     def _coerce_target_id(self, launcher_id: str) -> int | str:
         return _coerce_target_id(launcher_id)

@@ -1,0 +1,25 @@
+{
+  "service_name": "openqqwaifu-runtime-v2-preview",
+  "data_root": "../data/runtime-v2-preview",
+  "bot_account_id": "123456789",
+  "character": "default",
+  "llm": {
+    "enabled": false
+  },
+  "qq_sidecar": {
+    "dry_run": true,
+    "inbound_host": "127.0.0.1",
+    "inbound_port": 8081,
+    "inbound_access_token": ""
+  },
+  "runtime_v2": {
+    "enabled": true,
+    "private_user_ids": ["10001"],
+    "workers": 4,
+    "structured_memory_enabled": false,
+    "reminders_enabled": false,
+    "reminder_timezone": "",
+    "reminder_grace_seconds": 300,
+    "max_pending_events": 1000
+  }
+}

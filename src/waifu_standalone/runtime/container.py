@@ -572,6 +572,12 @@ def _build_service(
     tools.register_alias("clarify_naming_intent", "clarify-naming-intent")
     _register_tool_aliases(tools)
     generator.bind_tools(tools)
+    from ..runtime_v2.integration import build_private_runtime
+    try:
+        service.private_runtime = build_private_runtime(app_config, outbound)
+    except BaseException:
+        service.close()
+        raise
     return service, outbound
 
 
