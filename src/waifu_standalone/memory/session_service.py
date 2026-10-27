@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -17,6 +18,20 @@ _ALLOWED_LAUNCHER_TYPES = frozenset({"group", "person"})
 _SESSION_LOG_SUFFIX = ".jsonl"
 _LEGACY_SESSION_SUFFIX = ".json"
 _COMPACT_THRESHOLD_BYTES = 256 * 1024
+# Per-line cap inside the prompt's [Conversation] window when a char budget is set.
+_DIALOGUE_LINE_MAX_CHARS = 400
+# Archived history is folded into one summary kept on the session, shown to the
+# model as [Earlier Conversation].
+ROLLING_SUMMARY_KEY = "rolling_summary"
+ROLLING_SUMMARY_MAX_CHARS = 600
+
+
+def clip_rolling_summary(text: str) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= ROLLING_SUMMARY_MAX_CHARS:
+        return normalized
+    # Keep the newest part; the start of a rolling summary is the oldest context.
+    return "…" + normalized[-(ROLLING_SUMMARY_MAX_CHARS - 1) :].lstrip()
 
 
 def clone_session(session: SessionMemory) -> SessionMemory:
@@ -358,15 +373,39 @@ class Memory:
     async def aload(self, launcher_id: str, launcher_type: str, *, character_id: str = "") -> SessionMemory:
         return await asyncio.to_thread(self.load, launcher_id, launcher_type, character_id=character_id)
 
-    def save_user_event(self, event: InboundEvent, *, character_id: str = "") -> SessionMemory:
+    def save_user_event(
+        self,
+        event: InboundEvent,
+        *,
+        character_id: str = "",
+        context_lines: list[str] | None = None,
+        bot_account_id: str = "",
+    ) -> SessionMemory:
         session = self.load(event.launcher_id, event.launcher_type, character_id=character_id)
-        message_text = event.to_memory_text() or "[non-text event]"
-        session.history.append(f"{event.sender_name}: {message_text}")
+        message_text = event.to_memory_text(bot_account_id=bot_account_id) or "[non-text event]"
+        current_line = f"{event.sender_name}: {message_text}"
+        pending = list(context_lines or [])
+        if not pending or pending[-1] != current_line:
+            pending.append(current_line)
+        session.history.extend(pending)
         session.history = session.history[-HISTORY_LIMIT:]
         return self.store.save(session)
 
-    async def asave_user_event(self, event: InboundEvent, *, character_id: str = "") -> SessionMemory:
-        return await asyncio.to_thread(self.save_user_event, event, character_id=character_id)
+    async def asave_user_event(
+        self,
+        event: InboundEvent,
+        *,
+        character_id: str = "",
+        context_lines: list[str] | None = None,
+        bot_account_id: str = "",
+    ) -> SessionMemory:
+        return await asyncio.to_thread(
+            self.save_user_event,
+            event,
+            character_id=character_id,
+            context_lines=context_lines,
+            bot_account_id=bot_account_id,
+        )
 
     def save_user_message(
         self,
@@ -429,16 +468,55 @@ class Memory:
         *,
         assistant_name: str,
         limit: int = 8,
+        max_chars: int = 0,
+        exclude_last: bool = False,
         character_id: str = "",
     ) -> str:
         session = self.load(launcher_id, launcher_type, character_id=character_id)
-        lines: list[str] = []
-        for raw_line in session.history[-limit:]:
+        window = max(1, int(limit))
+        if exclude_last:
+            # The caller passes the current inbound message separately as [Latest Message];
+            # `limit` still counts the earlier lines shown.
+            history_lines = session.history[-(window + 1) :][:-1]
+        else:
+            history_lines = session.history[-window:]
+        return self._format_dialogue_lines(
+            history_lines,
+            assistant_name=assistant_name,
+            max_chars=max_chars,
+        )
+
+    def _format_dialogue_lines(
+        self,
+        history_lines: list[str],
+        *,
+        assistant_name: str,
+        max_chars: int = 0,
+    ) -> str:
+        rendered: list[str] = []
+        for raw_line in history_lines:
             speaker, content = self._split_history_line(raw_line)
             if speaker == "assistant":
                 speaker = assistant_name
-            lines.append(f"{speaker}: {content}")
-        return "\n".join(lines)
+            rendered.append(f"{speaker}: {content}")
+        budget = int(max_chars or 0)
+        if budget <= 0:
+            return "\n".join(rendered)
+
+        # Keep the newest lines that fit. Long lines (pastes, search answers) are
+        # truncated first so a single message cannot use up the whole budget.
+        line_cap = min(budget, _DIALOGUE_LINE_MAX_CHARS)
+        selected_reversed: list[str] = []
+        used = 0
+        for line in reversed(rendered):
+            if len(line) > line_cap:
+                line = line[: line_cap - 1].rstrip() + "…"
+            cost = len(line) + (1 if selected_reversed else 0)
+            if used + cost > budget:
+                break
+            selected_reversed.append(line)
+            used += cost
+        return "\n".join(reversed(selected_reversed))
 
     async def aformat_dialogue(
         self,
@@ -447,6 +525,8 @@ class Memory:
         *,
         assistant_name: str,
         limit: int = 8,
+        max_chars: int = 0,
+        exclude_last: bool = False,
         character_id: str = "",
     ) -> str:
         return await asyncio.to_thread(
@@ -455,6 +535,8 @@ class Memory:
             launcher_type,
             assistant_name=assistant_name,
             limit=limit,
+            max_chars=max_chars,
+            exclude_last=exclude_last,
             character_id=character_id,
         )
 
@@ -467,52 +549,42 @@ class Memory:
         batch_size: int,
         summarizer: Callable[[list[str]], tuple[str, list[str]]],
         character_id: str = "",
+        commit_lock: AbstractContextManager[object] | None = None,
     ) -> dict[str, object] | None:
+        """Fold overflowing history into the session's rolling summary.
+
+        Waits until at least ``batch_size`` lines overflow ``max_history_lines`` and
+        then archives the whole overflow with one summarizer call, instead of one
+        call per reply. ``summarizer`` gets the lines to archive and returns the new
+        rolling summary (it is expected to merge the previous one). It runs without
+        ``commit_lock``; only the re-read, trim and save happen under it.
+        """
         session = self.load(launcher_id, launcher_type, character_id=character_id)
-        if len(session.history) <= max_history_lines:
+        archive_count = len(session.history) - max_history_lines
+        if archive_count < max(1, batch_size):
             return None
 
-        archive_count = min(max(1, batch_size), max(1, len(session.history) - max_history_lines))
         history_batch = list(session.history[:archive_count])
         summary, tags = summarizer(history_batch)
-        summary = str(summary or "").strip()
+        summary = clip_rolling_summary(summary)
         if not summary:
             return None
 
-        current = self.load(launcher_id, launcher_type, character_id=character_id)
-        if len(current.history) < archive_count:
-            return None
-        if list(current.history[:archive_count]) != history_batch:
-            return None
-
-        current.history = current.history[archive_count:]
-        self.store.save(current)
+        with commit_lock if commit_lock is not None else nullcontext():
+            current = self.load(launcher_id, launcher_type, character_id=character_id)
+            # Lines may have been appended meanwhile; only trim if the archived
+            # prefix is still exactly where it was.
+            if list(current.history[:archive_count]) != history_batch:
+                return None
+            current.history = current.history[archive_count:]
+            current.metadata[ROLLING_SUMMARY_KEY] = summary
+            self.store.save(current)
         return {
             "summary": summary,
             "tags": [tag for tag in tags if str(tag).strip()],
             "archive_count": archive_count,
             "source": "archived_history",
         }
-
-    async def amaybe_archive_history(
-        self,
-        launcher_id: str,
-        launcher_type: str,
-        *,
-        max_history_lines: int,
-        batch_size: int,
-        summarizer: Callable[[list[str]], tuple[str, list[str]]],
-        character_id: str = "",
-    ) -> dict[str, object] | None:
-        return await asyncio.to_thread(
-            self.maybe_archive_history,
-            launcher_id,
-            launcher_type,
-            max_history_lines=max_history_lines,
-            batch_size=batch_size,
-            summarizer=summarizer,
-            character_id=character_id,
-        )
 
     def extract_preferred_name(self, content: str) -> str:
         raw = str(content or "").strip()

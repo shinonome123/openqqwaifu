@@ -41,6 +41,27 @@ class ConfigManagerTests(unittest.TestCase):
         self.assertEqual(config.story_style, "intimate")
         self.assertEqual(config.story_detail_level, 4)
 
+    def test_history_window_budgets_load_from_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "history_window_messages": 24,
+                        "history_window_chars": 1800,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=False):
+                config = ConfigManager(config_path).load()
+
+        self.assertEqual(config.history_window_messages, 24)
+        self.assertEqual(config.history_window_chars, 1800)
+
     def test_autodiscovers_napcat_webui_token_from_sibling_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

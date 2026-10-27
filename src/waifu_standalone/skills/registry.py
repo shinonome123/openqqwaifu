@@ -40,6 +40,10 @@ _LEGACY_SKILL_KEYS: set[str] = {
 
 _DANGEROUS_TOOL_IDS: set[str] = {"write-file", "exec-command"}
 
+# Low-risk everyday tools the model can always call, whatever the keyword ranking
+# picked for this message ("今天要带伞吗" mentions no weather keyword).
+_ALWAYS_EXPOSED_TOOL_TARGETS: frozenset[str] = frozenset({"search", "weather", "summarize", "image"})
+
 
 class SkillManifestError(ValueError):
     def __init__(self, code: str, message: str, *, source: str = "") -> None:
@@ -346,6 +350,25 @@ class SkillRegistry:
             scored.append((score, skill))
         scored.sort(key=lambda item: (-item[0], -item[1].priority, item[1].name))
         return [skill for _, skill in scored[: max(1, int(self.config.max_active_skills or 3))]]
+
+    def exposed_manifests(self, text: str) -> list[SkillManifest]:
+        """Skills whose tools the model may call this turn: the ranked candidates plus a
+        fixed base set of safe tools. Prompt skill cards stay limited to the ranked ones."""
+        ranked = self.candidate_manifests(text)
+        if not self.config.skills_enabled:
+            return ranked
+        seen = {skill.skill_id for skill in ranked}
+        base = [
+            skill
+            for skill in self.list_skills()
+            if skill.skill_id not in seen
+            and skill.model_visible
+            and not skill.validation_errors
+            and skill.is_tool_handler
+            and skill.handler_target in _ALWAYS_EXPOSED_TOOL_TARGETS
+            and skill.policy.risk_level == "safe"
+        ]
+        return [*ranked, *base]
 
     def describe(self) -> dict[str, Any]:
         skills = self.list_skills()
@@ -884,7 +907,7 @@ def _parse_handler_spec(value: Any) -> SkillHandlerSpec:
 def _parse_policy_spec(value: Any) -> SkillPolicySpec:
     payload = _coerce_mapping(value)
     risk_level = str(payload.get("risk_level") or "safe").strip().lower()
-    if risk_level not in {"safe", "filesystem", "command", "mutating"}:
+    if risk_level not in {"safe", "filesystem", "command", "mutating", "network"}:
         risk_level = "safe"
     return SkillPolicySpec(
         priority=_safe_int(payload.get("priority"), 0),

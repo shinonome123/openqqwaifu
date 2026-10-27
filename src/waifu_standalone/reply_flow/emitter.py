@@ -12,7 +12,9 @@ The emitter borrows ``outbound``, ``memory``, ``state_store``,
 from __future__ import annotations
 
 import asyncio
+import re
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from ..models import EmotionState, InboundEvent, OutboundMessage
@@ -20,6 +22,36 @@ from ..runtime.testing import CapturingOutboundPort
 
 if TYPE_CHECKING:
     from ..app import WaifuService
+
+
+_SENTENCE_END = re.compile(r"[。！？!?；;…]")
+
+
+def split_reply_text(text: str, limit: int) -> list[str]:
+    """Split a long reply into chunks of at most ``limit`` chars for separate QQ messages.
+
+    Prefers a blank line, then a line break, then a sentence end, as long as the
+    chunk keeps at least half the limit; otherwise cuts hard.
+    """
+    remaining = str(text or "").strip()
+    if limit <= 0 or len(remaining) <= limit:
+        return [remaining] if remaining else []
+    chunks: list[str] = []
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        cut = window.rfind("\n\n")
+        if cut < limit // 2:
+            cut = window.rfind("\n")
+        if cut < limit // 2:
+            ends = [match.end() for match in _SENTENCE_END.finditer(window)]
+            cut = ends[-1] if ends else -1
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 class OutboundEmitter:
@@ -52,7 +84,7 @@ class OutboundEmitter:
             user_id=event.sender_id,
             character_id=resolved_character_id,
         )
-        self._service._archive_if_needed(
+        self._service._schedule_archive(
             event.launcher_id,
             event.launcher_type,
             assistant_name=assistant_name,
@@ -104,7 +136,7 @@ class OutboundEmitter:
             user_id=event.sender_id,
             character_id=resolved_character_id,
         )
-        await self._service._archive_if_needed_async(
+        self._service._schedule_archive(
             event.launcher_id,
             event.launcher_type,
             assistant_name=assistant_name,
@@ -137,9 +169,31 @@ class OutboundEmitter:
             return 0.0
         return max(0.0, float(self._service.config.group_response_delay_seconds))
 
+    def message_parts(self, message: OutboundMessage) -> list[OutboundMessage]:
+        chunks = split_reply_text(message.text, int(self._service.config.outbound_message_max_chars or 0))
+        if len(chunks) <= 1:
+            return [message]
+        # Images go with the last chunk, after the text that introduces them.
+        return [
+            replace(message, text=chunk, images=list(message.images) if index == len(chunks) - 1 else [])
+            for index, chunk in enumerate(chunks)
+        ]
+
+    def _send_parts(self, message: OutboundMessage) -> None:
+        for part in self.message_parts(message):
+            self._service.outbound.send(part)
+
+    async def _asend_parts(self, message: OutboundMessage) -> None:
+        send_async = getattr(self._service.outbound, "send_async", None)
+        for part in self.message_parts(message):
+            if callable(send_async):
+                await send_async(part)
+            else:
+                await asyncio.to_thread(self._service.outbound.send, part)
+
     def dispatch(self, message: OutboundMessage, *, delay_seconds: float) -> None:
         if delay_seconds <= 0:
-            self._service.outbound.send(message)
+            self._send_parts(message)
             return
         send_async = getattr(self._service.outbound, "send_async", None)
         if callable(send_async):
@@ -151,30 +205,18 @@ class OutboundEmitter:
 
         def delayed_send() -> None:
             time.sleep(delay_seconds)
-            self._service.outbound.send(message)
+            self._send_parts(message)
 
         self._service._submit_background_task("delayed_outbound_send", delayed_send)
 
     async def adispatch(self, message: OutboundMessage, *, delay_seconds: float) -> None:
         if delay_seconds <= 0:
-            send_async = getattr(self._service.outbound, "send_async", None)
-            if callable(send_async):
-                await send_async(message)
-                return
-            await asyncio.to_thread(self._service.outbound.send, message)
+            await self._asend_parts(message)
             return
-        send_async = getattr(self._service.outbound, "send_async", None)
-        if callable(send_async):
-            task = asyncio.create_task(self.adelayed_send(message, delay_seconds=delay_seconds))
-        else:
-            async def delayed_send_sync() -> None:
-                await asyncio.sleep(delay_seconds)
-                await asyncio.to_thread(self._service.outbound.send, message)
-            task = asyncio.create_task(delayed_send_sync())
+        task = asyncio.create_task(self.adelayed_send(message, delay_seconds=delay_seconds))
         self._service._track_async_task("delayed_outbound_send", task)
 
     async def adelayed_send(self, message: OutboundMessage, *, delay_seconds: float) -> None:
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
-        send_async = getattr(self._service.outbound, "send_async")
-        await send_async(message)
+        await self._asend_parts(message)

@@ -61,9 +61,10 @@ export function mount(root) {
         proactive_candidate_limit: Number(state.proactive_candidate_limit || 6),
         proactive_min_affinity: Number(state.proactive_min_affinity || 0.12),
         max_active_skills: Number(state.max_active_skills || 3),
-        history_window_messages: Number(state.history_window_messages || 8),
+        history_window_messages: Number(state.history_window_messages || 30),
+        history_window_chars: Number(state.history_window_chars ?? 2500),
         memory_recall_limit: Number(state.memory_recall_limit || 3),
-        max_thinking_words: Number(state.max_thinking_words || 30),
+        max_thinking_words: Number(state.max_thinking_words || 80),
         short_term_memory_limit: Number(state.short_term_memory_limit || 30),
         memory_summary_batch_size: Number(state.memory_summary_batch_size || 12),
       });
@@ -195,7 +196,7 @@ export function mount(root) {
             label: t("character.field.maxThinkingWords"),
             hint: t("character.field.maxThinkingWords.hint"),
             control: numberInput({
-              value: Number(state.max_thinking_words || 30),
+              value: Number(state.max_thinking_words || 80),
               min: 1,
               max: 200,
               onChange: (v) => patch({ max_thinking_words: v }),
@@ -276,10 +277,21 @@ export function mount(root) {
             label: t("character.field.historyWindow"),
             hint: t("character.field.historyWindow.hint"),
             control: numberInput({
-              value: Number(state.history_window_messages || 8),
+              value: Number(state.history_window_messages || 30),
               min: 1,
               max: 128,
               onChange: (v) => patch({ history_window_messages: v }),
+            }),
+          }),
+          fieldRow({
+            label: t("character.field.historyChars"),
+            hint: t("character.field.historyChars.hint"),
+            control: numberInput({
+              value: Number(state.history_window_chars ?? 2500),
+              min: 0,
+              max: 20000,
+              step: 100,
+              onChange: (v) => patch({ history_window_chars: v }),
             }),
           }),
           fieldRow({

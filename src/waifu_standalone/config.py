@@ -110,9 +110,9 @@ class MarketplaceConfig:
 class ToolPolicyConfig:
     enabled: bool = True
     allowed_roots: list[str] = field(default_factory=lambda: [".", "data"])
-    write_enabled: bool = True
+    write_enabled: bool = False
     write_allowed_roots: list[str] = field(default_factory=lambda: [".", "data"])
-    exec_enabled: bool = True
+    exec_enabled: bool = False
     exec_allowed_roots: list[str] = field(default_factory=lambda: ["."])
     exec_allowlist: list[str] = field(
         default_factory=lambda: [
@@ -131,6 +131,9 @@ class ToolPolicyConfig:
             "docker-compose",
         ]
     )
+    # QQ 用户 ID 白名单：只有这些人才能让模型调用高风险工具
+    # （读/写文件、列目录、执行命令、联网抓取）。默认空 = 任何人都不行。
+    authorized_user_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -186,15 +189,22 @@ class AppConfig:
     image_command_prefix: str = "生图"
     image_command_aliases: list[str] = field(default_factory=lambda: ["draw"])
     ignore_prefixes: list[str] = field(default_factory=lambda: ["!", "？", "/"])
+    # Commands that still run although they start with an ignored prefix ("/skill weather-command 上海").
+    explicit_skill_prefixes: list[str] = field(default_factory=lambda: ["/skill"])
     group_follow_up_window_seconds: float = 5.0
     group_response_delay_seconds: float = 0.0
     repeat_trigger_count: int = 0
     multimodal_enabled: bool = True
-    history_window_messages: int = 8
+    # Longer replies are sent as several QQ messages; 0 sends one message whatever the length.
+    outbound_message_max_chars: int = 900
+    history_window_messages: int = 30
+    history_window_chars: int = 2500
     memory_recall_limit: int = 3
-    max_thinking_words: int = 30
+    max_thinking_words: int = 80
     short_term_memory_limit: int = 30
     memory_summary_batch_size: int = 12
+    # IANA name; used for the prompt's current time and for dating extracted memories.
+    timezone: str = "Asia/Shanghai"
     data_root: str = "data"
     llm: LLMConfig = field(default_factory=LLMConfig)
     image_generation: ImageGenerationConfig = field(default_factory=ImageGenerationConfig)

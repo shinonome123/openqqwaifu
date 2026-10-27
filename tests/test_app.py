@@ -20,9 +20,12 @@ from waifu_standalone.config import AppConfig, QQSidecarConfig
 from waifu_standalone.contracts import GeneratedImage
 from waifu_standalone.gateways.onebot_actions import OneBotHttpOutboundPort
 from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
-from waifu_standalone.models import InboundEvent, MessageSegment
+from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment
 from waifu_standalone.memory import FileMemoryStore, InMemoryStore
 from waifu_standalone.organs.memories import Memory
+from waifu_standalone.reply_flow import Generator
+from waifu_standalone.reply_flow.emitter import split_reply_text
+from waifu_standalone.skills import ToolExecutionResult
 from waifu_standalone.services import CapturingOutboundPort
 from waifu_standalone.state_store import SqliteRuntimeStateStore
 from waifu_standalone.systems.searching import SearchContext, SearchResult
@@ -1911,7 +1914,8 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(result["reason"], "bot_joined_group")
 
     def test_active_character_card_identity_wins_for_person_session(self) -> None:
-        service, _ = build_default_service(AppConfig())
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        service, _ = build_default_service(AppConfig(data_root=tmpdir))
         service.cards.save_editor_bundle(
             "aurora",
             shared_fields={
@@ -1934,7 +1938,7 @@ class WaifuServiceTests(unittest.TestCase):
                 "prologue": ["hello"],
             },
         )
-        service.cards.set_active_character("aurora")
+        service.activate_character("aurora")
         session = service.memory.load("783190298", "person", character_id="aurora")
         session.metadata["card"] = {
             "assistant_name": "neko",
@@ -1954,7 +1958,8 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(address, "Captain")
 
     def test_save_character_panel_can_edit_without_switching_active_character(self) -> None:
-        service, _ = build_default_service(AppConfig())
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        service, _ = build_default_service(AppConfig(data_root=tmpdir))
 
         saved = service.save_character_panel(
             {
@@ -2188,32 +2193,380 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertEqual(preview["transcript"][0]["role"], "user")
         self.assertEqual(preview["transcript"][1]["role"], "assistant")
 
-    def test_summarization_mode_archives_older_history(self) -> None:
-        config = AppConfig(
-            summarization_mode=True,
-            short_term_memory_limit=4,
-            memory_summary_batch_size=2,
-        )
-        service, _ = build_default_service(config)
+    def test_summarization_mode_folds_overflow_into_rolling_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    summarization_mode=True,
+                    short_term_memory_limit=4,
+                    memory_summary_batch_size=3,
+                )
+            )
+            service.state_store.save_member(
+                {
+                    "group_id": "",
+                    "user_id": "783190298",
+                    "preferred_name": "tester",
+                    "onboarding_status": "ready",
+                }
+            )
+            calls: list[tuple[list[str], str]] = []
 
-        for index in range(3):
+            def fake_summarize_rolling(history_lines, *, previous_summary, assistant_name):  # type: ignore[no-untyped-def]
+                calls.append((list(history_lines), previous_summary))
+                return f"{previous_summary} | 摘要{len(calls)}" if previous_summary else f"摘要{len(calls)}"
+
+            service.generator.summarize_rolling = fake_summarize_rolling  # type: ignore[method-assign]
+
+            history_sizes: list[int] = []
+            for index in range(6):
+                service.handle_event(
+                    InboundEvent(
+                        launcher_id="783190298",
+                        launcher_type="person",
+                        sender_id="783190298",
+                        sender_name="tester",
+                        segments=[MessageSegment(kind="text", text=f"message-{index}")],
+                    )
+                )
+                service.flush_background_tasks(timeout=10)
+                history_sizes.append(len(service.memory.load("783190298", "person").history))
+
+            # Each reply adds 2 lines; archiving waits for 3 lines of overflow, then
+            # folds the whole overflow with one call (not one call per reply).
+            self.assertEqual(history_sizes, [2, 4, 6, 4, 6, 4])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][1], "")
+            self.assertEqual(calls[1][1], "摘要1")
+            session = service.memory.load("783190298", "person")
+            self.assertEqual(session.metadata["rolling_summary"], "摘要1 | 摘要2")
+            self.assertNotIn("long_term_memory", session.metadata)
+            # Archived history is no longer written as "summary" knowledge entries.
+            self.assertEqual(service.state_store.knowledge_count(), 0)
+
+    def test_chat_prompt_has_current_time_and_earlier_conversation_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            event = InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="现在几点了")],
+            )
+            session = service.memory.load("783190298", "person")
+            session.metadata["rolling_summary"] = "上次聊到周末去爬山。"
+            card = service.cards.load("person", session)
+
+            prompt = service.generator._build_chat_query(
+                event,
+                session,
+                EmotionState(),
+                card=card,
+                assistant_name=card.assistant_name,
+                address="tester",
+                search_hint="",
+                search_context="",
+                conversation_view="tester: 早",
+                memory_hints=[],
+                speaker_notes=[],
+                analysis_hint="",
+                latest_message="现在几点了",
+                active_skills=[],
+            )
+
+            self.assertRegex(prompt, r"当前时间：\d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（Asia/Shanghai）")
+            self.assertIn("[Earlier Conversation]\n上次聊到周末去爬山。", prompt)
+            self.assertLess(prompt.index("[Earlier Conversation]"), prompt.index("[Conversation]"))
+
+    def test_knowledge_query_gives_today_for_absolute_dates(self) -> None:
+        from waifu_standalone.infra.clock import local_now
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            event = InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="我下周三面试")],
+            )
+            prompt = service.generator._build_knowledge_query(
+                event,
+                service.memory.load("783190298", "person"),
+                assistant_name="极光",
+                latest_message="我下周三面试",
+                conversation_view="",
+                address="tester",
+                max_entries=2,
+            )
+
+            self.assertIn(f"Today is {local_now(service.config.timezone):%Y-%m-%d}", prompt)
+            self.assertIn("absolute dates", prompt)
+
+    def test_analysis_is_clipped_at_a_sentence_boundary(self) -> None:
+        clip = Generator._clip_at_sentence
+        thought = "对方在问时间。语气轻松，可以顺手提醒早点休息，然后接着聊明天的安排"
+        # The only sentence end is too early to cut at, so it falls back to a hard cut.
+        self.assertEqual(clip(thought, limit=30), thought[:30] + "…")
+        self.assertEqual(clip("对方在问时间。语气轻松。然后接着聊明天的安排吧好不好", limit=16), "对方在问时间。语气轻松。")
+        self.assertEqual(clip("很短", limit=80), "很短")
+
+    def test_reply_cleanup_keeps_line_breaks(self) -> None:
+        cleaned = Generator._clean_response("<think></think>第一行\r\n\n\n\n第二行  有\t空格  \n- 列表\n    缩进保留")
+        self.assertEqual(cleaned, "第一行\n\n第二行 有 空格\n- 列表\n    缩进保留")
+
+    def test_raw_tool_block_is_not_repeated_when_model_quoted_it(self) -> None:
+        result = ToolExecutionResult(text="query: x\n- 标题\nhttps://example.com/a", display_mode="raw_block")
+        quoted = "来源如下：\n```text\nquery: x\n- 标题\nhttps://example.com/a\n```"
+        self.assertEqual(Generator._append_raw_tool_blocks(quoted, [result]), quoted)
+        appended = Generator._append_raw_tool_blocks("来源如下：", [result])
+        self.assertEqual(appended.count("https://example.com/a"), 1)
+        self.assertIn("```text", appended)
+
+    def test_long_reply_is_sent_as_several_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, outbound = build_default_service(AppConfig(data_root=tmpdir, outbound_message_max_chars=60))
+            service.state_store.save_member(
+                {"group_id": "", "user_id": "783190298", "preferred_name": "tester", "onboarding_status": "ready"}
+            )
+            paragraphs = ["第一段" + "甲" * 40, "第二段" + "乙" * 40, "第三段" + "丙" * 40]
+            long_reply = "\n\n".join(paragraphs)
+            service.generator.generate_reply = lambda *args, **kwargs: long_reply  # type: ignore[method-assign]
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="讲长一点")],
+                )
+            )
+
+            assert reply is not None
+            self.assertEqual(reply.text, long_reply)
+            self.assertEqual([message.text for message in outbound.sent], paragraphs)
+            history = service.memory.load("783190298", "person").history
+            self.assertEqual(history[-1], f"assistant: {long_reply}")
+
+    def test_split_reply_text_prefers_sentence_ends_and_keeps_all_text(self) -> None:
+        text = "这是第一句话，内容比较长。" * 6
+        chunks = split_reply_text(text, 40)
+        self.assertTrue(all(len(chunk) <= 40 for chunk in chunks))
+        self.assertTrue(all(chunk.endswith("。") for chunk in chunks))
+        self.assertEqual("".join(chunks), text)
+        self.assertEqual(split_reply_text("短", 40), ["短"])
+        self.assertEqual(split_reply_text("x" * 50, 0), ["x" * 50])
+
+    def test_last_search_with_results_survives_the_next_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            session = service.memory.load("783190298", "person")
+            session.metadata["last_search"] = SearchContext(
+                query="拼多多 罚款",
+                summary="拼多多被罚。",
+                results=[SearchResult(title="通报", snippet="罚款", url="https://example.com/a")],
+                fetched_at=time.time(),
+                reason="manual",
+            ).as_dict()
+            service.memory.store.save(session)
+
             service.handle_event(
                 InboundEvent(
                     launcher_id="783190298",
                     launcher_type="person",
                     sender_id="783190298",
                     sender_name="tester",
-                    segments=[MessageSegment(kind="text", text=f"message-{index}")],
+                    segments=[MessageSegment(kind="text", text="这事你怎么看")],
                 )
             )
 
-        session = service.memory.load("783190298", "person")
-        knowledge_entries = service.state_store.list_knowledge(limit=8)
+            kept = service.memory.load("783190298", "person").metadata.get("last_search", {})
+            self.assertEqual(kept.get("query"), "拼多多 罚款")
 
-        self.assertLessEqual(len(session.history), 4)
-        self.assertNotIn("long_term_memory", session.metadata)
-        self.assertEqual(service.state_store.knowledge_count(), 1)
-        self.assertEqual(knowledge_entries[0]["memory_type"], "summary")
+    def test_group_ambient_messages_fold_into_next_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    bot_account_id="999",
+                    group_reply_requires_mention=True,
+                    history_window_messages=30,
+                    history_window_chars=2500,
+                )
+            )
+            captured: dict[str, str] = {}
+
+            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+                captured["conversation_view"] = str(kwargs.get("conversation_view", ""))
+                return "收到"
+
+            service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+            def event(text: str, mentions: tuple[tuple[str, str], ...] = ()) -> InboundEvent:
+                segments = [
+                    MessageSegment(kind="mention", mention_target=target, mention_display=display)
+                    for target, display in mentions
+                ]
+                segments.append(MessageSegment(kind="text", text=text))
+                return InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="小夏",
+                    segments=segments,
+                )
+
+            self.assertIsNone(service.handle_event(event("第一句")))
+            self.assertIsNone(service.handle_event(event("第二句", (("888", "朋友"),))))
+            self.assertIsNone(service.handle_event(event("第三句")))
+
+            reply = service.handle_event(event("第四句", (("999", "极光"), ("888", "朋友"))))
+
+            self.assertIsNotNone(reply)
+            view = captured["conversation_view"]
+            self.assertIn("第一句", view)
+            self.assertIn("第二句", view)
+            self.assertIn("第三句", view)
+            self.assertIn("@朋友", view)
+            self.assertNotIn("第四句", view)
+            self.assertNotIn("@999", view)
+            self.assertNotIn("@极光", view)
+
+            session = service.memory.load("612475113", "group")
+            self.assertEqual(sum(1 for line in session.history if "第四句" in line), 1)
+            self.assertFalse(any("@999" in line or "@极光" in line for line in session.history))
+
+    def test_group_dialogue_labels_bot_with_card_name_and_passes_alias_as_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(data_root=tmpdir, bot_account_id="999", group_reply_requires_mention=True)
+            )
+            current_character = service._active_character_id()
+            service.state_store.save_assistant_alias(
+                character_id=current_character,
+                user_id="783190298",
+                assistant_alias="阿璃",
+            )
+            session = service.memory.load("612475113", "group", character_id=current_character)
+            session.history = ["小冬: 早", "assistant: 早呀"]
+            service.memory.store.save(session)
+            card_name = service.generator.resolve_assistant_name("group", session)
+            self.assertNotEqual(card_name, "阿璃")
+            captured: dict[str, object] = {}
+
+            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                return "在的"
+
+            service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+            reply = service.handle_event(
+                InboundEvent(
+                    launcher_id="612475113",
+                    launcher_type="group",
+                    sender_id="783190298",
+                    sender_name="小夏",
+                    segments=[
+                        MessageSegment(kind="mention", mention_target="999"),
+                        MessageSegment(kind="text", text="阿璃在吗"),
+                    ],
+                )
+            )
+
+            self.assertIsNotNone(reply)
+            view = str(captured["conversation_view"])
+            self.assertIn(f"{card_name}: 早呀", view)
+            self.assertNotIn("阿璃: 早呀", view)
+            # The speaker's alias still drives the persona; it is explained in Speaker Notes.
+            self.assertEqual(captured["assistant_name"], "阿璃")
+            notes = [str(note) for note in captured["speaker_notes"]]  # type: ignore[union-attr]
+            self.assertTrue(any("「阿璃」" in note and f"「{card_name}」" in note for note in notes))
+
+    def test_history_window_char_budget_drops_oldest_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    history_window_messages=10,
+                    history_window_chars=60,
+                )
+            )
+            service.state_store.save_member(
+                {
+                    "group_id": "",
+                    "user_id": "783190298",
+                    "preferred_name": "tester",
+                    "onboarding_status": "ready",
+                }
+            )
+            captured: dict[str, str] = {}
+
+            def fake_generate_reply(event, session, emotion, **kwargs):  # type: ignore[no-untyped-def]
+                captured["conversation_view"] = str(kwargs.get("conversation_view", ""))
+                return "ok"
+
+            service.generator.generate_reply = fake_generate_reply  # type: ignore[method-assign]
+
+            for index in range(5):
+                service.handle_event(
+                    InboundEvent(
+                        launcher_id="783190298",
+                        launcher_type="person",
+                        sender_id="783190298",
+                        sender_name="tester",
+                        segments=[MessageSegment(kind="text", text=f"user-{index}-" + "x" * 20)],
+                    )
+                )
+
+            view = captured["conversation_view"]
+            self.assertLessEqual(len(view), 60)
+            self.assertIn("user-3-", view)
+            self.assertNotIn("user-0-", view)
+
+    def test_to_memory_text_drops_only_bot_self_mention(self) -> None:
+        event = InboundEvent(
+            launcher_id="612475113",
+            launcher_type="group",
+            sender_id="783190298",
+            sender_name="小夏",
+            segments=[
+                MessageSegment(kind="mention", mention_target="999", mention_display="极光"),
+                MessageSegment(kind="text", text="hi"),
+                MessageSegment(kind="mention", mention_target="888", mention_display="朋友"),
+            ],
+        )
+
+        self.assertEqual(event.to_memory_text(bot_account_id="999"), "hi@朋友")
+
+    def test_knowledge_query_only_sees_recent_conversation_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            event = InboundEvent(
+                launcher_id="612475113",
+                launcher_type="group",
+                sender_id="783190298",
+                sender_name="小夏",
+                segments=[MessageSegment(kind="text", text="我下周去杭州")],
+            )
+            session = service.memory.load("612475113", "group")
+            conversation_view = "\n".join(f"路人{index}: 闲聊-{index:02d}" for index in range(20))
+
+            prompt = service.generator._build_knowledge_query(
+                event,
+                session,
+                assistant_name="极光",
+                latest_message="我下周去杭州",
+                conversation_view=conversation_view,
+                address="小夏",
+                max_entries=3,
+            )
+
+            self.assertIn("闲聊-19", prompt)
+            self.assertIn("闲聊-12", prompt)
+            self.assertNotIn("闲聊-11", prompt)
 
     def test_session_preferred_name_is_resolved_from_directory(self) -> None:
         current_character = self.service._active_character_id()

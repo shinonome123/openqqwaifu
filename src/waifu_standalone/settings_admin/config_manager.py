@@ -77,15 +77,19 @@ class ConfigManager:
             image_command_prefix=str(raw.get("image_command_prefix", "鐢熷浘")),
             image_command_aliases=_load_str_list(raw.get("image_command_aliases"), ["鐢熷浘", "draw"]),
             ignore_prefixes=_load_str_list(raw.get("ignore_prefixes"), ["!", "/"]),
+            explicit_skill_prefixes=_load_str_list(raw.get("explicit_skill_prefixes"), ["/skill"]),
             group_follow_up_window_seconds=float(raw.get("group_follow_up_window_seconds", 5.0)),
             group_response_delay_seconds=float(raw.get("group_response_delay_seconds", 0.0)),
             repeat_trigger_count=int(raw.get("repeat_trigger_count", 0)),
             multimodal_enabled=bool(raw.get("multimodal_enabled", True)),
-            history_window_messages=int(raw.get("history_window_messages", 8)),
+            outbound_message_max_chars=int(raw.get("outbound_message_max_chars", 900)),
+            history_window_messages=int(raw.get("history_window_messages", 30)),
+            history_window_chars=int(raw.get("history_window_chars", 2500)),
             memory_recall_limit=int(raw.get("memory_recall_limit", 3)),
-            max_thinking_words=int(raw.get("max_thinking_words", 30)),
+            max_thinking_words=int(raw.get("max_thinking_words", 80)),
             short_term_memory_limit=int(raw.get("short_term_memory_limit", 30)),
             memory_summary_batch_size=int(raw.get("memory_summary_batch_size", 12)),
+            timezone=str(raw.get("timezone", "Asia/Shanghai") or "Asia/Shanghai").strip(),
             data_root=data_root,
             llm=llm,
             image_generation=image_generation,
@@ -217,6 +221,7 @@ def _load_tool_policy(raw_value: object) -> ToolPolicyConfig:
         exec_enabled=bool(raw_value.get("exec_enabled", defaults.exec_enabled)),
         exec_allowed_roots=_load_str_list(raw_value.get("exec_allowed_roots"), defaults.exec_allowed_roots),
         exec_allowlist=_load_str_list(raw_value.get("exec_allowlist"), defaults.exec_allowlist),
+        authorized_user_ids=_load_str_list(raw_value.get("authorized_user_ids"), defaults.authorized_user_ids),
     )
 
 
@@ -242,6 +247,9 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
         if not root.is_absolute() and config_path is not None:
             root = (config_path.parent / root).resolve()
         config.data_root = str(root)
+    timezone_name = _env_str("OPENQQWAIFU_TIMEZONE")
+    if timezone_name:
+        config.timezone = timezone_name
 
     plugins = config.plugins
     plugins.enabled = _env_bool("OPENQQWAIFU_PLUGINS_ENABLED", plugins.enabled)
@@ -277,6 +285,9 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     exec_allowlist = os.getenv("OPENQQWAIFU_TOOL_POLICY_EXEC_ALLOWLIST")
     if exec_allowlist is not None:
         tool_policy.exec_allowlist = _load_str_list(exec_allowlist, tool_policy.exec_allowlist)
+    authorized_user_ids = os.getenv("OPENQQWAIFU_TOOL_POLICY_AUTHORIZED_USER_IDS")
+    if authorized_user_ids is not None:
+        tool_policy.authorized_user_ids = _load_str_list(authorized_user_ids, tool_policy.authorized_user_ids)
 
     claw_runtime = config.claw_runtime
     claw_runtime.enabled = _env_bool("OPENQQWAIFU_CLAW_RUNTIME_ENABLED", claw_runtime.enabled)

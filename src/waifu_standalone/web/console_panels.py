@@ -47,6 +47,7 @@ class ConsolePanels:
             "repeat_trigger_count": svc.config.repeat_trigger_count,
             "multimodal_enabled": svc.config.multimodal_enabled,
             "history_window_messages": svc.config.history_window_messages,
+            "history_window_chars": svc.config.history_window_chars,
             "memory_recall_limit": svc.config.memory_recall_limit,
             "short_term_memory_limit": svc.config.short_term_memory_limit,
             "memory_summary_batch_size": svc.config.memory_summary_batch_size,

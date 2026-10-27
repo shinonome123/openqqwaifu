@@ -25,10 +25,11 @@ from waifu_standalone.cells.skill_registry import (
     build_skill_markdown_template,
     parse_skill_file,
 )
-from waifu_standalone.cells.tool_registry import ToolExecutionResult
+from waifu_standalone.cells.tool_registry import ToolExecutionResult, ToolInvocation
 from waifu_standalone.config import AppConfig, LLMConfig, ToolPolicyConfig
 from waifu_standalone.http_transport import HttpResponse
 from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment, SessionMemory
+from waifu_standalone.reply_flow.prompt_assembler import _TOOL_CALLING_SYSTEM_PROMPT
 from waifu_standalone.systems.searching import SearchResult
 
 
@@ -465,7 +466,8 @@ Use summarize for URLs.
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.images, ["generated://warm spring sky"])
-        self.assertIn("image-command", client.seen_tools)
+        # The image prefix runs the image skill directly, without a model tool call.
+        self.assertEqual(client.calls, 0)
         self.assertTrue(names)
         self.assertIn("直接生图", names)
 
@@ -988,6 +990,91 @@ Use summarize for URLs.
             {"forecast", "weather-lookup", "weather-check", "weather-forecast"},
         )
 
+    def test_naming_tools_expose_strict_persistence_instructions(self) -> None:
+        service, _ = build_default_service(AppConfig(bot_account_id="3518944354"))
+        event = InboundEvent(
+            launcher_id="612475113",
+            launcher_type="group",
+            sender_id="783190298",
+            sender_name="tester",
+            segments=[
+                MessageSegment(kind="mention", mention_target="3518944354"),
+                MessageSegment(kind="text", text=" 我想叫你小母牛了现在"),
+            ],
+        )
+        session = service.memory.save_user_event(event, character_id=service._active_character_id())
+        context = service.tool_orchestrator.exposure_context(
+            event,
+            session,
+            latest_message=event.command_text(service.config.bot_account_id),
+            address="爸爸",
+            assistant_name="大母牛",
+        )
+
+        schemas = {str(item["name"]): item for item in service.tools.model_schemas(context)}
+        assistant_alias_schema = schemas["set-assistant-alias"]
+        preferred_name_schema = schemas["set-preferred-name"]
+        alias_parameters = assistant_alias_schema["parameters"]
+        alias_properties = alias_parameters["properties"]  # type: ignore[index]
+        alias_parameter = alias_properties["assistant_alias"]  # type: ignore[index]
+
+        alias_description = str(assistant_alias_schema["description"])
+        self.assertIn("必须调用此工具", alias_description)
+        self.assertIn("我想叫你 xx", alias_description)
+        self.assertIn("我想叫你 xx 了现在", alias_description)
+        self.assertIn("不能只用角色语气口头答应", alias_description)
+        self.assertIn("覆盖旧别名", str(alias_parameter["description"]))  # type: ignore[index]
+        self.assertIn("必须调用此工具", str(preferred_name_schema["description"]))
+        self.assertIn("工具未调用成功前", _TOOL_CALLING_SYSTEM_PROMPT)
+        self.assertIn("不得说“我记住了”", _TOOL_CALLING_SYSTEM_PROMPT)
+
+    def test_high_risk_tools_require_authorized_user(self) -> None:
+        privileged_tools = {"exec-command", "read-file", "list-files", "write-file", "web-fetch"}
+        bot_id = "3956638110"
+
+        def mention_event(sender_id: str) -> InboundEvent:
+            return InboundEvent(
+                launcher_id="900001",
+                launcher_type="group",
+                sender_id=sender_id,
+                sender_name="member",
+                segments=[
+                    MessageSegment(kind="mention", mention_target=bot_id),
+                    MessageSegment(kind="text", text=" 帮我执行命令 python3 --version"),
+                ],
+            )
+
+        # Unauthorized sender: filesystem / command / network tools are withheld,
+        # while benign tools stay available.
+        service, _ = build_default_service(AppConfig(bot_account_id=bot_id))
+        unauth = service.tool_orchestrator._allowed_tool_ids(mention_event("30009"))
+        self.assertFalse(privileged_tools & unauth, msg=f"privileged tools leaked: {privileged_tools & unauth}")
+        self.assertIn("image", unauth)
+        self.assertIn("search", unauth)
+
+        # Execution layer refuses a withheld tool even if its id is emitted directly.
+        event = mention_event("30009")
+        session = service.memory.save_user_event(event, character_id=service._active_character_id())
+        blocked = service.tools.execute_model(
+            "exec-command",
+            ToolInvocation(
+                tool_id="exec-command",
+                raw_args="{}",
+                event=event,
+                session=session,
+                allowed_tool_ids=unauth,
+            ),
+        )
+        self.assertTrue(blocked.error)
+        self.assertIn("无权", blocked.error)
+
+        # Authorized sender: the same tools become available.
+        service2, _ = build_default_service(
+            AppConfig(bot_account_id=bot_id, tool_policy=ToolPolicyConfig(authorized_user_ids=["30009"]))
+        )
+        authed = service2.tool_orchestrator._allowed_tool_ids(mention_event("30009"))
+        self.assertTrue(privileged_tools <= authed, msg=f"authorized user missing tools: {privileged_tools - authed}")
+
     def test_skills_panel_exposes_normalized_capabilities_and_safety(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, _ = build_default_service(AppConfig(data_root=tmpdir))
@@ -1004,33 +1091,23 @@ Use summarize for URLs.
             self.assertIn("resolved_exec_allowed_roots", panel["safety"])
             self.assertGreaterEqual(len(panel["marketplace"]["sources"]), 3)
 
-    def test_slash_skill_command_no_longer_bypasses_tool_orchestrator(self) -> None:
+    def test_slash_skill_command_runs_with_default_ignore_prefixes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            skills_dir = Path(tmpdir) / "skills"
-            skills_dir.mkdir(parents=True, exist_ok=True)
-            (skills_dir / "skill.md").write_text(
-                """---
-name: summarize
-description: Summarize URLs and videos.
----
-Use summarize for URLs.
-""",
-                encoding="utf-8",
-            )
-            service, _ = build_default_service(AppConfig(data_root=tmpdir))
-            self._install_tool_client(
+            service, outbound = build_default_service(AppConfig(data_root=tmpdir))
+            self.assertIn("/", service.config.ignore_prefixes)
+            client = self._install_tool_client(
                 service,
                 tool_name="summarize-command",
                 arguments={"target": "https://example.com/post"},
                 final_text="slash skill execution completed.",
             )
-            service.dispatcher._invoke_summarize_cli = lambda target, invocation: (  # type: ignore[method-assign]
-                {
-                    "summary": "This came from slash skill execution.",
-                    "extracted": {"title": "Slash Skill"},
-                },
-                "",
-            )
+            cli_targets: list[str] = []
+
+            def fake_cli(target, invocation):  # type: ignore[no-untyped-def]
+                cli_targets.append(target)
+                return ({"summary": "This came from slash skill execution.", "extracted": {"title": "Slash Skill"}}, "")
+
+            service.dispatcher._invoke_summarize_cli = fake_cli  # type: ignore[method-assign]
 
             reply = service.handle_event(
                 InboundEvent(
@@ -1038,60 +1115,117 @@ Use summarize for URLs.
                     launcher_type="person",
                     sender_id="783190298",
                     sender_name="tester",
-                    segments=[
-                        MessageSegment(
-                            kind="text",
-                            text="/skill summarize https://example.com/post",
-                        )
-                    ],
+                    segments=[MessageSegment(kind="text", text="/skill summarize-command https://example.com/post")],
                 )
             )
 
-            self.assertIsNone(reply)
+            self.assertIsNotNone(reply)
+            self.assertEqual(cli_targets, ["https://example.com/post"])
+            # The command runs the tool directly; the model's tool loop is not consulted.
+            self.assertEqual(client.calls, 0)
+            self.assertEqual(len(outbound.sent), 1)
 
-    def test_ignored_slash_summarize_does_not_use_legacy_dispatch(self) -> None:
+    def test_other_slash_messages_are_still_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            skills_dir = Path(tmpdir) / "skills"
-            skills_dir.mkdir(parents=True, exist_ok=True)
-            document = Path(tmpdir) / "notes.txt"
-            document.write_text(
-                "OpenQQWaifu can now summarize local files without requiring the external summarize CLI.",
-                encoding="utf-8",
-            )
-            (skills_dir / "skill.md").write_text(
-                """---
-name: summarize
-description: Summarize URLs and files.
----
-Use summarize for URLs and files.
-""",
-                encoding="utf-8",
-            )
-            service, _ = build_default_service(AppConfig(data_root=tmpdir))
-            self._install_tool_client(
-                service,
-                tool_name="summarize-command",
-                arguments={"target": str(document)},
-                final_text="按 summarize 技能真的跑：without requiring the external summarize CLI.",
-            )
-            service.dispatcher._invoke_summarize_cli = lambda target, invocation: ({}, "当前运行时还没安装 summarize CLI。")  # type: ignore[method-assign]
+            service, outbound = build_default_service(AppConfig(data_root=tmpdir))
+            for text in ("/help", "/skill no-such-skill hi"):
+                reply = service.handle_event(
+                    InboundEvent(
+                        launcher_id="783190298",
+                        launcher_type="person",
+                        sender_id="783190298",
+                        sender_name="tester",
+                        segments=[MessageSegment(kind="text", text=text)],
+                    )
+                )
+                self.assertIsNone(reply, text)
+            self.assertEqual(outbound.sent, [])
 
-            reply = service.handle_event(
+    def test_slash_skill_command_respects_tool_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            secret = Path(tmpdir) / "secret.txt"
+            secret.write_text("TOKEN=do-not-leak", encoding="utf-8")
+            service, outbound = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    tool_policy=ToolPolicyConfig(allowed_roots=[tmpdir], authorized_user_ids=["10001"]),
+                )
+            )
+
+            def send(sender_id: str, text: str):  # type: ignore[no-untyped-def]
+                return service.handle_event(
+                    InboundEvent(
+                        launcher_id=sender_id,
+                        launcher_type="person",
+                        sender_id=sender_id,
+                        sender_name="tester",
+                        segments=[MessageSegment(kind="text", text=text)],
+                    )
+                )
+
+            for command in (f"/skill read-file-command {secret}", f"/skill summarize-command {secret}"):
+                denied = send("783190298", command)
+                assert denied is not None
+                self.assertNotIn("do-not-leak", denied.text, command)
+            self.assertFalse(any("do-not-leak" in message.text for message in outbound.sent))
+
+            allowed = send("10001", f"/skill read-file-command {secret}")
+            assert allowed is not None
+            self.assertIn("do-not-leak", allowed.text)
+
+    def test_chinese_image_prefix_generates_without_model_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            client = self._install_tool_client(service, tool_name="search-command", arguments={"query": "x"})
+
+            result = service.handle_event(
                 InboundEvent(
                     launcher_id="783190298",
                     launcher_type="person",
                     sender_id="783190298",
                     sender_name="tester",
-                    segments=[
-                        MessageSegment(
-                            kind="text",
-                            text=f"/skill summarize {document}",
-                        )
-                    ],
+                    segments=[MessageSegment(kind="text", text="生图 一只橘猫在窗台上")],
                 )
             )
 
-            self.assertIsNone(reply)
+            assert result is not None
+            self.assertEqual(result.images, ["generated://一只橘猫在窗台上"])
+            self.assertEqual(client.calls, 0)
+
+    def test_image_prefix_needs_a_word_boundary_for_ascii_aliases(self) -> None:
+        service, _ = build_default_service()
+        extract = service.dispatcher.extract_image_prompt
+        self.assertEqual(extract("draw a cat"), "a cat")
+        self.assertEqual(extract("Draw: a cat"), "a cat")
+        self.assertIsNone(extract("drawing is fun"))
+        self.assertEqual(extract("生图一只猫"), "一只猫")
+
+    def test_base_tools_are_exposed_whatever_the_keyword_ranking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_default_service(AppConfig(data_root=tmpdir, max_active_skills=1))
+            event = InboundEvent(
+                launcher_id="783190298",
+                launcher_type="person",
+                sender_id="783190298",
+                sender_name="tester",
+                segments=[MessageSegment(kind="text", text="出门要带伞吗")],
+            )
+            session = service.memory.save_user_event(event, character_id=service._active_character_id())
+            context = service.tool_orchestrator.exposure_context(
+                event,
+                session,
+                latest_message="出门要带伞吗",
+                address="tester",
+                assistant_name="极光",
+            )
+
+            names = {str(item["name"]) for item in service.tools.model_schemas(context)}
+            self.assertLessEqual({"weather-command", "search-command", "summarize-command"}, names)
+            # Prompt skill cards are still limited to the ranked candidates.
+            self.assertEqual(len(service.tool_orchestrator.prompt_skill_cards("出门要带伞吗")), 1)
+            # High-risk tools stay behind the authorization gate.
+            self.assertNotIn("read-file-command", names)
+            self.assertNotIn("exec-command", names)
 
     def test_explicit_weather_skill_dispatches_real_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1341,7 +1475,12 @@ Read files with the read alias.
 """,
                 encoding="utf-8",
             )
-            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    tool_policy=ToolPolicyConfig(authorized_user_ids=["783190298"]),
+                )
+            )
             self._install_tool_client(
                 service,
                 tool_name="read-command",
@@ -1530,7 +1669,15 @@ Write a file using structured arguments.
 """,
                 encoding="utf-8",
             )
-            service, _ = build_default_service(AppConfig(data_root=tmpdir))
+            service, _ = build_default_service(
+                AppConfig(
+                    data_root=tmpdir,
+                    tool_policy=ToolPolicyConfig(
+                        write_enabled=True,
+                        authorized_user_ids=["783190298"],
+                    ),
+                )
+            )
             self._install_tool_client(
                 service,
                 tool_name="json-write",
@@ -1586,6 +1733,8 @@ Write a file using structured arguments.
                     tool_policy=ToolPolicyConfig(
                         allowed_roots=["data"],
                         write_allowed_roots=["data"],
+                        write_enabled=True,
+                        authorized_user_ids=["783190298"],
                     ),
                 )
             )
@@ -1621,7 +1770,7 @@ Write a file using structured arguments.
             service, _ = build_default_service(
                 AppConfig(
                     data_root=tmpdir,
-                    tool_policy=ToolPolicyConfig(exec_allowlist=["python"]),
+                    tool_policy=ToolPolicyConfig(exec_allowlist=["python"], exec_enabled=True),
                 )
             )
 

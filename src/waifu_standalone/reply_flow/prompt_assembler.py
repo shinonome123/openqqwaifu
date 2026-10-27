@@ -11,9 +11,23 @@ from ..contracts import GeneratedImage
 from ..character import CardManager, CharacterCard
 from ..models import EmotionState, InboundEvent, SessionMemory
 from ..infra import ImageClient, LLMClient, build_image_client, build_llm_client
+from ..infra.clock import format_prompt_time, local_now
 from ..infra.image_clients import ImageClientError
 from ..infra.llm_clients import LLMClientError
+from ..memory import ROLLING_SUMMARY_KEY, clip_rolling_summary
 from ..skills import SkillSpec, ToolExecutionResult, ToolExposureContext, ToolInvocation, ToolRegistry
+
+
+_TOOL_CALLING_SYSTEM_PROMPT = (
+    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
+    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
+    "如果工具返回 display_mode=raw_block，最终回复可以有角色语气承接，但原始结果必须保留在代码块中。"
+    "凡是涉及保存、修改、记住称呼、用户称呼、机器人别名、偏好或长期状态的请求，"
+    "必须先调用对应工具；工具未调用成功前，不得说“我记住了”“以后就叫我”“以后我叫你”或类似承诺。"
+)
+# The reply window can hold ~30 lines of group chatter; extraction only needs the
+# lines right before the latest message, so facts are not pinned on the wrong speaker.
+_KNOWLEDGE_CONTEXT_LINES = 8
 
 
 @dataclass(slots=True)
@@ -62,6 +76,9 @@ class Generator:
     def resolve_assistant_name(self, launcher_type: str, session: SessionMemory) -> str:
         card = self._cards.load(launcher_type, session)
         return card.assistant_name or self.config.assistant_name
+
+    def _prompt_time(self) -> str:
+        return format_prompt_time(local_now(self.config.timezone), self.config.timezone)
 
     @staticmethod
     def _card_with_assistant_name(card: CharacterCard, assistant_name: str) -> CharacterCard:
@@ -128,7 +145,7 @@ class Generator:
                 )
                 cleaned = self._clean_response(response)
                 if cleaned:
-                    return self._clip(cleaned, limit=self.config.max_thinking_words)
+                    return self._clip_at_sentence(cleaned, limit=self.config.max_thinking_words)
             except LLMClientError:
                 pass
         if allow_fallback:
@@ -187,7 +204,7 @@ class Generator:
                 )
                 cleaned = self._clean_response(response)
                 if cleaned:
-                    return self._clip(cleaned, limit=self.config.max_thinking_words)
+                    return self._clip_at_sentence(cleaned, limit=self.config.max_thinking_words)
             except LLMClientError:
                 pass
         if allow_fallback:
@@ -469,14 +486,12 @@ class Generator:
         if self._tools is None:
             raise LLMClientError("tool registry is not bound")
         tools = self._tools.model_schemas(tool_context)
+        # The model can call any exposed skill, not only the ranked prompt cards.
+        invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
-                    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
-                    "如果工具返回 display_mode=raw_block，最终回复可以有角色语气承接，但原始结果必须保留在代码块中。"
-                ),
+                "content": _TOOL_CALLING_SYSTEM_PROMPT,
             },
             {"role": "user", "content": prompt},
         ]
@@ -499,8 +514,9 @@ class Generator:
                     session=session,
                     address=address,
                     assistant_name=assistant_name,
-                    active_skills=active_skills,
+                    active_skills=invocation_skills,
                     arguments=tool_call.arguments,
+                    allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
                 result = self._tools.execute_model(tool_call.tool_name, invocation)
                 tool_turns.append(self._tool_turn_record(tool_call.tool_name, tool_call.arguments, result))
@@ -538,14 +554,12 @@ class Generator:
         if self._tools is None:
             raise LLMClientError("tool registry is not bound")
         tools = self._tools.model_schemas(tool_context)
+        # The model can call any exposed skill, not only the ranked prompt cards.
+        invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "如果需要最新事实、读取内容、联网获取信息或执行具体能力，"
-                    "必须优先调用工具，不能假装已经执行。工具返回后，再自然地用中文完成最终回复。"
-                    "如果工具返回 display_mode=raw_block，最终回复可以有角色语气承接，但原始结果必须保留在代码块中。"
-                ),
+                "content": _TOOL_CALLING_SYSTEM_PROMPT,
             },
             {"role": "user", "content": prompt},
         ]
@@ -568,8 +582,9 @@ class Generator:
                     session=session,
                     address=address,
                     assistant_name=assistant_name,
-                    active_skills=active_skills,
+                    active_skills=invocation_skills,
                     arguments=tool_call.arguments,
+                    allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
                 result = await self._tools.aexecute_model(tool_call.tool_name, invocation)
                 tool_turns.append(self._tool_turn_record(tool_call.tool_name, tool_call.arguments, result))
@@ -681,6 +696,33 @@ class Generator:
             except LLMClientError:
                 pass
         return self._fallback_summary(history_lines)
+
+    def summarize_rolling(
+        self,
+        history_lines: list[str],
+        *,
+        previous_summary: str,
+        assistant_name: str,
+    ) -> str:
+        """Merge archived history lines into the session's rolling summary."""
+        if not history_lines:
+            return previous_summary
+        if self.llm_ready:
+            prompt = self._build_rolling_summary_query(
+                history_lines,
+                previous_summary=previous_summary,
+                assistant_name=assistant_name,
+            )
+            try:
+                response = self._dify_client.invoke(prompt, user="rolling-summary")
+                cleaned = self._clean_response(response)
+                if cleaned:
+                    return clip_rolling_summary(cleaned)
+            except LLMClientError:
+                pass
+        fallback, _ = self._fallback_summary(history_lines)
+        merged = "；".join(part for part in (previous_summary.strip(), fallback) if part)
+        return clip_rolling_summary(merged)
 
     async def asummarize_history(
         self,
@@ -1337,6 +1379,7 @@ class Generator:
     ) -> str:
         lines = [
             f"你是{assistant_name}，正在分析当前对话。",
+            f"当前时间：{self._prompt_time()}",
             f"用户称呼倾向：{address}",
             f"当前最新消息：{latest_message}",
             f"角色设定摘要：{'；'.join(card.profile[:3]) or '无'}",
@@ -1382,6 +1425,8 @@ class Generator:
             conversation_view=conversation_view,
             speaker_notes=speaker_notes,
             latest_message=latest_message,
+            current_time=self._prompt_time(),
+            earlier_summary=str(session.metadata.get(ROLLING_SUMMARY_KEY, "") or "").strip(),
         )
         prompt_parts = [
             system_prompt,
@@ -1430,6 +1475,7 @@ class Generator:
             conversation_view=conversation_view,
             speaker_notes=[],
             latest_message=latest_message,
+            current_time=self._prompt_time(),
         )
         parts = [system_prompt, "[Onboarding]"]
         if stage == "ask_name":
@@ -1655,8 +1701,9 @@ class Generator:
             conversation_view="",
             speaker_notes=[],
             latest_message=latest_message,
+            current_time=self._prompt_time(),
         )
-        preview = self._clip(result.text or result.error or "", limit=1200)
+        preview = self._clip_multiline(result.text or result.error or "", limit=1200)
         metadata_preview = self._clip(
             json.dumps(result.metadata, ensure_ascii=False, default=str) if result.metadata else "",
             limit=800,
@@ -1704,6 +1751,27 @@ class Generator:
             f"[History]\n{payload}"
         )
 
+    def _build_rolling_summary_query(
+        self,
+        history_lines: list[str],
+        *,
+        previous_summary: str,
+        assistant_name: str,
+    ) -> str:
+        transcript = self._conversation_excerpt(
+            history_lines,
+            assistant_name=assistant_name,
+            limit=len(history_lines),
+        )
+        return (
+            f"你在为{assistant_name}整理更早的聊天记录，供之后回忆前情。\n"
+            "把「已有摘要」和「新的对话」合并成一段新的摘要：中文，不超过 300 字，按时间顺序；"
+            "保留谁说了什么、约定、正在讨论的话题和没解决的问题；具体日期照原文写，不要编造。"
+            "只输出摘要正文，不要标题、列表或解释。\n\n"
+            f"[已有摘要]\n{previous_summary.strip() or '无'}\n\n"
+            f"[新的对话]\n{transcript}"
+        )
+
     def _build_knowledge_query(
         self,
         event: InboundEvent,
@@ -1729,6 +1797,10 @@ class Generator:
             "Ignore greetings, transient commands, image requests, search requests, onboarding name collection, and meta instructions.",
             "Do not store preferred-name requests or the fact that the assistant asked for onboarding.",
             "The summary must be concise and self-contained.",
+            (
+                f"Today is {local_now(self.config.timezone):%Y-%m-%d (%A)}. Write dates in summaries as "
+                "absolute dates (YYYY-MM-DD); never keep relative words such as 今天, 明天, 下周三."
+            ),
             f"Speaker display name: {address or event.sender_name or event.sender_id}",
             f"Launcher type: {event.launcher_type}",
             f"Latest message: {latest_message}",
@@ -1736,8 +1808,9 @@ class Generator:
         profile_lines = [line for line in card.profile[:3] if str(line or "").strip()]
         if profile_lines:
             lines.append("Persona profile: " + " | ".join(profile_lines))
-        if conversation_view:
-            lines.append("[Recent conversation]\n" + conversation_view)
+        recent_lines = conversation_view.splitlines()[-_KNOWLEDGE_CONTEXT_LINES:] if conversation_view else []
+        if recent_lines:
+            lines.append("[Recent conversation]\n" + "\n".join(recent_lines))
         return "\n\n".join(lines)
 
     def _fallback_reply(
@@ -2385,12 +2458,26 @@ class Generator:
         }
 
     @staticmethod
+    def _merge_skills(first: list[SkillSpec], second: list[SkillSpec]) -> list[SkillSpec]:
+        merged = list(first)
+        seen = {skill.skill_id for skill in merged}
+        for skill in second:
+            if skill.skill_id not in seen:
+                seen.add(skill.skill_id)
+                merged.append(skill)
+        return merged
+
+    @staticmethod
     def _append_raw_tool_blocks(text: str, results: list[ToolExecutionResult]) -> str:
         lead = str(text or "").strip()
+        lead_compact = " ".join(lead.split())
         blocks: list[str] = []
         for result in results:
             payload = str(result.text or result.error or "").strip()
             if not payload:
+                continue
+            # The model already quoted the raw result itself; do not send it twice.
+            if " ".join(payload.split()) in lead_compact:
                 continue
             block = "```text\n" + payload + "\n```"
             if block not in blocks:
@@ -2405,7 +2492,8 @@ class Generator:
         if not isinstance(item, dict):
             return None
         memory_type = str(item.get("memory_type", "") or "").strip().lower() or "fact"
-        if memory_type not in {"fact", "preference", "relationship", "event", "summary"}:
+        # "summary" is reserved for archived chat history and is never recalled.
+        if memory_type not in {"fact", "preference", "relationship", "event"}:
             memory_type = "fact"
         scope_hint = str(item.get("scope_hint", "") or "").strip().lower() or "member"
         if scope_hint not in {"member", "group", "person", "global"}:
@@ -2491,9 +2579,13 @@ class Generator:
 
     @staticmethod
     def _clean_response(text: str) -> str:
-        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-        normalized = normalized.replace("<think>", "").replace("</think>", "").strip()
-        return normalized
+        # Keep the model's line breaks (lists, code blocks); only tidy spaces and blank lines.
+        normalized = str(text or "").replace("<think>", "").replace("</think>", "")
+        normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"(?<=\S)[ \t]+", " ", normalized)
+        normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
 
     @staticmethod
     def _asks_for_name(text: str) -> bool:
@@ -2507,6 +2599,18 @@ class Generator:
         if len(normalized) <= limit:
             return normalized
         return normalized[:limit].rstrip() + "..."
+
+    @staticmethod
+    def _clip_at_sentence(text: str, limit: int) -> str:
+        """Clip to ``limit`` chars, preferring to end on a sentence boundary."""
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(normalized) <= limit:
+            return normalized
+        head = normalized[:limit]
+        cut = max(head.rfind(mark) for mark in "。！？!?；;")
+        if cut + 1 >= limit // 2:
+            return head[: cut + 1]
+        return head.rstrip() + "…"
 
     @staticmethod
     def _clip_multiline(text: str, limit: int = 700) -> str:

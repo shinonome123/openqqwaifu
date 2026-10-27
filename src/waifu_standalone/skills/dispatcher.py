@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote_plus, urlparse
 
 from ..infra import AsyncHttpTransport, SyncHttpTransport, TransportError
+from ..infra.safe_fetch import afetch_public_url, check_public_url, fetch_public_url
 from ..models import InboundEvent, OutboundMessage, SessionMemory
 from .messages import t
 from .registry import SkillSpec
@@ -104,13 +105,44 @@ class SkillDispatcher:
         normalized = " ".join(str(text or "").split()).strip()
         if not normalized:
             return None
-        slash_match = re.match(r"^\s*/skill\s+(?P<skill>[^\s:]+)(?:[\s:]+(?P<args>.*))?$", normalized, flags=re.IGNORECASE)
-        if slash_match is not None:
+        for prefix in self._service.config.explicit_skill_prefixes:
+            cleaned_prefix = str(prefix or "").strip()
+            if not cleaned_prefix:
+                continue
+            slash_match = re.match(
+                rf"^{re.escape(cleaned_prefix)}\s+(?P<skill>[^\s:]+)(?:[\s:]+(?P<args>.*))?$",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            if slash_match is None:
+                continue
             skill_name = str(slash_match.group("skill") or "").strip()
             skill = self._service.skills.find_by_name_or_id(skill_name)
             if skill is not None and skill.user_invocable:
                 raw_args = str(slash_match.group("args") or "").strip()
                 return skill, raw_args
+        return None
+
+    def resolve_image_command(self, text: str) -> tuple[SkillSpec, str] | None:
+        """``生图 一只猫``: the image prefix runs the image skill directly, not via the model."""
+        service = self._service
+        if not service.config.skills_enabled:
+            return None
+        prompt = self.extract_image_prompt(text)
+        if not prompt:
+            return None
+        # Live replies must not send the offline placeholder image.
+        if service._requires_live_llm() and not service.generator.image_ready:
+            return None
+        for skill in service.skills.list_skills():
+            if (
+                skill.enabled
+                and skill.eligible
+                and not skill.validation_errors
+                and skill.is_tool_handler
+                and skill.handler_target == "image"
+            ):
+                return skill, prompt
         return None
 
     def dispatch_skill(
@@ -864,7 +896,8 @@ class SkillDispatcher:
             return self._emit_tool_execution_result(invocation, self.use_summarize_tool(invocation))
         service = self._service
         target = self._extract_summarize_target(
-            invocation.raw_args or invocation.event.command_text(service.config.bot_account_id)
+            invocation.raw_args or invocation.event.command_text(service.config.bot_account_id),
+            allow_local=service.tool_orchestrator._is_tool_authorized(invocation.event),
         )
         if not target:
             message = OutboundMessage(
@@ -1154,7 +1187,8 @@ class SkillDispatcher:
     def use_summarize_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
         service = self._service
         target = self._extract_summarize_target(
-            str(invocation.argument("target") or invocation.raw_args or invocation.event.command_text(service.config.bot_account_id))
+            str(invocation.argument("target") or invocation.raw_args or invocation.event.command_text(service.config.bot_account_id)),
+            allow_local=service.tool_orchestrator._is_tool_authorized(invocation.event),
         )
         if not target:
             return ToolExecutionResult(error="missing target", text="请提供要总结的链接或文件路径。")
@@ -1324,17 +1358,14 @@ class SkillDispatcher:
         url = self._normalized_tool_text(invocation.argument("url") or invocation.raw_args)
         if not re.match(r"^https?://", url, flags=re.IGNORECASE):
             return ToolExecutionResult(error="missing url", text="请提供 http 或 https 链接。")
-        transport = SyncHttpTransport(timeout_seconds=max(5.0, float(self._service.config.search_timeout_seconds or 8.0)))
         try:
-            response = transport.request(
-                "GET",
+            response = fetch_public_url(
                 url,
+                timeout_seconds=self._fetch_timeout_seconds(),
                 headers={"User-Agent": "openqqwaifu-tool-fetch/1.0", "Accept": "text/html,application/json,text/plain,*/*"},
             )
         except TransportError as exc:
             return ToolExecutionResult(error=str(exc), text=f"网页抓取失败：{exc}")
-        finally:
-            transport.close()
         text, title = self._normalize_web_document(response.text)
         max_chars = self._bounded_int(invocation.argument("max_chars"), default=2400, minimum=200, maximum=12000)
         clipped = self._service.generator._clip(text, limit=max_chars)
@@ -1350,6 +1381,7 @@ class SkillDispatcher:
                 "title": title,
                 "status_code": response.status_code,
                 "content_type": response.headers.get("content-type", ""),
+                "truncated": response.truncated,
             },
             display_mode="raw_block",
         )
@@ -1358,17 +1390,14 @@ class SkillDispatcher:
         url = self._normalized_tool_text(invocation.argument("url") or invocation.raw_args)
         if not re.match(r"^https?://", url, flags=re.IGNORECASE):
             return ToolExecutionResult(error="missing url", text="请提供 http 或 https 链接。")
-        transport = AsyncHttpTransport(timeout_seconds=max(5.0, float(self._service.config.search_timeout_seconds or 8.0)))
         try:
-            response = await transport.request(
-                "GET",
+            response = await afetch_public_url(
                 url,
+                timeout_seconds=self._fetch_timeout_seconds(),
                 headers={"User-Agent": "openqqwaifu-tool-fetch/1.0", "Accept": "text/html,application/json,text/plain,*/*"},
             )
         except TransportError as exc:
             return ToolExecutionResult(error=str(exc), text=f"网页抓取失败：{exc}")
-        finally:
-            transport.close()
         text, title = self._normalize_web_document(response.text)
         max_chars = self._bounded_int(invocation.argument("max_chars"), default=2400, minimum=200, maximum=12000)
         clipped = self._service.generator._clip(text, limit=max_chars)
@@ -1384,6 +1413,7 @@ class SkillDispatcher:
                 "title": title,
                 "status_code": response.status_code,
                 "content_type": response.headers.get("content-type", ""),
+                "truncated": response.truncated,
             },
             display_mode="raw_block",
         )
@@ -1559,10 +1589,12 @@ class SkillDispatcher:
         if not stripped:
             return None
         for prefix in self._image_command_prefixes():
+            # An ASCII prefix must end at a word boundary: "draw a cat", not "drawing".
+            boundary = r"(?![A-Za-z0-9])" if prefix[-1].isascii() and prefix[-1].isalnum() else ""
             match = re.match(
-                rf"^\s*{re.escape(prefix)}\s*(?:\:|\uFF1A)?\s*(.*?)\s*$",
+                rf"^\s*{re.escape(prefix)}{boundary}\s*(?:\:|\uFF1A)?\s*(.*?)\s*$",
                 stripped,
-                flags=re.DOTALL,
+                flags=re.DOTALL | re.IGNORECASE,
             )
             if match:
                 prompt = re.sub(r"\s+", " ", match.group(1)).strip()
@@ -1630,6 +1662,9 @@ class SkillDispatcher:
         payload = str(result.text or result.error or _skill_text("skill.tool_empty_result")).strip()
         if result.display_mode != "raw_block":
             return lead or payload
+        # The rendered reply already quotes the raw result; do not send it twice.
+        if lead and " ".join(payload.split()) in " ".join(lead.split()):
+            return lead
         block = "```text\n" + payload + "\n```"
         if not lead:
             return block
@@ -1740,7 +1775,11 @@ class SkillDispatcher:
         tool_id: str = "",
     ) -> ToolInvocation:
         normalized_tool_id = str(tool_id or skill.command_tool or "").strip().lower()
-        parsed_arguments = self._parse_command_arguments(raw_args, mode=skill.command_arg_mode)
+        parsed_arguments = self._fill_single_required_argument(
+            skill,
+            self._parse_command_arguments(raw_args, mode=skill.command_arg_mode),
+            raw_args,
+        )
         skill_cards = [skill]
         seen_skill_ids = {skill.skill_id}
         for item in active_skills:
@@ -1758,7 +1797,33 @@ class SkillDispatcher:
             assistant_name=assistant_name,
             active_skills=skill_cards,
             arguments=parsed_arguments,
+            # Commands go through the same authorization gate as model tool calls.
+            allowed_tool_ids=self._service.tool_orchestrator._allowed_tool_ids(event),
         )
+
+    @staticmethod
+    def _fill_single_required_argument(
+        skill: SkillSpec,
+        arguments: dict[str, object],
+        raw_args: str,
+    ) -> dict[str, object]:
+        """``/skill weather-command 上海``: bare text fills the skill's one required string field."""
+        text = str(raw_args or "").strip()
+        if arguments or not text:
+            return arguments
+        schema = skill.input_schema if isinstance(skill.input_schema, dict) else {}
+        required = schema.get("required", [])
+        names = [str(name).strip() for name in required if str(name).strip()] if isinstance(required, list) else []
+        if len(names) != 1:
+            return arguments
+        properties = schema.get("properties", {})
+        spec = properties.get(names[0], {}) if isinstance(properties, dict) else {}
+        if isinstance(spec, dict) and str(spec.get("type") or "string") != "string":
+            return arguments
+        return {names[0]: text}
+
+    def _fetch_timeout_seconds(self) -> float:
+        return max(5.0, float(self._service.config.search_timeout_seconds or 8.0))
 
     @staticmethod
     def _normalized_tool_text(raw: object) -> str:
@@ -1992,14 +2057,16 @@ class SkillDispatcher:
         return any(re.match(pattern, normalized) for pattern in patterns)
 
     @staticmethod
-    def _extract_summarize_target(raw_args: str) -> str:
+    def _extract_summarize_target(raw_args: str, *, allow_local: bool = False) -> str:
         text = " ".join(str(raw_args or "").split()).strip()
         if not text:
             return ""
         url_match = re.search(r"https?://\S+", text, flags=re.IGNORECASE)
         if url_match is not None:
             return url_match.group(0).rstrip(".,!?)]}>'\"”」")
-        if os.path.exists(text):
+        # Local files (.env, config with API keys …) are only for authorized users;
+        # for anyone else a path is treated like any other text, so existence is not revealed.
+        if allow_local and os.path.exists(text):
             return text
         return ""
 
@@ -2012,6 +2079,12 @@ class SkillDispatcher:
         cli = shutil.which("summarize")
         if not cli:
             return {}, "当前运行时还没安装 summarize CLI。"
+        if re.match(r"^https?://", target, flags=re.IGNORECASE):
+            # The CLI follows redirects on its own; only the first hop can be checked here.
+            try:
+                check_public_url(target)
+            except TransportError as exc:
+                return {}, f"网页抓取失败：{exc}"
         command = [
             cli,
             target,
@@ -2062,6 +2135,9 @@ class SkillDispatcher:
         *,
         invocation: ToolInvocation,
     ) -> tuple[dict[str, object], str]:
+        is_url = re.match(r"^https?://", target, flags=re.IGNORECASE) is not None
+        if not is_url and not self._service.tool_orchestrator._is_tool_authorized(invocation.event):
+            return {}, "本地文件只对授权用户开放。"
         payload, error = self._invoke_summarize_cli(target, invocation=invocation)
         if not error:
             return payload, ""
@@ -2123,11 +2199,10 @@ class SkillDispatcher:
 
     def _load_summarize_source(self, target: str) -> tuple[str, str, dict[str, object], str]:
         if re.match(r"^https?://", target, flags=re.IGNORECASE):
-            transport = SyncHttpTransport(timeout_seconds=max(5.0, float(self._service.config.search_timeout_seconds or 8.0)))
             try:
-                response = transport.request(
-                    "GET",
+                response = fetch_public_url(
                     target,
+                    timeout_seconds=self._fetch_timeout_seconds(),
                     headers={
                         "User-Agent": "openqqwaifu-summarize/1.0",
                         "Accept": "text/html,application/json,text/plain,*/*",
@@ -2135,8 +2210,6 @@ class SkillDispatcher:
                 )
             except TransportError as exc:
                 return "", "", {}, f"网页抓取失败：{exc}"
-            finally:
-                transport.close()
             content, title = self._normalize_web_document(response.text)
             clipped = self._service.generator._clip(content, limit=16000)
             if not clipped:

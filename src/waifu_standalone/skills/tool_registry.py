@@ -23,6 +23,9 @@ class ToolInvocation:
     assistant_name: str = ""
     active_skills: list[SkillSpec] = field(default_factory=list)
     arguments: dict[str, object] = field(default_factory=dict)
+    # Tool ids the current turn is allowed to execute. None means "no restriction"
+    # (non-model paths and tests); an empty/limited set is enforced in execute_model.
+    allowed_tool_ids: set[str] | None = None
 
     def argument(self, name: str, default: Any = None) -> Any:
         return self.arguments.get(str(name or "").strip(), default)
@@ -238,8 +241,28 @@ class ToolRegistry:
             return await spec.async_handler(invocation)
         return await asyncio.to_thread(spec.handler, invocation)
 
+    def _execution_blocked(self, tool_id: str, skill: SkillSpec | None, invocation: ToolInvocation) -> ToolExecutionResult | None:
+        """Hard gate: only tools exposed to this turn may run.
+
+        ``allowed_tool_ids`` is the same allow-set used to build the model-visible
+        tool schema. Enforcing it here closes the raw-tool-id bypass, so a tool
+        that was withheld from the model (e.g. a high-risk tool for an
+        unauthorized user) cannot be executed even if its name is emitted.
+        """
+        allowed = invocation.allowed_tool_ids
+        if allowed is None:
+            return None
+        target = str(skill.handler_target if skill is not None else tool_id or "").strip()
+        resolved = self._resolve_tool_id(target) or self._resolve_tool_id(tool_id)
+        if not resolved or resolved not in allowed:
+            return ToolExecutionResult(error="当前身份无权在本次会话调用该工具。")
+        return None
+
     def execute_model(self, tool_id: str, invocation: ToolInvocation) -> ToolExecutionResult:
         skill = _manifest_for_tool_call(tool_id, invocation.active_skills)
+        blocked = self._execution_blocked(tool_id, skill, invocation)
+        if blocked is not None:
+            return blocked
         if skill is not None:
             from .executor import SkillExecutor
 
@@ -253,6 +276,9 @@ class ToolRegistry:
 
     async def aexecute_model(self, tool_id: str, invocation: ToolInvocation) -> ToolExecutionResult:
         skill = _manifest_for_tool_call(tool_id, invocation.active_skills)
+        blocked = self._execution_blocked(tool_id, skill, invocation)
+        if blocked is not None:
+            return blocked
         if skill is not None:
             from .executor import SkillExecutor
 
@@ -338,7 +364,7 @@ def _default_parameters_schema() -> dict[str, object]:
 
 def _normalize_risk_level(value: str) -> str:
     normalized = str(value or "safe").strip().lower()
-    if normalized in {"safe", "filesystem", "command", "mutating"}:
+    if normalized in {"safe", "filesystem", "command", "mutating", "network"}:
         return normalized
     return "safe"
 

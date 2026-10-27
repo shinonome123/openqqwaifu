@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ from ..gateways.onebot_actions import OneBotActionClient, OneBotHttpOutboundPort
 from ..gateways.onebot_ws import OneBotWsGateway, OneBotWsOutboundPort
 from ..infra import AsyncRuntime, ClawRuntimeBridge, build_claw_runtime_bridge
 from ..infra import MetricsRegistry, logging_is_configured, set_active_metrics_registry
-from ..memory import FileMemoryStore, InMemoryStore, KnowledgeService, Memory, MemoryGraphBuilder
+from ..memory import ROLLING_SUMMARY_KEY, FileMemoryStore, InMemoryStore, KnowledgeService, Memory, MemoryGraphBuilder
 from ..memory_admin import MemoryAdminService
 from ..members import MemberOnboarding, MemberService, NamingIntentRouter, PersonaGuard
 from ..models import EmotionState, InboundEvent, MessageSegment, OutboundMessage, SessionMemory
@@ -40,6 +41,7 @@ from ..repositories import (
     SessionRepository,
     SqliteRuntimeStateStore,
 )
+from ..repositories.runtime_state import _extract_terms as extract_match_terms
 from ..settings_admin import SettingsAdminService
 from ..settings_admin.config_manager import ConfigManager, serialize_app_config
 from ..skills import (
@@ -145,6 +147,11 @@ class WaifuService:
     _recent_outbound: list[OutboundMessage] = field(default_factory=list)
     _recent_events: list[dict[str, Any]] = field(default_factory=list)
     _recent_behavior_events: list[dict[str, Any]] = field(default_factory=list)
+    # Group messages that did not trigger a reply yet. They are kept in memory
+    # (not persisted per message) and merged into session history on the next reply.
+    _ambient_history: dict[tuple[str, str, str], deque[str]] = field(default_factory=dict, repr=False)
+    # Sessions with a background archive running, so replies do not queue duplicates.
+    _archive_inflight: set[tuple[str, str, str]] = field(default_factory=set, repr=False)
     _started_at: float = field(default_factory=time.monotonic, repr=False)
     _event_counter: int = 0
     _state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -254,10 +261,13 @@ class WaifuService:
     _SESSION_LOCKS_MAX = 512
 
     def _session_lock_for(self, event: InboundEvent) -> threading.Lock:
+        return self._session_lock_for_key(self._active_character_id(), event.launcher_type, event.launcher_id)
+
+    def _session_lock_for_key(self, character_id: str, launcher_type: str, launcher_id: str) -> threading.Lock:
         key = (
-            self._active_character_id(),
-            str(event.launcher_type or "").strip(),
-            str(event.launcher_id or "").strip(),
+            str(character_id or "").strip(),
+            str(launcher_type or "").strip(),
+            str(launcher_id or "").strip(),
         )
         with self._state_lock:
             lock = self._session_locks.get(key)
@@ -467,7 +477,7 @@ class WaifuService:
         )
         self._track_async_task("knowledge_writeback", task)
 
-    def _archive_if_needed(
+    def _schedule_archive(
         self,
         launcher_id: str,
         launcher_type: str,
@@ -475,77 +485,70 @@ class WaifuService:
         assistant_name: str,
         character_id: str = "",
     ) -> None:
-        if not self.config.summarization_mode:
-            return
-        archived = self.memory.maybe_archive_history(
-            launcher_id,
-            launcher_type,
-            max_history_lines=self.config.short_term_memory_limit,
-            batch_size=self.config.memory_summary_batch_size,
-            summarizer=lambda history_lines: self.generator.summarize_history(
-                history_lines,
-                assistant_name=assistant_name,
-            ),
-            character_id=str(character_id or self._active_character_id()).strip(),
-        )
-        if archived is None:
-            return
-        summary = str(archived.get("summary", "") or "").strip()
-        if not summary:
-            return
-        self.knowledge_repository.add_knowledge_for_active(
-            scope_type=launcher_type,
-            scope_id=launcher_id,
-            memory_type="summary",
-            summary=summary,
-            tags=[str(tag).strip() for tag in archived.get("tags", []) if str(tag).strip()]
-            if isinstance(archived.get("tags"), list)
-            else [],
-            confidence=0.62,
-        )
+        """Fold old history into the rolling summary in the background.
 
-    async def _archive_if_needed_async(
+        The summary model call used to run inside the reply, holding the session
+        lock; now only the final trim-and-save takes the lock.
+        """
+        if not self.config.summarization_mode:
+            return
+        resolved_character = str(character_id or self._active_character_id()).strip()
+        key = (resolved_character, str(launcher_type or "").strip(), str(launcher_id or "").strip())
+        with self._state_lock:
+            if key in self._archive_inflight:
+                return
+            self._archive_inflight.add(key)
+
+        def run() -> None:
+            try:
+                self._archive_history(
+                    launcher_id,
+                    launcher_type,
+                    assistant_name=assistant_name,
+                    character_id=resolved_character,
+                )
+            finally:
+                with self._state_lock:
+                    self._archive_inflight.discard(key)
+
+        self._submit_background_task("archive_history", run)
+
+    def _archive_history(
         self,
         launcher_id: str,
         launcher_type: str,
         *,
         assistant_name: str,
-        character_id: str = "",
+        character_id: str,
     ) -> None:
-        if not self.config.summarization_mode:
+        session = self.memory.load(launcher_id, launcher_type, character_id=character_id)
+        max_history_lines = self.config.short_term_memory_limit
+        batch_size = self.config.memory_summary_batch_size
+        if len(session.history) - max_history_lines < max(1, batch_size):
             return
-        archived = await self.memory.amaybe_archive_history(
+        previous_summary = str(session.metadata.get(ROLLING_SUMMARY_KEY, "") or "")
+        self.memory.maybe_archive_history(
             launcher_id,
             launcher_type,
-            max_history_lines=self.config.short_term_memory_limit,
-            batch_size=self.config.memory_summary_batch_size,
-            summarizer=lambda history_lines: self.generator.summarize_history(
-                history_lines,
-                assistant_name=assistant_name,
+            max_history_lines=max_history_lines,
+            batch_size=batch_size,
+            summarizer=lambda history_lines: (
+                self.generator.summarize_rolling(
+                    history_lines,
+                    previous_summary=previous_summary,
+                    assistant_name=assistant_name,
+                ),
+                [],
             ),
-            character_id=str(character_id or self._active_character_id()).strip(),
-        )
-        if archived is None:
-            return
-        summary = str(archived.get("summary", "") or "").strip()
-        if not summary:
-            return
-        await asyncio.to_thread(
-            self.knowledge_repository.add_knowledge_for_active,
-            scope_type=launcher_type,
-            scope_id=launcher_id,
-            memory_type="summary",
-            summary=summary,
-            tags=[str(tag).strip() for tag in archived.get("tags", []) if str(tag).strip()]
-            if isinstance(archived.get("tags"), list)
-            else [],
-            confidence=0.62,
+            character_id=character_id,
+            commit_lock=self._session_lock_for_key(character_id, launcher_type, launcher_id),
         )
 
     def _latest_message_text(self, event: InboundEvent, command_text: str) -> str:
+        bot_account_id = self.config.bot_account_id
         if self.config.multimodal_enabled and event.image_count > 0:
-            return event.to_memory_text()
-        return command_text or event.to_memory_text()
+            return event.to_memory_text(bot_account_id=bot_account_id)
+        return command_text or event.to_memory_text(bot_account_id=bot_account_id)
 
     @staticmethod
     def _split_history_line(line: str) -> tuple[str, str]:
@@ -926,6 +929,57 @@ class WaifuService:
         self._bound_character_id = active_character
         self._reset_character_runtime_context(reset_sessions=reset_sessions)
 
+    def _ambient_history_key(
+        self,
+        event: InboundEvent,
+        *,
+        character_id: str = "",
+    ) -> tuple[str, str, str]:
+        return (
+            str(character_id or self._active_character_id()).strip(),
+            str(event.launcher_type or "").strip(),
+            str(event.launcher_id or "").strip(),
+        )
+
+    def _ambient_history_limit(self) -> int:
+        configured = int(self.config.short_term_memory_limit or 30)
+        return max(40, min(120, configured * 2))
+
+    def _remember_ambient_event(self, event: InboundEvent, *, character_id: str = "") -> None:
+        """Keep a group message that did not trigger a reply, until the next reply.
+
+        Writing every group message as a full session snapshot would cause heavy
+        write amplification on busy groups. The buffer is in-memory and bounded;
+        it is merged into the persisted session exactly once, on the next reply.
+        """
+        if event.launcher_type != "group":
+            return
+        bot_account_id = str(self.config.bot_account_id or "").strip()
+        if bot_account_id and str(event.sender_id or "").strip() == bot_account_id:
+            return
+        message_text = event.to_memory_text(bot_account_id=bot_account_id).strip()
+        if not message_text:
+            return
+        line = f"{event.sender_name}: {message_text}"
+        key = self._ambient_history_key(event, character_id=character_id)
+        limit = self._ambient_history_limit()
+        with self._state_lock:
+            buffer = self._ambient_history.get(key)
+            if buffer is None or buffer.maxlen != limit:
+                buffer = deque(buffer or (), maxlen=limit)
+                self._ambient_history[key] = buffer
+            buffer.append(line)
+
+    def _peek_ambient_history(self, event: InboundEvent, *, character_id: str = "") -> list[str]:
+        key = self._ambient_history_key(event, character_id=character_id)
+        with self._state_lock:
+            return list(self._ambient_history.get(key, ()))
+
+    def _clear_ambient_history(self, event: InboundEvent, *, character_id: str = "") -> None:
+        key = self._ambient_history_key(event, character_id=character_id)
+        with self._state_lock:
+            self._ambient_history.pop(key, None)
+
     def _reset_character_runtime_context(self, *, reset_sessions: bool = False) -> None:
         if reset_sessions:
             clear_sessions = getattr(self.memory.store, "clear", None)
@@ -935,6 +989,7 @@ class WaifuService:
             self.gate.clear_all_windows_locked()
             self._recent_behavior_events.clear()
             self._session_locks.clear()
+            self._ambient_history.clear()
 
     def _refresh_runtime_components(self, *, rebuild_generator: bool = False, rebuild_outbound: bool = False) -> None:
         set_active_metrics_registry(self.metrics)
@@ -977,18 +1032,8 @@ class WaifuService:
 
     @staticmethod
     def _extract_terms(value: object) -> list[str]:
-        raw = str(value or "").strip().lower()
-        if not raw:
-            return []
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in raw)
-        terms: list[str] = []
-        seen: set[str] = set()
-        for part in cleaned.split():
-            if len(part) < 2 or part in seen:
-                continue
-            seen.add(part)
-            terms.append(part)
-        return terms
+        # Single tokenizer for all memory matching (CJK-aware; see runtime_state).
+        return extract_match_terms(value)
 
     def _store_active_skills(self, session: SessionMemory, active_skills: list[SkillSpec]) -> None:
         if active_skills:
@@ -1008,7 +1053,11 @@ class WaifuService:
             else:
                 self.gate.store_pending_search(session, query=search_context.query)
         else:
-            session.metadata.pop("last_search", None)
+            # A search with results stays for follow-ups such as "来源呢" (search-links);
+            # it expires on its own after LAST_SEARCH_TTL_SECONDS.
+            last_search = session.metadata.get("last_search")
+            if not (isinstance(last_search, dict) and last_search.get("results")):
+                session.metadata.pop("last_search", None)
             session.metadata.pop(PENDING_SEARCH_METADATA_KEY, None)
         self.session_repository.save(session)
 
@@ -1099,10 +1148,9 @@ class WaifuService:
         return lines
 
     def _preview_conversation_view(self, history_lines: list[str], *, assistant_name: str, limit: int = 8) -> str:
-        lines: list[str] = []
-        for raw_line in history_lines[-max(1, int(limit)):]:
-            speaker, content = self._split_history_line(raw_line)
-            if speaker == "assistant":
-                speaker = assistant_name
-            lines.append(f"{speaker}: {content}")
-        return "\n".join(lines)
+        # Same windowing as live replies, so the card test panel shows what the model would see.
+        return self.memory._format_dialogue_lines(
+            history_lines[-max(1, int(limit)):],
+            assistant_name=assistant_name,
+            max_chars=self.config.history_window_chars,
+        )

@@ -4,9 +4,19 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from ..models import InboundEvent, SessionMemory
+from ..infra.clock import absolutize_relative_dates, local_now
+from ..repositories.runtime_state import _score_knowledge as score_knowledge_terms
+from ..repositories.runtime_state import excluded_from_recall
 
 if TYPE_CHECKING:
     from ..app import WaifuService
+
+# Near-duplicate memories are merged only when one wording is the other with a few
+# characters added ("喜欢吃草莓蛋糕" -> "最喜欢吃草莓蛋糕"). A substitution ("喜欢猫" vs
+# "喜欢狗") or an inserted negation ("不喜欢猫") is a different fact and is kept.
+_NEAR_DUPLICATE_MIN_CHARS = 4
+_NEAR_DUPLICATE_MIN_RATIO = 0.7
+_NEGATION_CHARS = frozenset("不没别非无未否")
 
 
 def _safe_float(payload: dict[str, object], key: str, default: float) -> float:
@@ -17,6 +27,37 @@ def _safe_float(payload: dict[str, object], key: str, default: float) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return default
+
+
+def _compact_text(text: str) -> str:
+    return "".join(ch for ch in str(text or "").casefold() if ch.isalnum())
+
+
+def _inserted_chars(short: str, long: str) -> str | None:
+    """Characters of ``long`` left after matching ``short`` in order; None if it does not fit."""
+    inserted: list[str] = []
+    index = 0
+    for ch in long:
+        if index < len(short) and ch == short[index]:
+            index += 1
+        else:
+            inserted.append(ch)
+    return "".join(inserted) if index == len(short) else None
+
+
+def _is_near_duplicate(left: str, right: str) -> bool:
+    a, b = _compact_text(left), _compact_text(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) < _NEAR_DUPLICATE_MIN_CHARS or len(short) / len(long) < _NEAR_DUPLICATE_MIN_RATIO:
+        return False
+    inserted = _inserted_chars(short, long)
+    if inserted is None:
+        return False
+    return not any(ch in _NEGATION_CHARS for ch in inserted)
 
 
 class KnowledgeService:
@@ -55,7 +96,9 @@ class KnowledgeService:
             conversation_view=conversation_view,
             address=address,
             max_entries=max(1, int(svc.config.knowledge_auto_extract_limit)),
-            allow_fallback=True,
+            # An empty model answer means "nothing worth keeping"; the regex fallback
+            # would store noise instead, so it only runs offline / in dry-run.
+            allow_fallback=not svc._requires_live_llm(),
         )
         entries = extracted.get("entries", []) if isinstance(extracted, dict) else []
         profile_summary = str(extracted.get("profile_summary", "") or "").strip() if isinstance(extracted, dict) else ""
@@ -104,7 +147,9 @@ class KnowledgeService:
             conversation_view=conversation_view,
             address=address,
             max_entries=max(1, int(svc.config.knowledge_auto_extract_limit)),
-            allow_fallback=True,
+            # An empty model answer means "nothing worth keeping"; the regex fallback
+            # would store noise instead, so it only runs offline / in dry-run.
+            allow_fallback=not svc._requires_live_llm(),
         )
         entries = extracted.get("entries", []) if isinstance(extracted, dict) else []
         profile_summary = str(extracted.get("profile_summary", "") or "").strip() if isinstance(extracted, dict) else ""
@@ -132,6 +177,8 @@ class KnowledgeService:
         summary = " ".join(str(entry.get("summary", "") or "").split()).strip()
         if not summary:
             return None
+        # "明天"/"下周三" are only true on the day they were said; store the date instead.
+        summary = absolutize_relative_dates(summary, local_now(svc.config.timezone).date())
         scope_type, scope_id = self._knowledge_scope_for_candidate(event, entry)
         memory_type = str(entry.get("memory_type", "") or "fact").strip().lower() or "fact"
         tags = (
@@ -154,6 +201,11 @@ class KnowledgeService:
         }
         if existing is not None:
             payload["id"] = existing.get("id", 0)
+            existing_summary = " ".join(str(existing.get("summary", "") or "").split()).strip()
+            # A re-phrasing of a known memory: keep the more informative wording.
+            # An equal-length rewrite is treated as the newer (corrected) version.
+            if len(existing_summary) > len(summary):
+                payload["summary"] = existing_summary
             merged_tags = {
                 *[str(tag).strip() for tag in existing.get("tags", []) if str(tag).strip()],
                 *tags,
@@ -179,6 +231,7 @@ class KnowledgeService:
             svc.knowledge_repository.knowledge_count_for_active(),
         )
         target = " ".join(str(summary or "").split()).strip().casefold()
+        near_duplicate: dict[str, object] | None = None
         for item in svc.knowledge_repository.list_knowledge_for_active(limit=limit):
             if str(item.get("scope_type", "") or "").strip() != scope_type:
                 continue
@@ -187,14 +240,22 @@ class KnowledgeService:
             current = " ".join(str(item.get("summary", "") or "").split()).strip().casefold()
             if current == target:
                 return item
-        return None
+            # Exact-match-only dedupe stored the same fact many times in slightly
+            # different words, crowding out the few recall slots.
+            if near_duplicate is None and _is_near_duplicate(current, target):
+                near_duplicate = item
+        return near_duplicate
 
     def _knowledge_scope_for_candidate(self, event: InboundEvent, entry: dict[str, object]) -> tuple[str, str]:
         scope_hint = str(entry.get("scope_hint", "") or "").strip().lower()
         if scope_hint == "group" and event.launcher_type == "group":
             return "group", event.launcher_id
         if scope_hint == "global":
-            return "global", ""
+            # Chat-derived facts stay in the chat they came from. A "global" row was
+            # injected into every conversation (e.g. a news headline from one group).
+            if event.launcher_type == "group":
+                return "group", event.launcher_id
+            return "person", event.launcher_id
         if scope_hint == "person" and event.launcher_type == "person":
             return "person", event.launcher_id
         if event.launcher_type == "group":
@@ -237,6 +298,8 @@ class KnowledgeService:
         svc = self.service
         scopes = set(self._knowledge_scopes(event))
         query_terms = svc._extract_terms(query)
+        if not query_terms:
+            return []
         entries = svc.knowledge_repository.list_knowledge_for_active(limit=max(80, svc.config.memory_graph_limit * 6))
         scored: list[tuple[float, dict[str, Any]]] = []
         for entry in entries:
@@ -244,19 +307,16 @@ class KnowledgeService:
                 str(entry.get("scope_type", "") or "").strip().lower() or "global",
                 str(entry.get("scope_id", "") or "").strip(),
             )
-            if scope not in scopes:
+            if scope not in scopes or excluded_from_recall(entry):
                 continue
             summary = str(entry.get("summary", "") or "").strip().lower()
             tags = [str(item or "").strip().lower() for item in entry.get("tags", []) if str(item or "").strip()]
-            score = float(entry.get("confidence") or 0.0)
-            if not query_terms:
-                score += 0.1
-            else:
-                for term in query_terms:
-                    if term in summary:
-                        score += 1.2
-                    elif any(term in tag or tag in term for tag in tags):
-                        score += 1.6
+            # Confidence used to be the base score, so the newest high-confidence
+            # rows were returned for every message regardless of topic.
+            relevance = score_knowledge_terms(summary, tags, query_terms)
+            if relevance <= 0.0:
+                continue
+            score = relevance + float(entry.get("confidence") or 0.0) * 0.18
             scored.append((score, dict(entry)))
         scored.sort(
             key=lambda item: (

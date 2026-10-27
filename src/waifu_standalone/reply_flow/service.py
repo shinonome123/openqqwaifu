@@ -10,6 +10,18 @@ from ..systems.searching import SearchContext
 if TYPE_CHECKING:
     from ..app import WaifuService
 
+_RECALLED_MEMORY_PREFIX = "相关记忆："
+
+
+def _restates_memory(highlight: str, memory_hints: list[str]) -> bool:
+    if not highlight.startswith(_RECALLED_MEMORY_PREFIX):
+        return False
+    # Graph highlights clip long summaries with a trailing "..."; compare the prefix.
+    body = highlight[len(_RECALLED_MEMORY_PREFIX):].rstrip(".…").strip()
+    if not body:
+        return True
+    return any(hint.startswith(body) or body.startswith(hint) for hint in memory_hints if hint)
+
 
 class ReplyFlowService:
     def __init__(self, service: WaifuService) -> None:
@@ -30,13 +42,25 @@ class ReplyFlowService:
         svc._record_inbound(event, text)
         if not text and event.image_count == 0:
             return None
-        if text and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes):
+        # "/skill <name> ..." is a command even though "/" is an ignored prefix.
+        explicit_skill = svc.dispatcher.resolve_explicit_skill_request(text)
+        if explicit_skill is None and text and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes):
             return None
+        # Keep ambient group chatter until the bot is addressed, so the next reply
+        # has the surrounding conversation instead of only the @ message.
+        svc._remember_ambient_event(event, character_id=current_character)
         if not svc.gate.should_reply(event):
             return None
 
         await svc.onboarding.aremember_directory_member(event)
-        session = await svc.memory.asave_user_event(event, character_id=current_character)
+        ambient_context = svc._peek_ambient_history(event, character_id=current_character)
+        session = await svc.memory.asave_user_event(
+            event,
+            character_id=current_character,
+            context_lines=ambient_context,
+            bot_account_id=svc.config.bot_account_id,
+        )
+        svc._clear_ambient_history(event, character_id=current_character)
         assistant_name = svc._resolve_assistant_name(event, session, character_id=current_character)
         session = await svc.persona.asanitize_session_state(session, assistant_name=assistant_name)
         await svc.persona.asanitize_member_state(
@@ -45,6 +69,14 @@ class ReplyFlowService:
             character_id=current_character,
         )
         address = await svc._resolve_address_async(event, session)
+        # In a group each member may call the bot by their own alias. Label the bot's
+        # history lines with the card name so the label stays the same whoever speaks;
+        # the current speaker's alias is passed as a speaker note instead.
+        dialogue_assistant_name = assistant_name
+        if event.launcher_type == "group":
+            dialogue_assistant_name = (
+                svc.generator.resolve_assistant_name(event.launcher_type, session) or assistant_name
+            )
         inbound_behavior = svc.event_engine.capture_inbound(
             event,
             text=latest_message,
@@ -54,11 +86,13 @@ class ReplyFlowService:
 
         repeat_reply = svc.gate.build_repeat_reply(event, session, address=address)
         if repeat_reply is not None:
-            return await svc.emitter.aemit(event, repeat_reply, assistant_name=assistant_name)
+            return await svc.emitter.aemit(event, repeat_reply, assistant_name=dialogue_assistant_name)
 
         active_skills = svc.tool_orchestrator.prompt_skill_cards(latest_message)
         await svc._store_active_skills_async(session, active_skills)
-        explicit_skill = svc.dispatcher.resolve_explicit_skill_request(latest_message)
+        if explicit_skill is None:
+            # "生图 一只猫" generates the image directly instead of asking the model first.
+            explicit_skill = svc.dispatcher.resolve_image_command(text)
         if explicit_skill is not None:
             skill, raw_args = explicit_skill
             return await svc.dispatcher.adispatch_explicit_skill(
@@ -69,7 +103,7 @@ class ReplyFlowService:
                 address=address,
                 assistant_name=assistant_name,
                 active_skills=active_skills,
-                background_image_delivery=svc.config.background_image_delivery,
+                background_image_delivery=background_image_delivery,
             )
         tool_context = svc.tool_orchestrator.exposure_context(
             event,
@@ -84,7 +118,7 @@ class ReplyFlowService:
                 launcher_type=event.launcher_type,
                 text=svc.tool_orchestrator.unavailable_reply(address),
             )
-            return await svc.emitter.aemit(event, unavailable, assistant_name=assistant_name)
+            return await svc.emitter.aemit(event, unavailable, assistant_name=dialogue_assistant_name)
 
         emotion = svc.emotions.analyze(event, session)
         search_context = SearchContext()
@@ -92,8 +126,10 @@ class ReplyFlowService:
         conversation_view = await svc.memory.aformat_dialogue(
             event.launcher_id,
             event.launcher_type,
-            assistant_name=assistant_name,
+            assistant_name=dialogue_assistant_name,
             limit=svc.config.history_window_messages,
+            max_chars=svc.config.history_window_chars,
+            exclude_last=True,
             character_id=current_character,
         )
         recalled_memory_hints = await asyncio.to_thread(
@@ -119,9 +155,16 @@ class ReplyFlowService:
             behavior_events=behavior_context,
         )
         speaker_notes = await svc.knowledge._adirectory_member_notes(event)
+        if dialogue_assistant_name != assistant_name:
+            speaker_notes.insert(
+                0,
+                f"{address}叫你「{assistant_name}」；对话记录里「{dialogue_assistant_name}」的发言就是你说的。",
+            )
         for highlight in graph_snapshot.get("highlights", [])[:3] if isinstance(graph_snapshot, dict) else []:
             text_hint = str(highlight or "").strip()
-            if text_hint:
+            # The graph re-lists recalled memories as "相关记忆：…"; skip those already
+            # in [Memories] so the same fact is not repeated three times in the prompt.
+            if text_hint and not _restates_memory(text_hint, memory_hints):
                 speaker_notes.append(text_hint)
         analysis_hint = await svc.thoughts.aanalyze(
             event,
@@ -172,7 +215,8 @@ class ReplyFlowService:
         emitted = await svc.emitter.aemit(
             event,
             message,
-            assistant_name=assistant_name,
+            # The emitter only uses this to label the rolling summary.
+            assistant_name=dialogue_assistant_name,
             emotion=emotion,
             search_used=bool(search_context.active),
             behavior_reason="reply",
@@ -186,7 +230,7 @@ class ReplyFlowService:
                 character_id=current_character,
             ),
             latest_message=latest_message,
-            assistant_name=assistant_name,
+            assistant_name=dialogue_assistant_name,
             address=address,
             conversation_view=conversation_view,
         )
