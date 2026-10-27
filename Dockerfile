@@ -13,13 +13,15 @@ COPY --from=node_runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
+# Before the code is copied in, so a code change does not reinstall it.
+RUN npm i -g @steipete/summarize
+
 COPY pyproject.toml README.md run_cli.py ./
 COPY src ./src
 COPY docs ./docs
 COPY examples ./examples
 
 RUN pip install --no-cache-dir .
-RUN npm i -g @steipete/summarize
 
 RUN useradd --create-home appuser \
     && mkdir -p /app/data \

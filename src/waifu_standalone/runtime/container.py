@@ -401,7 +401,7 @@ def _build_service(
     tools.register(
         "list-files",
         name="列出文件",
-        description="列出机器人能用的文件夹里的文件。不给路径就列出整个文件夹，子目录写相对路径。",
+        description="列出机器人能用的共享文件夹里的文件（不是电脑桌面，看不到电脑上别的地方）。不给路径就列出整个文件夹，子目录写相对路径。",
         handler=service.dispatcher.run_list_files_tool,
         async_handler=service.dispatcher.arun_list_files_tool,
         parameters={

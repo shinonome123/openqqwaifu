@@ -68,12 +68,15 @@ class ReplyGate:
         if bot_account_id and event.has_bot_mention(bot_account_id):
             self.refresh_follow_up_window(event)
             return True
+        # While a reply is being written the chat moves on. A line nobody @-ed is left
+        # to the newest one (it stays in the ambient buffer as context), so the bot
+        # answers the latest message instead of working through a backlog in turn.
         if not service.config.group_reply_requires_mention:
-            return True
+            return not service.emitter.superseded(event)
         if not bot_account_id:
             return True
         if self.is_follow_up_window_active(event.launcher_id):
-            return True
+            return not service.emitter.superseded(event)
         if self._has_recent_search_link_follow_up(event):
             return True
         return self._has_pending_search_follow_up(event)

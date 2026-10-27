@@ -120,6 +120,15 @@ class SkillDispatcher:
             cleaned_prefix = str(prefix or "").strip()
             if not cleaned_prefix:
                 continue
+            lowered = normalized.lower()
+            # A bare "/skill" or "/skills" asks what there is; "/skills weather 上海" means "/skill".
+            if lowered in {cleaned_prefix.lower(), cleaned_prefix.lower() + "s"}:
+                listing = self._service.skills.find_by_name_or_id("skill-list-command")
+                if listing is not None and listing.enabled and listing.eligible and not listing.validation_errors:
+                    return listing, ""
+                continue
+            if lowered.startswith(cleaned_prefix.lower() + "s "):
+                normalized = cleaned_prefix + normalized[len(cleaned_prefix) + 1:]
             slash_match = re.match(
                 rf"^{re.escape(cleaned_prefix)}\s+(?P<skill>[^\s:]+)(?:[\s:]+(?P<args>.*))?$",
                 normalized,
@@ -1517,7 +1526,11 @@ class SkillDispatcher:
             return ToolExecutionResult(error=str(exc), text=str(exc))
         entries = self._list_directory_entries(root, recursive=recursive, limit=limit)
         if not entries:
-            return ToolExecutionResult(text=f"目录为空：{root}", metadata={"path": str(root), "entries": []})
+            # Said plainly, so an empty shared folder is not reported as an empty desktop.
+            return ToolExecutionResult(
+                text="这个文件夹里还没有文件。（这是机器人能用的共享文件夹，不是电脑桌面，电脑上别的地方也看不到。）",
+                metadata={"path": str(root), "entries": []},
+            )
         return ToolExecutionResult(
             text="\n".join(entries),
             metadata={"path": str(root), "recursive": recursive, "entries": entries},
