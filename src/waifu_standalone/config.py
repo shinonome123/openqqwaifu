@@ -138,6 +138,26 @@ class ToolPolicyConfig:
 
 
 @dataclass(slots=True)
+class SegmentedReplyConfig:
+    # 像真人一样把一段话拆成几条发：按换行和句末标点切开，中间随机停一下。
+    # 超过 max_total_chars 的长回复（讲故事、查到的结果）照旧整段发。
+    enabled: bool = True
+    max_parts: int = 3
+    max_total_chars: int = 150
+    min_delay_seconds: float = 1.0
+    max_delay_seconds: float = 2.5
+
+
+@dataclass(slots=True)
+class StickerConfig:
+    # 表情包库：data_root 下 directory/<分类>/ 里的图片（png、jpg、gif、webp）。
+    # 模型在回复最后写「[表情:分类]」时随机发一张；两张之间至少隔 min_replies_between 条回复。
+    enabled: bool = True
+    directory: str = "stickers"
+    min_replies_between: int = 3
+
+
+@dataclass(slots=True)
 class RateLimitConfig:
     # 付费和外部工具的令牌桶：每个用户一个、每个群一个，两个都有余量才放行。
     # image 管生图；network 管搜索、网页抓取、summarize（三者共用一个桶）。
@@ -258,6 +278,11 @@ class AppConfig:
     marketplace: MarketplaceConfig = field(default_factory=MarketplaceConfig)
     tool_policy: ToolPolicyConfig = field(default_factory=ToolPolicyConfig)
     rate_limits: RateLimitConfig = field(default_factory=RateLimitConfig)
+    segmented_reply: SegmentedReplyConfig = field(default_factory=SegmentedReplyConfig)
+    stickers: StickerConfig = field(default_factory=StickerConfig)
+    # 群里回复时，如果那条消息之后又有人说过话，就引用它（QQ 里显示为「回复 xx」），
+    # 看得出在回谁；紧接着回的不引用，跟真人一样。
+    group_reply_quote: bool = True
     claw_runtime: ClawRuntimeConfig = field(default_factory=ClawRuntimeConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
     qq_sidecar: QQSidecarConfig = field(default_factory=QQSidecarConfig)

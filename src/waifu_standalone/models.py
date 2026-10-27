@@ -112,6 +112,14 @@ class OutboundMessage:
     launcher_type: LauncherType
     text: str
     images: list[str] = field(default_factory=list)
+    # Platform message id to quote ("回复 xx" in QQ); empty for none.
+    reply_to: str = ""
+    # A model's chat reply: it may go out as a few short messages, the way people type.
+    # Command results, notices and canned replies stay whole.
+    conversational: bool = False
+    # A sticker image, sent on its own after the text and shown by QQ as a sticker.
+    # The text keeps its "[表情:分类]" tag for the chat history; the tag is never sent.
+    sticker: str = ""
 
 
 @dataclass(slots=True)

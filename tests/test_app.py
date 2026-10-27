@@ -1720,7 +1720,8 @@ class WaifuServiceTests(unittest.TestCase):
         self.assertIsNotNone(private_result)
         assert private_result is not None
         self.assertIn("阿璃", private_result.text)
-        self.assertEqual(len(outbound.sent), 2)
+        # The private reply and its "what should I call you" line go out as two messages.
+        self.assertEqual(len(outbound.sent), 3)
 
     def test_group_address_command_requires_mention(self) -> None:
         config = AppConfig(bot_account_id="3518944354")

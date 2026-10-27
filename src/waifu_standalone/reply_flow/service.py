@@ -160,6 +160,7 @@ class ReplyFlowService:
             active_skills=active_skills,
             allow_fallback=not live_runtime,
         )
+        sticker_hint = await asyncio.to_thread(svc.stickers.prompt_section, event)
         generated_reply = await svc.generator.agenerate_reply_message(
             event,
             session,
@@ -175,6 +176,7 @@ class ReplyFlowService:
             analysis_hint=analysis_hint,
             active_skills=active_skills,
             tool_context=tool_context,
+            sticker_hint=sticker_hint,
             allow_fallback=not live_runtime,
         )
         reply_text = generated_reply.text
@@ -190,11 +192,17 @@ class ReplyFlowService:
             reply_text=reply_text,
             character_id=current_character,
         )
+        reply_text, sticker = await asyncio.to_thread(svc.stickers.take, reply_text, event)
+        if not reply_text and not generated_reply.images:
+            return None
         message = OutboundMessage(
             launcher_id=event.launcher_id,
             launcher_type=event.launcher_type,
             text=reply_text,
             images=list(generated_reply.images),
+            sticker=sticker,
+            # Without a model the reply is a canned fallback; it goes out whole.
+            conversational=svc.generator.llm_ready,
         )
         emitted = await svc.emitter.aemit(
             event,

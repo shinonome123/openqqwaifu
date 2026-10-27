@@ -19,6 +19,8 @@ from ..config import (
     PluginsConfig,
     QQSidecarConfig,
     RateLimitConfig,
+    SegmentedReplyConfig,
+    StickerConfig,
     RuntimeV2Config,
     ToolPolicyConfig,
 )
@@ -51,6 +53,8 @@ class ConfigManager:
         marketplace = _load_marketplace(raw.get("marketplace"))
         tool_policy = _load_tool_policy(raw.get("tool_policy"))
         rate_limits = _load_rate_limits(raw.get("rate_limits"))
+        segmented_reply = _load_dataclass(SegmentedReplyConfig, raw.get("segmented_reply"))
+        stickers = _load_dataclass(StickerConfig, raw.get("stickers"))
         claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
         runtime_v2 = RuntimeV2Config(**raw.get("runtime_v2", {}))
@@ -111,6 +115,9 @@ class ConfigManager:
             marketplace=marketplace,
             tool_policy=tool_policy,
             rate_limits=rate_limits,
+            segmented_reply=segmented_reply,
+            stickers=stickers,
+            group_reply_quote=bool(raw.get("group_reply_quote", True)),
             claw_runtime=claw_runtime,
             plugins=plugins,
             qq_sidecar=qq_sidecar,
@@ -238,6 +245,29 @@ def _load_tool_policy(raw_value: object) -> ToolPolicyConfig:
         exec_allowlist=_load_str_list(raw_value.get("exec_allowlist"), defaults.exec_allowlist),
         authorized_user_ids=_load_str_list(raw_value.get("authorized_user_ids"), defaults.authorized_user_ids),
     )
+
+
+def _load_dataclass(cls: type, raw_value: object):  # type: ignore[no-untyped-def]
+    """Build a flat settings dataclass from a JSON object, keeping defaults for bad values."""
+    defaults = cls()
+    if not isinstance(raw_value, dict):
+        return defaults
+    values = {}
+    for name in cls.__dataclass_fields__:
+        default = getattr(defaults, name)
+        raw = raw_value.get(name)
+        if raw is None:
+            values[name] = default
+        elif isinstance(default, bool):
+            values[name] = bool(raw)
+        elif isinstance(default, (int, float)):
+            try:
+                values[name] = max(type(default)(0), type(default)(raw))
+            except (TypeError, ValueError):
+                values[name] = default
+        else:
+            values[name] = str(raw)
+    return cls(**values)
 
 
 def _load_rate_limits(raw_value: object) -> RateLimitConfig:

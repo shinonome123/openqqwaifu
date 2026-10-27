@@ -2,6 +2,7 @@ from .emitter import OutboundEmitter
 from .prompt_assembler import GeneratedReply, Generator
 from .reply_gate import PENDING_SEARCH_METADATA_KEY, ReplyGate
 from .service import ReplyFlowService
+from .stickers import StickerLibrary
 
 __all__ = [
     "GeneratedReply",
@@ -10,4 +11,5 @@ __all__ = [
     "PENDING_SEARCH_METADATA_KEY",
     "ReplyFlowService",
     "ReplyGate",
+    "StickerLibrary",
 ]

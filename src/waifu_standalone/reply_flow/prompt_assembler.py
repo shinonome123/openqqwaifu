@@ -282,6 +282,7 @@ class Generator:
         analysis_hint: str = "",
         active_skills: list[SkillSpec] | None = None,
         tool_context: ToolExposureContext | None = None,
+        sticker_hint: str = "",
         allow_fallback: bool = True,
     ) -> GeneratedReply:
         card = card_override or self._cards.load(event.launcher_type, session)
@@ -312,6 +313,7 @@ class Generator:
                         latest_message=latest_message,
                         active_skills=active_skills,
                         tool_context=tool_context,
+                        sticker_hint=sticker_hint,
                         user=self._llm_user_key(event, session, purpose="chat"),
                     )
                 else:
@@ -330,6 +332,7 @@ class Generator:
                         analysis_hint=analysis_hint,
                         latest_message=latest_message,
                         active_skills=active_skills,
+                        sticker_hint=sticker_hint,
                     )
                     reply = self._generate_model_reply_message(
                         prompt,
@@ -374,6 +377,7 @@ class Generator:
         analysis_hint: str = "",
         active_skills: list[SkillSpec] | None = None,
         tool_context: ToolExposureContext | None = None,
+        sticker_hint: str = "",
         allow_fallback: bool = True,
     ) -> GeneratedReply:
         if (
@@ -427,6 +431,7 @@ class Generator:
                         latest_message=latest_message,
                         active_skills=active_skills,
                         tool_context=tool_context,
+                        sticker_hint=sticker_hint,
                         user=self._llm_user_key(event, session, purpose="chat"),
                     )
                 else:
@@ -445,6 +450,7 @@ class Generator:
                         analysis_hint=analysis_hint,
                         latest_message=latest_message,
                         active_skills=active_skills,
+                        sticker_hint=sticker_hint,
                     )
                     reply = await self._agenerate_model_reply_message(
                         prompt,
@@ -513,6 +519,7 @@ class Generator:
         latest_message: str,
         active_skills: list[SkillSpec],
         include_tool_rules: bool,
+        sticker_hint: str = "",
     ) -> list[dict[str, object]]:
         """Persona and context as the system message, the conversation as chat turns."""
         extra_sections: list[str] = []
@@ -538,6 +545,8 @@ class Generator:
         skill_block = self._format_skill_block(active_skills)
         if skill_block:
             extra_sections.append(skill_block)
+        if sticker_hint:
+            extra_sections.append(sticker_hint)
         if include_tool_rules:
             extra_sections.append("[工具]\n" + _TOOL_CALLING_SYSTEM_PROMPT)
         system = card.system_message(
@@ -601,6 +610,7 @@ class Generator:
         latest_message: str,
         active_skills: list[SkillSpec],
         tool_context: ToolExposureContext | None,
+        sticker_hint: str,
         user: str,
     ) -> GeneratedReply:
         has_images = self.config.multimodal_enabled and event.image_count > 0
@@ -621,6 +631,7 @@ class Generator:
             analysis_hint=analysis_hint,
             latest_message=latest_message,
             active_skills=active_skills,
+            sticker_hint=sticker_hint,
             include_tool_rules=bool(tools),
         )
         try:
@@ -658,6 +669,7 @@ class Generator:
         latest_message: str,
         active_skills: list[SkillSpec],
         tool_context: ToolExposureContext | None,
+        sticker_hint: str,
         user: str,
     ) -> GeneratedReply:
         has_images = self.config.multimodal_enabled and event.image_count > 0
@@ -678,6 +690,7 @@ class Generator:
             analysis_hint=analysis_hint,
             latest_message=latest_message,
             active_skills=active_skills,
+            sticker_hint=sticker_hint,
             include_tool_rules=bool(tools),
         )
         try:
@@ -1746,6 +1759,7 @@ class Generator:
         analysis_hint: str,
         latest_message: str,
         active_skills: list[SkillSpec],
+        sticker_hint: str = "",
     ) -> str:
         system_prompt = card.system_prompt(
             launcher_type=event.launcher_type,
@@ -1781,6 +1795,8 @@ class Generator:
         skill_block = self._format_skill_block(active_skills)
         if skill_block:
             prompt_parts.append(skill_block)
+        if sticker_hint:
+            prompt_parts.append(sticker_hint)
         return "\n\n".join(part for part in prompt_parts if part.strip())
 
     def _build_onboarding_query(
