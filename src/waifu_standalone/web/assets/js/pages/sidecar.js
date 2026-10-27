@@ -31,12 +31,12 @@ export function mount(root) {
 
   async function save() {
     try {
-      const [savedState, savedOther] = await Promise.all([
-        api.saveSidecarPanel({
+      const savedState = await api.saveSidecarPanel({
           adapter_name: state?.adapter_name || "napcat",
           outbound_base_url: state?.outbound_base_url || "",
           outbound_timeout_seconds: Number(state?.outbound_timeout_seconds || 10),
           access_token: state?.access_token || "",
+          inbound_access_token: state?.inbound_access_token || "",
           inbound_host: state?.inbound_host || "127.0.0.1",
           inbound_port: Number(state?.inbound_port || 8080),
           webui_base_url: state?.webui_base_url || "",
@@ -44,12 +44,8 @@ export function mount(root) {
           webui_timeout_seconds: Number(state?.webui_timeout_seconds || 10),
           webui_token: state?.webui_token || "",
           reverse_ws_url: state?.reverse_ws_url || "",
-        }),
-        api.saveOtherPanel({
-          ...(other || {}),
-          bot_account_id: other?.bot_account_id || "",
-        }),
-      ]);
+        });
+      const savedOther = await api.saveOtherPanel({ bot_account_id: other?.bot_account_id || "" });
       state = savedState;
       other = savedOther;
       toastOk(t("actions.savedOk"));
@@ -166,6 +162,15 @@ export function mount(root) {
               type: "password",
               value: state.access_token || "",
               onChange: (v) => patch({ access_token: v }),
+            }),
+          }),
+          fieldRow({
+            label: t("sidecar.field.inboundToken"),
+            hint: t("sidecar.field.inboundToken.hint"),
+            control: textInput({
+              type: "password",
+              value: state.inbound_access_token || "",
+              onChange: (v) => patch({ inbound_access_token: v }),
             }),
           }),
           fieldRow({

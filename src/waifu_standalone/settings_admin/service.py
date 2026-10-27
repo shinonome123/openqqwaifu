@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from .config_manager import serialize_app_config
+from .config_manager import CONFIG_WRITE_LOCK, serialize_app_config
 from ..gateways.napcat_login import NapCatLoginError, normalize_webui_settings, qrcode_payload_to_image_source
 from ..gateways.onebot_actions import OneBotActionClient
 
@@ -63,63 +63,64 @@ class SettingsAdminService:
 
     def save_ai_panel(self, payload: dict[str, object]) -> dict[str, object]:
         svc = self.service
-        llm = payload.get("llm", {})
-        image_generation = payload.get("image_generation", {})
-        embedding = payload.get("embedding", {})
-        if isinstance(llm, dict):
-            svc.config.llm.enabled = bool(llm.get("enabled", svc.config.llm.enabled))
-            svc.config.llm.backend = str(llm.get("backend", svc.config.llm.backend) or svc.config.llm.backend)
-            svc.config.llm.base_url = str(llm.get("base_url", svc.config.llm.base_url) or "")
-            llm_key = str(llm.get("api_key", "") or "")
-            if llm_key and not _is_masked(llm_key):
-                svc.config.llm.api_key = llm_key
-            svc.config.llm.model = str(llm.get("model", svc.config.llm.model) or "")
-            svc.config.llm.app_type = str(llm.get("app_type", svc.config.llm.app_type) or svc.config.llm.app_type)
-            svc.config.llm.timeout_seconds = _safe_float(llm, "timeout_seconds", svc.config.llm.timeout_seconds)
-        if isinstance(image_generation, dict):
-            svc.config.image_generation.enabled = bool(image_generation.get("enabled", svc.config.image_generation.enabled))
-            svc.config.image_generation.base_url = str(
-                image_generation.get("base_url", svc.config.image_generation.base_url) or ""
-            )
-            img_key = str(image_generation.get("api_key", "") or "")
-            if img_key and not _is_masked(img_key):
-                svc.config.image_generation.api_key = img_key
-            svc.config.image_generation.model = str(
-                image_generation.get("model", svc.config.image_generation.model) or svc.config.image_generation.model
-            )
-            svc.config.image_generation.timeout_seconds = _safe_float(
-                image_generation,
-                "timeout_seconds",
-                svc.config.image_generation.timeout_seconds,
-            )
-            svc.config.image_generation.response_format = str(
-                image_generation.get("response_format", svc.config.image_generation.response_format)
-                or svc.config.image_generation.response_format
-            )
-            svc.config.image_generation.aspect_ratio = str(
-                image_generation.get("aspect_ratio", svc.config.image_generation.aspect_ratio)
-                or svc.config.image_generation.aspect_ratio
-            )
-            svc.config.image_generation.resolution = str(
-                image_generation.get("resolution", svc.config.image_generation.resolution) or ""
-            )
-        if isinstance(embedding, dict):
-            svc.config.embedding.enabled = bool(embedding.get("enabled", svc.config.embedding.enabled))
-            svc.config.embedding.backend = str(
-                embedding.get("backend", svc.config.embedding.backend) or svc.config.embedding.backend
-            )
-            svc.config.embedding.base_url = str(embedding.get("base_url", svc.config.embedding.base_url) or "")
-            emb_key = str(embedding.get("api_key", "") or "")
-            if emb_key and not _is_masked(emb_key):
-                svc.config.embedding.api_key = emb_key
-            svc.config.embedding.model = str(embedding.get("model", svc.config.embedding.model) or svc.config.embedding.model)
-            svc.config.embedding.timeout_seconds = _safe_float(
-                embedding,
-                "timeout_seconds",
-                svc.config.embedding.timeout_seconds,
-            )
+        with CONFIG_WRITE_LOCK:
+            llm = payload.get("llm", {})
+            image_generation = payload.get("image_generation", {})
+            embedding = payload.get("embedding", {})
+            if isinstance(llm, dict):
+                svc.config.llm.enabled = bool(llm.get("enabled", svc.config.llm.enabled))
+                svc.config.llm.backend = str(llm.get("backend", svc.config.llm.backend) or svc.config.llm.backend)
+                svc.config.llm.base_url = str(llm.get("base_url", svc.config.llm.base_url) or "")
+                llm_key = str(llm.get("api_key", "") or "")
+                if "api_key" in llm and not _is_masked(llm_key):
+                    svc.config.llm.api_key = llm_key
+                svc.config.llm.model = str(llm.get("model", svc.config.llm.model) or "")
+                svc.config.llm.app_type = str(llm.get("app_type", svc.config.llm.app_type) or svc.config.llm.app_type)
+                svc.config.llm.timeout_seconds = _safe_float(llm, "timeout_seconds", svc.config.llm.timeout_seconds)
+            if isinstance(image_generation, dict):
+                svc.config.image_generation.enabled = bool(image_generation.get("enabled", svc.config.image_generation.enabled))
+                svc.config.image_generation.base_url = str(
+                    image_generation.get("base_url", svc.config.image_generation.base_url) or ""
+                )
+                img_key = str(image_generation.get("api_key", "") or "")
+                if "api_key" in image_generation and not _is_masked(img_key):
+                    svc.config.image_generation.api_key = img_key
+                svc.config.image_generation.model = str(
+                    image_generation.get("model", svc.config.image_generation.model) or svc.config.image_generation.model
+                )
+                svc.config.image_generation.timeout_seconds = _safe_float(
+                    image_generation,
+                    "timeout_seconds",
+                    svc.config.image_generation.timeout_seconds,
+                )
+                svc.config.image_generation.response_format = str(
+                    image_generation.get("response_format", svc.config.image_generation.response_format)
+                    or svc.config.image_generation.response_format
+                )
+                svc.config.image_generation.aspect_ratio = str(
+                    image_generation.get("aspect_ratio", svc.config.image_generation.aspect_ratio)
+                    or svc.config.image_generation.aspect_ratio
+                )
+                svc.config.image_generation.resolution = str(
+                    image_generation.get("resolution", svc.config.image_generation.resolution) or ""
+                )
+            if isinstance(embedding, dict):
+                svc.config.embedding.enabled = bool(embedding.get("enabled", svc.config.embedding.enabled))
+                svc.config.embedding.backend = str(
+                    embedding.get("backend", svc.config.embedding.backend) or svc.config.embedding.backend
+                )
+                svc.config.embedding.base_url = str(embedding.get("base_url", svc.config.embedding.base_url) or "")
+                emb_key = str(embedding.get("api_key", "") or "")
+                if "api_key" in embedding and not _is_masked(emb_key):
+                    svc.config.embedding.api_key = emb_key
+                svc.config.embedding.model = str(embedding.get("model", svc.config.embedding.model) or svc.config.embedding.model)
+                svc.config.embedding.timeout_seconds = _safe_float(
+                    embedding,
+                    "timeout_seconds",
+                    svc.config.embedding.timeout_seconds,
+                )
+            svc._persist_config()
         svc._refresh_runtime_components(rebuild_generator=True)
-        svc._persist_config()
         return self.get_ai_panel()
 
     def get_abilities_panel(self) -> dict[str, object]:
@@ -163,86 +164,87 @@ class SettingsAdminService:
 
     def save_abilities_panel(self, payload: dict[str, object]) -> dict[str, object]:
         svc = self.service
-        svc.config.search_enabled = bool(payload.get("search_enabled", svc.config.search_enabled))
-        svc.config.search_result_limit = _safe_int(payload, "search_result_limit", svc.config.search_result_limit)
-        svc.config.search_timeout_seconds = _safe_float(
-            payload,
-            "search_timeout_seconds",
-            svc.config.search_timeout_seconds,
-        )
-        svc.config.thinking_mode = bool(payload.get("thinking_mode", svc.config.thinking_mode))
-        svc.config.conversation_analysis = bool(payload.get("conversation_analysis", svc.config.conversation_analysis))
-        svc.config.summarization_mode = bool(payload.get("summarization_mode", svc.config.summarization_mode))
-        svc.config.member_auto_sync = bool(payload.get("member_auto_sync", svc.config.member_auto_sync))
-        svc.config.knowledge_auto_extract = bool(payload.get("knowledge_auto_extract", svc.config.knowledge_auto_extract))
-        svc.config.knowledge_auto_extract_limit = _safe_int(
-            payload,
-            "knowledge_auto_extract_limit",
-            svc.config.knowledge_auto_extract_limit,
-        )
-        svc.config.event_mode = bool(payload.get("event_mode", svc.config.event_mode))
-        svc.config.event_buffer_limit = _safe_int(payload, "event_buffer_limit", svc.config.event_buffer_limit)
-        svc.config.story_mode = bool(payload.get("story_mode", payload.get("narrator_mode", svc.config.story_mode)))
-        svc.config.story_style = str(
-            payload.get("story_style", payload.get("narrator_style", svc.config.story_style)) or svc.config.story_style
-        )
-        svc.config.story_detail_level = _safe_int(
-            payload,
-            "story_detail_level",
-            _safe_int(payload, "narrator_detail_level", svc.config.story_detail_level),
-        )
-        svc.config.value_game_mode = bool(payload.get("value_game_mode", svc.config.value_game_mode))
-        svc.config.value_game_reply_bonus = _safe_float(
-            payload,
-            "value_game_reply_bonus",
-            svc.config.value_game_reply_bonus,
-        )
-        svc.config.memory_graph_mode = bool(payload.get("memory_graph_mode", svc.config.memory_graph_mode))
-        svc.config.memory_graph_limit = _safe_int(payload, "memory_graph_limit", svc.config.memory_graph_limit)
-        svc.config.proactive_mode = bool(payload.get("proactive_mode", svc.config.proactive_mode))
-        svc.config.proactive_inactive_hours = _safe_float(
-            payload,
-            "proactive_inactive_hours",
-            svc.config.proactive_inactive_hours,
-        )
-        svc.config.proactive_candidate_limit = _safe_int(
-            payload,
-            "proactive_candidate_limit",
-            svc.config.proactive_candidate_limit,
-        )
-        svc.config.proactive_min_affinity = _safe_float(
-            payload,
-            "proactive_min_affinity",
-            svc.config.proactive_min_affinity,
-        )
-        svc.config.max_active_skills = _safe_int(payload, "max_active_skills", svc.config.max_active_skills)
-        svc.config.history_window_messages = _safe_int(
-            payload,
-            "history_window_messages",
-            svc.config.history_window_messages,
-        )
-        svc.config.history_window_chars = max(
-            0,
-            _safe_int(
+        with CONFIG_WRITE_LOCK:
+            svc.config.search_enabled = bool(payload.get("search_enabled", svc.config.search_enabled))
+            svc.config.search_result_limit = _safe_int(payload, "search_result_limit", svc.config.search_result_limit)
+            svc.config.search_timeout_seconds = _safe_float(
                 payload,
-                "history_window_chars",
-                svc.config.history_window_chars,
-            ),
-        )
-        svc.config.memory_recall_limit = _safe_int(payload, "memory_recall_limit", svc.config.memory_recall_limit)
-        svc.config.max_thinking_words = _safe_int(payload, "max_thinking_words", svc.config.max_thinking_words)
-        svc.config.short_term_memory_limit = _safe_int(
-            payload,
-            "short_term_memory_limit",
-            svc.config.short_term_memory_limit,
-        )
-        svc.config.memory_summary_batch_size = _safe_int(
-            payload,
-            "memory_summary_batch_size",
-            svc.config.memory_summary_batch_size,
-        )
+                "search_timeout_seconds",
+                svc.config.search_timeout_seconds,
+            )
+            svc.config.thinking_mode = bool(payload.get("thinking_mode", svc.config.thinking_mode))
+            svc.config.conversation_analysis = bool(payload.get("conversation_analysis", svc.config.conversation_analysis))
+            svc.config.summarization_mode = bool(payload.get("summarization_mode", svc.config.summarization_mode))
+            svc.config.member_auto_sync = bool(payload.get("member_auto_sync", svc.config.member_auto_sync))
+            svc.config.knowledge_auto_extract = bool(payload.get("knowledge_auto_extract", svc.config.knowledge_auto_extract))
+            svc.config.knowledge_auto_extract_limit = _safe_int(
+                payload,
+                "knowledge_auto_extract_limit",
+                svc.config.knowledge_auto_extract_limit,
+            )
+            svc.config.event_mode = bool(payload.get("event_mode", svc.config.event_mode))
+            svc.config.event_buffer_limit = _safe_int(payload, "event_buffer_limit", svc.config.event_buffer_limit)
+            svc.config.story_mode = bool(payload.get("story_mode", payload.get("narrator_mode", svc.config.story_mode)))
+            svc.config.story_style = str(
+                payload.get("story_style", payload.get("narrator_style", svc.config.story_style)) or svc.config.story_style
+            )
+            svc.config.story_detail_level = _safe_int(
+                payload,
+                "story_detail_level",
+                _safe_int(payload, "narrator_detail_level", svc.config.story_detail_level),
+            )
+            svc.config.value_game_mode = bool(payload.get("value_game_mode", svc.config.value_game_mode))
+            svc.config.value_game_reply_bonus = _safe_float(
+                payload,
+                "value_game_reply_bonus",
+                svc.config.value_game_reply_bonus,
+            )
+            svc.config.memory_graph_mode = bool(payload.get("memory_graph_mode", svc.config.memory_graph_mode))
+            svc.config.memory_graph_limit = _safe_int(payload, "memory_graph_limit", svc.config.memory_graph_limit)
+            svc.config.proactive_mode = bool(payload.get("proactive_mode", svc.config.proactive_mode))
+            svc.config.proactive_inactive_hours = _safe_float(
+                payload,
+                "proactive_inactive_hours",
+                svc.config.proactive_inactive_hours,
+            )
+            svc.config.proactive_candidate_limit = _safe_int(
+                payload,
+                "proactive_candidate_limit",
+                svc.config.proactive_candidate_limit,
+            )
+            svc.config.proactive_min_affinity = _safe_float(
+                payload,
+                "proactive_min_affinity",
+                svc.config.proactive_min_affinity,
+            )
+            svc.config.max_active_skills = _safe_int(payload, "max_active_skills", svc.config.max_active_skills)
+            svc.config.history_window_messages = _safe_int(
+                payload,
+                "history_window_messages",
+                svc.config.history_window_messages,
+            )
+            svc.config.history_window_chars = max(
+                0,
+                _safe_int(
+                    payload,
+                    "history_window_chars",
+                    svc.config.history_window_chars,
+                ),
+            )
+            svc.config.memory_recall_limit = _safe_int(payload, "memory_recall_limit", svc.config.memory_recall_limit)
+            svc.config.max_thinking_words = _safe_int(payload, "max_thinking_words", svc.config.max_thinking_words)
+            svc.config.short_term_memory_limit = _safe_int(
+                payload,
+                "short_term_memory_limit",
+                svc.config.short_term_memory_limit,
+            )
+            svc.config.memory_summary_batch_size = _safe_int(
+                payload,
+                "memory_summary_batch_size",
+                svc.config.memory_summary_batch_size,
+            )
+            svc._persist_config()
         svc._refresh_runtime_components()
-        svc._persist_config()
         return self.get_abilities_panel()
 
     def get_sidecar_panel(self, *, refresh: bool = False) -> dict[str, object]:
@@ -252,6 +254,7 @@ class SettingsAdminService:
             "adapter_name": svc.config.qq_sidecar.adapter_name,
             "outbound_base_url": svc.config.qq_sidecar.outbound_base_url,
             "access_token": _mask_key(svc.config.qq_sidecar.access_token),
+            "inbound_access_token": _mask_key(svc.config.qq_sidecar.inbound_access_token),
             "inbound_host": svc.config.qq_sidecar.inbound_host,
             "inbound_port": svc.config.qq_sidecar.inbound_port,
             "webui_base_url": svc.config.qq_sidecar.webui_base_url,
@@ -261,7 +264,7 @@ class SettingsAdminService:
             "webui_url": svc.napcat_login.webui_url() if svc.napcat_login is not None else "",
             "reverse_ws_url": svc.config.qq_sidecar.reverse_ws_url,
             "outbound_timeout_seconds": svc.config.qq_sidecar.outbound_timeout_seconds,
-            "delivery_mode": "live" if svc.config.qq_sidecar.outbound_base_url else "offline_capture",
+            "delivery_mode": "offline_capture" if svc.config.qq_sidecar.dry_run or not svc.config.qq_sidecar.outbound_base_url else "live",
             "llm_ready": svc.generator.llm_ready,
             "details": {},
         }
@@ -292,9 +295,10 @@ class SettingsAdminService:
 
     def save_sidecar_panel(self, payload: dict[str, object]) -> dict[str, object]:
         svc = self.service
-        self._apply_sidecar_payload(payload)
+        with CONFIG_WRITE_LOCK:
+            self._apply_sidecar_payload(payload)
+            svc._persist_config()
         svc._refresh_runtime_components(rebuild_outbound=True)
-        svc._persist_config()
         return self.get_sidecar_panel(refresh=False)
 
     def get_qq_login_panel(self, *, refresh: bool = False) -> dict[str, object]:
@@ -325,9 +329,10 @@ class SettingsAdminService:
 
     def save_qq_login_panel(self, payload: dict[str, object]) -> dict[str, object]:
         svc = self.service
-        self._apply_sidecar_payload(payload)
+        with CONFIG_WRITE_LOCK:
+            self._apply_sidecar_payload(payload)
+            svc._persist_config()
         svc._refresh_runtime_components(rebuild_outbound=False)
-        svc._persist_config()
         return self.get_qq_login_panel(refresh=False)
 
     def refresh_qq_login_panel(self) -> dict[str, object]:
@@ -365,9 +370,10 @@ class SettingsAdminService:
             "outbound_timeout_seconds",
             svc.config.qq_sidecar.outbound_timeout_seconds,
         )
-        access_token_raw = str(payload.get("access_token", "") or "")
-        if access_token_raw and not _is_masked(access_token_raw):
-            svc.config.qq_sidecar.access_token = access_token_raw
+        for token_field in ("access_token", "inbound_access_token", "reverse_ws_access_token"):
+            token = str(payload.get(token_field, "") or "")
+            if token_field in payload and not _is_masked(token):
+                setattr(svc.config.qq_sidecar, token_field, token)
         svc.config.qq_sidecar.inbound_host = str(
             payload.get("inbound_host", svc.config.qq_sidecar.inbound_host)
             or svc.config.qq_sidecar.inbound_host
@@ -384,7 +390,7 @@ class SettingsAdminService:
             "webui_timeout_seconds",
             svc.config.qq_sidecar.webui_timeout_seconds,
         )
-        webui_token_raw = str(payload.get("webui_token", "") or "")
+        webui_token_raw = str(payload.get("webui_token", svc.config.qq_sidecar.webui_token) or "")
         if _is_masked(webui_token_raw):
             webui_token_raw = svc.config.qq_sidecar.webui_token
         normalized_webui_base, normalized_webui_token = normalize_webui_settings(
@@ -418,66 +424,67 @@ class SettingsAdminService:
 
     def save_other_panel(self, payload: dict[str, object]) -> dict[str, object]:
         svc = self.service
-        follow_up_raw = payload.get("group_follow_up_window_seconds", svc.config.group_follow_up_window_seconds)
-        reply_delay_raw = payload.get("group_response_delay_seconds", svc.config.group_response_delay_seconds)
-        repeat_trigger_raw = payload.get("repeat_trigger_count", svc.config.repeat_trigger_count)
-        svc.config.service_name = str(payload.get("service_name", svc.config.service_name) or svc.config.service_name)
-        svc.config.assistant_name = str(payload.get("assistant_name", svc.config.assistant_name) or svc.config.assistant_name)
-        svc.config.bot_account_id = str(payload.get("bot_account_id", svc.config.bot_account_id) or "")
-        svc.config.group_reply_requires_mention = bool(
-            payload.get("group_reply_requires_mention", svc.config.group_reply_requires_mention)
-        )
-        svc.config.image_command_prefix = str(
-            payload.get("image_command_prefix", svc.config.image_command_prefix) or svc.config.image_command_prefix
-        )
-        svc.config.image_command_aliases = svc._coerce_list(
-            payload.get("image_command_aliases", svc.config.image_command_aliases)
-        )
-        svc.config.ignore_prefixes = svc._coerce_list(payload.get("ignore_prefixes", svc.config.ignore_prefixes))
-        svc.config.group_follow_up_window_seconds = max(
-            0.0,
-            float(svc.config.group_follow_up_window_seconds if follow_up_raw is None else follow_up_raw),
-        )
-        svc.config.group_response_delay_seconds = max(
-            0.0,
-            float(svc.config.group_response_delay_seconds if reply_delay_raw is None else reply_delay_raw),
-        )
-        svc.config.repeat_trigger_count = max(
-            0,
-            int(svc.config.repeat_trigger_count if repeat_trigger_raw is None else repeat_trigger_raw),
-        )
-        svc.config.multimodal_enabled = bool(payload.get("multimodal_enabled", svc.config.multimodal_enabled))
-        marketplace = payload.get("marketplace", {})
-        if isinstance(marketplace, dict):
-            svc.config.marketplace.enabled = bool(marketplace.get("enabled", svc.config.marketplace.enabled))
-            svc.config.marketplace.default_query = str(
-                marketplace.get("default_query", svc.config.marketplace.default_query)
-                or svc.config.marketplace.default_query
+        with CONFIG_WRITE_LOCK:
+            follow_up_raw = payload.get("group_follow_up_window_seconds", svc.config.group_follow_up_window_seconds)
+            reply_delay_raw = payload.get("group_response_delay_seconds", svc.config.group_response_delay_seconds)
+            repeat_trigger_raw = payload.get("repeat_trigger_count", svc.config.repeat_trigger_count)
+            svc.config.service_name = str(payload.get("service_name", svc.config.service_name) or svc.config.service_name)
+            svc.config.assistant_name = str(payload.get("assistant_name", svc.config.assistant_name) or svc.config.assistant_name)
+            svc.config.bot_account_id = str(payload.get("bot_account_id", svc.config.bot_account_id) or "")
+            svc.config.group_reply_requires_mention = bool(
+                payload.get("group_reply_requires_mention", svc.config.group_reply_requires_mention)
             )
-            sources = marketplace.get("sources")
-            if isinstance(sources, list):
-                next_sources = []
-                for item in sources:
-                    if not isinstance(item, dict):
-                        continue
-                    next_sources.append(
-                        type(svc.config.marketplace.sources[0])(
-                            source_id=str(item.get("source_id", item.get("id", "skillsmp")) or "skillsmp"),
-                            name=str(item.get("name", "SkillsMP") or "SkillsMP"),
-                            kind=str(item.get("kind", "skillsmp") or "skillsmp"),
-                            enabled=bool(item.get("enabled", True)),
-                            base_url=str(item.get("base_url", "https://skillsmp.com") or "https://skillsmp.com"),
-                            search_path=str(
-                                item.get("search_path", "/api/v1/skills/search") or "/api/v1/skills/search"
-                            ),
-                            browse_url=str(item.get("browse_url", "https://skillsmp.com/zh") or "https://skillsmp.com/zh"),
-                            api_key=str(item.get("api_key", "") or ""),
-                            timeout_seconds=float(item.get("timeout_seconds", 10.0) or 10.0),
-                            max_results=int(item.get("max_results", 12) or 12),
+            svc.config.image_command_prefix = str(
+                payload.get("image_command_prefix", svc.config.image_command_prefix) or svc.config.image_command_prefix
+            )
+            svc.config.image_command_aliases = svc._coerce_list(
+                payload.get("image_command_aliases", svc.config.image_command_aliases)
+            )
+            svc.config.ignore_prefixes = svc._coerce_list(payload.get("ignore_prefixes", svc.config.ignore_prefixes))
+            svc.config.group_follow_up_window_seconds = max(
+                0.0,
+                float(svc.config.group_follow_up_window_seconds if follow_up_raw is None else follow_up_raw),
+            )
+            svc.config.group_response_delay_seconds = max(
+                0.0,
+                float(svc.config.group_response_delay_seconds if reply_delay_raw is None else reply_delay_raw),
+            )
+            svc.config.repeat_trigger_count = max(
+                0,
+                int(svc.config.repeat_trigger_count if repeat_trigger_raw is None else repeat_trigger_raw),
+            )
+            svc.config.multimodal_enabled = bool(payload.get("multimodal_enabled", svc.config.multimodal_enabled))
+            marketplace = payload.get("marketplace", {})
+            if isinstance(marketplace, dict):
+                svc.config.marketplace.enabled = bool(marketplace.get("enabled", svc.config.marketplace.enabled))
+                svc.config.marketplace.default_query = str(
+                    marketplace.get("default_query", svc.config.marketplace.default_query)
+                    or svc.config.marketplace.default_query
+                )
+                sources = marketplace.get("sources")
+                if isinstance(sources, list):
+                    next_sources = []
+                    for item in sources:
+                        if not isinstance(item, dict):
+                            continue
+                        next_sources.append(
+                            type(svc.config.marketplace.sources[0])(
+                                source_id=str(item.get("source_id", item.get("id", "skillsmp")) or "skillsmp"),
+                                name=str(item.get("name", "SkillsMP") or "SkillsMP"),
+                                kind=str(item.get("kind", "skillsmp") or "skillsmp"),
+                                enabled=bool(item.get("enabled", True)),
+                                base_url=str(item.get("base_url", "https://skillsmp.com") or "https://skillsmp.com"),
+                                search_path=str(
+                                    item.get("search_path", "/api/v1/skills/search") or "/api/v1/skills/search"
+                                ),
+                                browse_url=str(item.get("browse_url", "https://skillsmp.com/zh") or "https://skillsmp.com/zh"),
+                                api_key=str(item.get("api_key", "") or ""),
+                                timeout_seconds=float(item.get("timeout_seconds", 10.0) or 10.0),
+                                max_results=int(item.get("max_results", 12) or 12),
+                            )
                         )
-                    )
-                if next_sources:
-                    svc.config.marketplace.sources = next_sources
+                    if next_sources:
+                        svc.config.marketplace.sources = next_sources
+            svc._persist_config()
         svc._refresh_runtime_components()
-        svc._persist_config()
         return self.get_other_panel()

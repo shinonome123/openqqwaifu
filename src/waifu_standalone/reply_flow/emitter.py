@@ -71,7 +71,15 @@ class OutboundEmitter:
     ) -> OutboundMessage:
         resolved_character_id = str(character_id or self._service._active_character_id()).strip()
         delay = self.delay_seconds(event)
+        if delay > 0:
+            self._service._submit_background_coro("delayed_outbound_send", self._deliver_after_delay(
+                event, message, delay_seconds=delay, assistant_name=assistant_name,
+                emotion=emotion, search_used=search_used, behavior_reason=behavior_reason,
+                character_id=resolved_character_id,
+            ))
+            return message
         self.dispatch(message, delay_seconds=delay)
+        self._service._mark_inbound_delivered(event)
         self._service._record_outbound(message)
         self._service.memory.save_assistant_message(
             event.launcher_id,
@@ -119,10 +127,20 @@ class OutboundEmitter:
         search_used: bool = False,
         behavior_reason: str = "",
         character_id: str = "",
+        _skip_delay: bool = False,
     ) -> OutboundMessage:
         resolved_character_id = str(character_id or self._service._active_character_id()).strip()
-        delay = self.delay_seconds(event)
+        delay = 0.0 if _skip_delay else self.delay_seconds(event)
+        if delay > 0:
+            task = asyncio.create_task(self._deliver_after_delay(
+                event, message, delay_seconds=delay, assistant_name=assistant_name,
+                emotion=emotion, search_used=search_used, behavior_reason=behavior_reason,
+                character_id=resolved_character_id,
+            ))
+            self._service._track_async_task("delayed_outbound_send", task)
+            return message
         await self.adispatch(message, delay_seconds=delay)
+        self._service._mark_inbound_delivered(event)
         self._service._record_outbound(message)
         await self._service.memory.asave_assistant_message(
             event.launcher_id,
@@ -162,6 +180,26 @@ class OutboundEmitter:
         self._service.gate.refresh_follow_up_window(event)
         return message
 
+    async def _deliver_after_delay(self, event: InboundEvent, message: OutboundMessage, *, delay_seconds: float, **kwargs) -> None:
+        await asyncio.sleep(delay_seconds)
+        lock = self._service._session_lock_for(event)
+        await lock.acquire()
+        try:
+            operation = asyncio.create_task(self.aemit(event, message, _skip_delay=True, **kwargs))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(operation)
+                    break
+                except asyncio.CancelledError:
+                    if operation.cancelled():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
+        finally:
+            lock.release()
+
     def delay_seconds(self, event: InboundEvent) -> float:
         if event.launcher_type != "group":
             return 0.0
@@ -192,29 +230,14 @@ class OutboundEmitter:
                 await asyncio.to_thread(self._service.outbound.send, part)
 
     def dispatch(self, message: OutboundMessage, *, delay_seconds: float) -> None:
-        if delay_seconds <= 0:
-            self._send_parts(message)
-            return
-        send_async = getattr(self._service.outbound, "send_async", None)
-        if callable(send_async):
-            self._service._submit_background_coro(
-                "delayed_outbound_send",
-                self.adelayed_send(message, delay_seconds=delay_seconds),
-            )
-            return
-
-        def delayed_send() -> None:
+        if delay_seconds > 0:
             time.sleep(delay_seconds)
-            self._send_parts(message)
-
-        self._service._submit_background_task("delayed_outbound_send", delayed_send)
+        self._send_parts(message)
 
     async def adispatch(self, message: OutboundMessage, *, delay_seconds: float) -> None:
-        if delay_seconds <= 0:
-            await self._asend_parts(message)
-            return
-        task = asyncio.create_task(self.adelayed_send(message, delay_seconds=delay_seconds))
-        self._service._track_async_task("delayed_outbound_send", task)
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        await self._asend_parts(message)
 
     async def adelayed_send(self, message: OutboundMessage, *, delay_seconds: float) -> None:
         if delay_seconds > 0:

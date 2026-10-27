@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+from threading import RLock
 from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
@@ -17,8 +19,11 @@ from ..config import (
     PluginsConfig,
     QQSidecarConfig,
     RateLimitConfig,
+    RuntimeV2Config,
     ToolPolicyConfig,
 )
+
+CONFIG_WRITE_LOCK = RLock()
 
 
 class ConfigManager:
@@ -28,12 +33,15 @@ class ConfigManager:
         self.path = Path(path) if path else None
 
     def load(self) -> AppConfig:
-        if self.path is None or not self.path.exists():
+        if self.path is not None and not self.path.is_file():
+            raise FileNotFoundError(f"Config file does not exist: {self.path}. Create it with dump-config first.")
+        if self.path is None:
             config = _apply_env_overrides(AppConfig())
             config = _apply_napcat_autodiscovery(config, config_path=self.path)
             return _normalize_webui_fields(config)
 
         raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        defaults = AppConfig()
         data_root = _resolve_config_path(raw.get("data_root", "data"), config_path=self.path)
 
         qq_sidecar = QQSidecarConfig(**raw.get("qq_sidecar", {}))
@@ -45,10 +53,12 @@ class ConfigManager:
         rate_limits = _load_rate_limits(raw.get("rate_limits"))
         claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
+        runtime_v2 = RuntimeV2Config(**raw.get("runtime_v2", {}))
+        runtime_v2.private_user_ids = _load_str_list(runtime_v2.private_user_ids, [])
         config = AppConfig(
             service_name=str(raw.get("service_name", "waifu-standalone")),
             config_path=str(self.path.resolve()),
-            assistant_name=str(raw.get("assistant_name", "鐞夌拑")),
+            assistant_name=str(raw.get("assistant_name", defaults.assistant_name)),
             character=str(raw.get("character", "default")),
             bot_account_id=str(raw.get("bot_account_id", "")),
             group_reply_requires_mention=bool(raw.get("group_reply_requires_mention", True)),
@@ -76,8 +86,8 @@ class ConfigManager:
             proactive_inactive_hours=float(raw.get("proactive_inactive_hours", 6.0)),
             proactive_candidate_limit=int(raw.get("proactive_candidate_limit", 6)),
             proactive_min_affinity=float(raw.get("proactive_min_affinity", 0.12)),
-            image_command_prefix=str(raw.get("image_command_prefix", "鐢熷浘")),
-            image_command_aliases=_load_str_list(raw.get("image_command_aliases"), ["鐢熷浘", "draw"]),
+            image_command_prefix=str(raw.get("image_command_prefix", defaults.image_command_prefix)),
+            image_command_aliases=_load_str_list(raw.get("image_command_aliases"), defaults.image_command_aliases),
             ignore_prefixes=_load_str_list(raw.get("ignore_prefixes"), ["!", "/"]),
             explicit_skill_prefixes=_load_str_list(raw.get("explicit_skill_prefixes"), ["/skill"]),
             group_follow_up_window_seconds=float(raw.get("group_follow_up_window_seconds", 5.0)),
@@ -102,6 +112,7 @@ class ConfigManager:
             claw_runtime=claw_runtime,
             plugins=plugins,
             qq_sidecar=qq_sidecar,
+            runtime_v2=runtime_v2,
         )
         config = _apply_env_overrides(config, config_path=self.path)
         config = _apply_napcat_autodiscovery(config, config_path=self.path)
@@ -114,15 +125,14 @@ class ConfigManager:
         self.save(config, target)
 
     def save(self, config: AppConfig, path: str | Path | None = None) -> None:
-        target = Path(path) if path else Path(config.config_path)
-        if not str(target):
+        raw_path = path if path is not None else config.config_path
+        if not str(raw_path or "").strip():
             raise ValueError("config path is required")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(serialize_app_config(config), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        sync_napcat_sidecar_files(config, config_path=target)
+        target = Path(raw_path)
+        with CONFIG_WRITE_LOCK:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _write_json_file_atomic(target, serialize_app_config(config))
+            sync_napcat_sidecar_files(config, config_path=target)
 
 
 def _load_str_list(raw_value: object, default: list[str]) -> list[str]:
@@ -277,6 +287,14 @@ def serialize_app_config(config: AppConfig) -> dict[str, object]:
 
 
 def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> AppConfig:
+    config.runtime_v2.enabled = _env_bool("OPENQQWAIFU_RUNTIME_V2_ENABLED", config.runtime_v2.enabled)
+    config.runtime_v2.structured_memory_enabled = _env_bool(
+        "OPENQQWAIFU_RUNTIME_V2_STRUCTURED_MEMORY_ENABLED", config.runtime_v2.structured_memory_enabled)
+    config.runtime_v2.reminders_enabled = _env_bool("OPENQQWAIFU_RUNTIME_V2_REMINDERS_ENABLED", config.runtime_v2.reminders_enabled)
+    config.runtime_v2.reminder_timezone = _env_str("OPENQQWAIFU_RUNTIME_V2_REMINDER_TIMEZONE") or config.runtime_v2.reminder_timezone
+    private_users = os.getenv("OPENQQWAIFU_RUNTIME_V2_PRIVATE_USER_IDS")
+    if private_users is not None:
+        config.runtime_v2.private_user_ids = _load_str_list(private_users, [])
     data_root = _env_str("OPENQQWAIFU_DATA_ROOT")
     if data_root:
         root = Path(data_root)
@@ -392,6 +410,9 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     qq_sidecar.access_token = _env_str(
         "OPENQQWAIFU_QQ_SIDECAR_ACCESS_TOKEN",
         qq_sidecar.access_token,
+    )
+    qq_sidecar.inbound_access_token = _env_str(
+        "OPENQQWAIFU_QQ_SIDECAR_INBOUND_ACCESS_TOKEN", qq_sidecar.inbound_access_token,
     )
     qq_sidecar.webui_base_url = _env_str(
         "OPENQQWAIFU_QQ_SIDECAR_WEBUI_BASE_URL",
@@ -560,7 +581,7 @@ def _provision_napcat_onebot_network(config: AppConfig, config_dirs: list[Path])
         http_clients, clients_changed = _ensure_managed_http_client(
             http_clients,
             webhook_url,
-            qq_sidecar.access_token,
+            qq_sidecar.inbound_access_token,
         )
         if clients_changed:
             network["httpClients"] = http_clients
@@ -701,7 +722,7 @@ def _normalize_managed_http_server(entry: dict, token: str) -> bool:
     changed = False
     desired = _default_http_server_entry(
         int(entry.get("port") or 3000),
-        str(entry.get("token") or token or ""),
+        str(token or ""),
     )
     for key, value in desired.items():
         if entry.get(key) != value:
@@ -963,9 +984,15 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _write_json_file_atomic(path: Path, payload: dict[str, object]) -> None:
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    tmp_path.replace(path)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary_path = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)

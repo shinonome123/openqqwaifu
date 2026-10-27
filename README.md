@@ -29,6 +29,16 @@
 
 ## 架构概览
 
+新版私聊运行链路已提供默认关闭的试运行入口：持久事件、会话角色绑定、结构化上下文、Outbox、重启恢复和发送结果核对。使用范围与配置见 [第一批实现说明](docs/RUNTIME_V2_FIRST_SLICE.md)；管理员可在「会话记录」查看轮次、上下文预算、角色版本并核对发送，详见 [上下文与会话控制台](docs/RUNTIME_V2_CONSOLE.md)。[事实、经历与纠正](docs/RUNTIME_V2_MEMORY.md) 已接入持久记录、来源追踪、修订和召回；[持久提醒](docs/RUNTIME_V2_REMINDERS.md) 支持明确授权的一次性提醒、延期、取消和恢复。[会话删除与恢复屏障](docs/RUNTIME_V2_PRIVACY.md) 防止旧任务回写和恢复旧主库导致数据复活。[主动联系规则](docs/RUNTIME_V2_CONTACT_POLICY.md) 已接入逐私聊授权、时区、静默时段、频率限制和暂停恢复，现有提醒也遵守这些边界。[经历跟进候选](docs/RUNTIME_V2_FOLLOWUPS.md) 已支持来源核对、正文与时间确认、排期、失效取消和发送核对；[角色化跟进草稿](docs/RUNTIME_V2_FOLLOWUP_DRAFTS.md) 支持明确请求后台生成、来源追踪和人工选用，生成不会自动发送。[经历时间提取与澄清](docs/RUNTIME_V2_EPISODE_TIMES.md) 支持按来源解析常见时间表达、人工确认日期或时段，并在时间更正后撤销旧排期。[经历时间对话确认](docs/RUNTIME_V2_EPISODE_TIME_DIALOGUE.md) 已支持用户直接在私聊中澄清、选择、确认和更正时间，控制台保留来源审计。自动记忆提取与提醒仍分别默认关闭，无人核对的自动排期尚未开放。
+
+真实模型的有限抽样结果见 [连续对话试验](docs/RUNTIME_V2_EXPERIENCE_TRIAL.md)。DeepSeek 纯对话已体现角色差异，但结构化回复仍有空白返回，完整体验验收尚未通过；后续修复入口与合成复现材料见 [问题交接](docs/HANDOFF_DEEPSEEK_2026-10-26.md)。
+
+不连接 QQ 或真实模型即可运行演示（输出目录需为新目录）：
+
+```bash
+python -B run_cli.py runtime-v2-demo --output-dir .codex-temp/runtime-v2-demo-local
+```
+
 ```text
 NapCat / OneBot
         |
@@ -128,6 +138,26 @@ python run_cli.py import-skill-bundle --config data/config.json --input C:\path\
 - JSON 文件是主配置源
 - 环境变量会以 `OPENQQWAIFU_` 前缀覆盖配置
 - 可通过 `dump-config` 生成带默认值的模板
+
+显式指定的配置文件必须存在；首次启动先执行 `dump-config`。HTTP 模式须设置独立的
+`qq_sidecar.inbound_access_token`（或 `OPENQQWAIFU_QQ_SIDECAR_INBOUND_ACCESS_TOKEN`）并在
+NapCat HTTP 客户端填写相同 token。控制台的 Sidecar 页面也可配置，程序会同步管理的
+NapCat 回调配置。回调接受 `Authorization: Bearer <token>` 或 OneBot `X-Signature`
+HMAC-SHA1 签名；未配置令牌会拒绝 HTTP 事件。`qq_sidecar.access_token` 仅用于调用
+NapCat 动作接口；`reverse_ws` 模式关闭 HTTP 事件入口并使用单独的反向 WebSocket 令牌。
+
+`tool_policy.authorized_user_ids` 指定允许读取、列出、写入本地文件、执行命令和抓取网页（web-fetch）的 QQ 用户 ID，默认空列表；
+本地文件摘要也需要这项授权，并受允许读取目录约束。远程网页摘要和正常会话摘要不需要这项本地文件授权。
+也可用 `OPENQQWAIFU_TOOL_POLICY_AUTHORIZED_USER_IDS` 设置以逗号分隔的 ID。
+执行命令使用服务进程的宿主权限；只应添加你信任拥有这些权限的用户。
+
+`qq_sidecar.dry_run = true` 会捕获出站消息，不发送到 QQ；HTTP 和反向 WebSocket 模式均适用，
+反向 WebSocket 仍可接收入站事件。也可设置 `OPENQQWAIFU_QQ_SIDECAR_DRY_RUN=true`。
+
+开启 `multimodal_enabled` 后，OpenAI 兼容接口和 Claude 接口会收到消息中的图片 URL 或 base64 数据；
+所选模型也必须支持图片输入。当前 Dify 适配器不支持这条图片理解路径，会明确提示不可用。
+生图须同时启用 `image_generation.enabled` 并配置可用提供商；禁用或未配置时会报告失败。
+关闭 `search_enabled` 后，搜索执行和搜索缓存结果都不可用。
 
 关键配置块：
 

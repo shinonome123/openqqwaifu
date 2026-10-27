@@ -39,34 +39,34 @@ export function mount(root) {
     try {
       await api.saveAbilitiesPanel({
         search_enabled: !!state.search_enabled,
-        search_result_limit: Number(state.search_result_limit || 3),
-        search_timeout_seconds: Number(state.search_timeout_seconds || 8),
+        search_result_limit: Number(state.search_result_limit ?? 3),
+        search_timeout_seconds: Number(state.search_timeout_seconds ?? 8),
         thinking_mode: !!state.thinking_mode,
         conversation_analysis: !!state.conversation_analysis,
         summarization_mode: !!state.summarization_mode,
         member_auto_sync: !!state.member_auto_sync,
         knowledge_auto_extract: !!state.knowledge_auto_extract,
-        knowledge_auto_extract_limit: Number(state.knowledge_auto_extract_limit || 2),
+        knowledge_auto_extract_limit: Number(state.knowledge_auto_extract_limit ?? 2),
         event_mode: !!state.event_mode,
-        event_buffer_limit: Number(state.event_buffer_limit || 120),
+        event_buffer_limit: Number(state.event_buffer_limit ?? 120),
         story_mode: !!state.story_mode,
         story_style: String(state.story_style || "intimate"),
-        story_detail_level: Number(state.story_detail_level || 2),
+        story_detail_level: Number(state.story_detail_level ?? 2),
         value_game_mode: !!state.value_game_mode,
-        value_game_reply_bonus: Number(state.value_game_reply_bonus || 0.08),
+        value_game_reply_bonus: Number(state.value_game_reply_bonus ?? 0.08),
         memory_graph_mode: !!state.memory_graph_mode,
-        memory_graph_limit: Number(state.memory_graph_limit || 8),
+        memory_graph_limit: Number(state.memory_graph_limit ?? 8),
         proactive_mode: !!state.proactive_mode,
-        proactive_inactive_hours: Number(state.proactive_inactive_hours || 6),
-        proactive_candidate_limit: Number(state.proactive_candidate_limit || 6),
-        proactive_min_affinity: Number(state.proactive_min_affinity || 0.12),
-        max_active_skills: Number(state.max_active_skills || 3),
-        history_window_messages: Number(state.history_window_messages || 30),
+        proactive_inactive_hours: Number(state.proactive_inactive_hours ?? 6),
+        proactive_candidate_limit: Number(state.proactive_candidate_limit ?? 6),
+        proactive_min_affinity: Number(state.proactive_min_affinity ?? 0.12),
+        max_active_skills: Number(state.max_active_skills ?? 3),
+        history_window_messages: Number(state.history_window_messages ?? 30),
         history_window_chars: Number(state.history_window_chars ?? 2500),
-        memory_recall_limit: Number(state.memory_recall_limit || 3),
-        max_thinking_words: Number(state.max_thinking_words || 80),
-        short_term_memory_limit: Number(state.short_term_memory_limit || 30),
-        memory_summary_batch_size: Number(state.memory_summary_batch_size || 12),
+        memory_recall_limit: Number(state.memory_recall_limit ?? 3),
+        max_thinking_words: Number(state.max_thinking_words ?? 80),
+        short_term_memory_limit: Number(state.short_term_memory_limit ?? 30),
+        memory_summary_batch_size: Number(state.memory_summary_batch_size ?? 12),
       });
       toastOk(t("actions.savedOk"));
       load();
@@ -144,7 +144,7 @@ export function mount(root) {
             label: t("abilities.field.knowledgeAutoExtractLimit"),
             hint: t("abilities.field.knowledgeAutoExtractLimit.hint"),
             control: numberInput({
-              value: Number(state.knowledge_auto_extract_limit || 2),
+              value: Number(state.knowledge_auto_extract_limit ?? 2),
               min: 1,
               max: 8,
               onChange: (v) => patch({ knowledge_auto_extract_limit: v }),
@@ -184,7 +184,7 @@ export function mount(root) {
                 fieldRow({
                   label: t("abilities.field.storyDetail"),
                   control: numberInput({
-                    value: Number(state.story_detail_level || 2),
+                    value: Number(state.story_detail_level ?? 2),
                     min: 1,
                     max: 4,
                     onChange: (v) => patch({ story_detail_level: v }),
@@ -196,7 +196,7 @@ export function mount(root) {
             label: t("character.field.maxThinkingWords"),
             hint: t("character.field.maxThinkingWords.hint"),
             control: numberInput({
-              value: Number(state.max_thinking_words || 80),
+              value: Number(state.max_thinking_words ?? 80),
               min: 1,
               max: 200,
               onChange: (v) => patch({ max_thinking_words: v }),
@@ -222,7 +222,7 @@ export function mount(root) {
             label: t("abilities.field.replyBonus"),
             hint: t("abilities.field.replyBonus.hint"),
             control: numberInput({
-              value: Number(state.value_game_reply_bonus || 0.08),
+              value: Number(state.value_game_reply_bonus ?? 0.08),
               min: -1,
               max: 1,
               step: 0.01,
@@ -240,7 +240,7 @@ export function mount(root) {
           fieldRow({
             label: t("abilities.field.proactiveInactive"),
             control: numberInput({
-              value: Number(state.proactive_inactive_hours || 6),
+              value: Number(state.proactive_inactive_hours ?? 6),
               min: 1,
               max: 336,
               onChange: (v) => patch({ proactive_inactive_hours: v }),
@@ -249,7 +249,7 @@ export function mount(root) {
           fieldRow({
             label: t("abilities.field.proactiveLimit"),
             control: numberInput({
-              value: Number(state.proactive_candidate_limit || 6),
+              value: Number(state.proactive_candidate_limit ?? 6),
               min: 1,
               max: 50,
               onChange: (v) => patch({ proactive_candidate_limit: v }),
@@ -258,7 +258,7 @@ export function mount(root) {
           fieldRow({
             label: t("abilities.field.proactiveMinAffinity"),
             control: numberInput({
-              value: Number(state.proactive_min_affinity || 0.12),
+              value: Number(state.proactive_min_affinity ?? 0.12),
               min: -1,
               max: 1,
               step: 0.01,
@@ -277,7 +277,7 @@ export function mount(root) {
             label: t("character.field.historyWindow"),
             hint: t("character.field.historyWindow.hint"),
             control: numberInput({
-              value: Number(state.history_window_messages || 30),
+              value: Number(state.history_window_messages ?? 30),
               min: 1,
               max: 128,
               onChange: (v) => patch({ history_window_messages: v }),
@@ -298,7 +298,7 @@ export function mount(root) {
             label: t("character.field.memoryLimit"),
             hint: t("character.field.memoryLimit.hint"),
             control: numberInput({
-              value: Number(state.memory_recall_limit || 3),
+              value: Number(state.memory_recall_limit ?? 3),
               min: 0,
               max: 20,
               onChange: (v) => patch({ memory_recall_limit: v }),
@@ -307,7 +307,7 @@ export function mount(root) {
           fieldRow({
             label: t("abilities.field.shortTerm"),
             control: numberInput({
-              value: Number(state.short_term_memory_limit || 30),
+              value: Number(state.short_term_memory_limit ?? 30),
               min: 1,
               max: 200,
               onChange: (v) => patch({ short_term_memory_limit: v }),
@@ -316,7 +316,7 @@ export function mount(root) {
           fieldRow({
             label: t("abilities.field.summaryBatch"),
             control: numberInput({
-              value: Number(state.memory_summary_batch_size || 12),
+              value: Number(state.memory_summary_batch_size ?? 12),
               min: 1,
               max: 100,
               onChange: (v) => patch({ memory_summary_batch_size: v }),
@@ -333,7 +333,7 @@ export function mount(root) {
           fieldRow({
             label: t("abilities.field.memoryGraphLimit"),
             control: numberInput({
-              value: Number(state.memory_graph_limit || 8),
+              value: Number(state.memory_graph_limit ?? 8),
               min: 1,
               max: 24,
               onChange: (v) => patch({ memory_graph_limit: v }),
@@ -350,7 +350,7 @@ export function mount(root) {
           fieldRow({
             label: t("skills.field.maxActive"),
             control: numberInput({
-              value: Number(state.max_active_skills || 3),
+              value: Number(state.max_active_skills ?? 3),
               min: 0,
               max: 20,
               onChange: (v) => patch({ max_active_skills: v }),
@@ -366,7 +366,7 @@ export function mount(root) {
           fieldRow({
             label: t("skills.field.searchLimit"),
             control: numberInput({
-              value: Number(state.search_result_limit || 3),
+              value: Number(state.search_result_limit ?? 3),
               min: 1,
               max: 20,
               onChange: (v) => patch({ search_result_limit: v }),
@@ -375,7 +375,7 @@ export function mount(root) {
           fieldRow({
             label: t("skills.field.searchTimeout"),
             control: numberInput({
-              value: Number(state.search_timeout_seconds || 8),
+              value: Number(state.search_timeout_seconds ?? 8),
               min: 1,
               max: 120,
               onChange: (v) => patch({ search_timeout_seconds: v }),
@@ -384,7 +384,7 @@ export function mount(root) {
           fieldRow({
             label: t("abilities.field.eventBuffer"),
             control: numberInput({
-              value: Number(state.event_buffer_limit || 120),
+              value: Number(state.event_buffer_limit ?? 120),
               min: 20,
               max: 500,
               onChange: (v) => patch({ event_buffer_limit: v }),

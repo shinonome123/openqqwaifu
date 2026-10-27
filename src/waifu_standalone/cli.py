@@ -18,6 +18,14 @@ from .web import HttpApi, run_server
 
 def main() -> None:
     args = _build_parser().parse_args()
+    if args.command == "runtime-v2-demo":
+        from .runtime_v2.demo import run_demo
+        print(json.dumps(run_demo(args.output_dir), ensure_ascii=False, indent=2))
+        return
+    if args.command == "runtime-v2-status":
+        from .runtime_v2.store import RuntimeStore
+        print(json.dumps(RuntimeStore.inspect(args.database, args.outbox_id), ensure_ascii=False, indent=2))
+        return
     if args.command == "dump-config":
         ConfigManager().dump_default(args.path)
         print(f"default config written to {Path(args.path).resolve()}")
@@ -152,6 +160,12 @@ def _check_sidecar(config: AppConfig) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="waifu-standalone")
     subparsers = parser.add_subparsers(dest="command")
+
+    demo = subparsers.add_parser("runtime-v2-demo", help="offline private-runtime demonstration; no network calls")
+    demo.add_argument("--output-dir", required=True, help="new directory for the isolated demo database and report")
+    status = subparsers.add_parser("runtime-v2-status", help="read-only inspection without starting any worker")
+    status.add_argument("--database", required=True)
+    status.add_argument("--outbox-id", default="", help="inspect one delivery, including its message text")
 
     serve = subparsers.add_parser("serve")
     serve.add_argument("--config", default=None)

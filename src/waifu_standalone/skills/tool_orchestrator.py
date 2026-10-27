@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from ..models import InboundEvent, SessionMemory
 from .registry import SkillSpec
-from .tool_registry import ToolExposureContext
+from .tool_registry import ToolExposureContext, ToolInvocation, ToolSpec
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -27,6 +27,46 @@ class ToolCallingOrchestrator:
 
     def __init__(self, service: "WaifuService") -> None:
         self._service = service
+        service.tools.execution_policy = self._denial_reason
+
+    def _denial_reason(self, tool: ToolSpec, invocation: ToolInvocation) -> str:
+        svc = self._service
+        tool_id = tool.tool_id
+        if not svc.config.skills_enabled:
+            return "skills are disabled"
+        skills = svc.skills.list_skills()
+        requires_authorization = False
+        if invocation.skill is not None:
+            current = next((item for item in skills if item.skill_id == invocation.skill.skill_id), None)
+            if (current is None or not current.enabled or not current.eligible or current.validation_errors
+                    or not current.is_tool_handler or svc.tools.get(current.handler_target) is not tool):
+                return f"skill is disabled or unavailable: {invocation.skill.skill_id}"
+            requires_authorization = current.policy.requires_authorization
+        else:
+            bound = [item for item in skills if item.is_tool_handler and svc.tools.get(item.handler_target) is tool]
+            if bound and not any(item.enabled and item.eligible and not item.validation_errors for item in bound):
+                return f"skill is disabled or unavailable: {tool_id}"
+        if tool_id == "image" and not svc.generator.image_ready:
+            return "image generation is disabled or unavailable"
+        if tool_id in {"search", "search-links"} and not svc.config.search_enabled:
+            return "search is disabled"
+        policy = svc.config.tool_policy
+        if (tool_id in {"read-file", "list-files", "write-file", "exec-command"}
+                or tool.risk_level == "command") and not policy.enabled:
+            return f"{tool_id} is disabled by tool policy"
+        if tool_id == "write-file" and not policy.write_enabled:
+            return "write-file is disabled by tool policy"
+        if (tool_id == "exec-command" or tool.risk_level == "command") and not policy.exec_enabled:
+            return f"{tool_id} is disabled by tool policy"
+        if (tool_id in {"read-file", "list-files", "write-file", "exec-command"}
+                or tool.risk_level in _PRIVILEGED_RISK_LEVELS or requires_authorization):
+            if not self._is_tool_authorized(invocation.event):
+                return f"permission denied: {tool_id} requires an authorized caller"
+        if invocation.event.launcher_type == "group" and tool_id in _NAMING_TOOL_IDS:
+            bot_id = str(svc.config.bot_account_id or "").strip()
+            if not (bot_id and invocation.event.has_bot_mention(bot_id)):
+                return "naming tools require a bot mention in group conversations"
+        return ""
 
     def prompt_skill_cards(self, latest_message: str = "") -> list[SkillSpec]:
         svc = self._service
@@ -52,7 +92,7 @@ class ToolCallingOrchestrator:
             assistant_name=assistant_name,
             allowed_tool_ids=self._allowed_tool_ids(event),
             skill_cards_by_tool=self._skill_cards_by_tool(),
-            skill_manifests=svc.skills.exposed_manifests(latest_message),
+            skill_manifests=svc.skills.exposed_manifests(latest_message) if svc.config.skills_enabled else [],
         )
 
     def model_schemas(self, context: ToolExposureContext) -> list[dict[str, object]]:
@@ -85,6 +125,8 @@ class ToolCallingOrchestrator:
 
     def _allowed_tool_ids(self, event: InboundEvent) -> set[str]:
         svc = self._service
+        if not svc.config.skills_enabled:
+            return set()
         items = svc.tools.describe().get("items", [])
         all_model_tools = {
             str(item.get("id", "") or "").strip().lower()

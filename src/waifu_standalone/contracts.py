@@ -34,5 +34,5 @@ class ImageGenerator(Protocol):
 
 
 class OutboundPort(Protocol):
-    def send(self, message: OutboundMessage) -> None:
+    def send(self, message: OutboundMessage) -> dict[str, object] | None:
         ...

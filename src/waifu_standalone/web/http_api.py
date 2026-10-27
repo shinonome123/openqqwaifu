@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
+import hmac
 import io
 import json
 import logging
 import re
 import time
+import zlib
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +22,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 from ..gateways.inbound_dedup import InboundDeduplicator
 from ..models import InboundEvent, MessageSegment
 from ..infra import MetricsRegistry, logging_is_configured
+from ..runtime_v2.store import RuntimeBusy
+from ..runtime_v2.privacy import ConversationErased, PrivacyUnavailable
 from .auth import AuthManager
 
 
@@ -80,6 +85,8 @@ def parse_onebot_event(payload: dict[str, Any]) -> InboundEvent:
         segments=segments,
         message_id=str(payload.get("message_id") or ""),
         raw_message=raw_message,
+        source_account_id=str(payload.get("self_id") or ""),
+        occurred_at=payload.get("time") if isinstance(payload.get("time"), (int, float)) else None,
     )
 
 
@@ -147,9 +154,13 @@ class HttpApi:
     auth: AuthManager | None = None
     metrics: MetricsRegistry | None = None
     # Shared by the HTTP callback and reverse-WS paths, which both end in handle_json[_async].
-    dedup: InboundDeduplicator = field(default_factory=InboundDeduplicator)
+    # Defaults to the service's deduplicator, which the emitter marks once a reply is sent.
+    dedup: InboundDeduplicator | None = None
 
     def __post_init__(self) -> None:
+        if self.dedup is None:
+            shared = getattr(self.service, "inbound_dedup", None)
+            self.dedup = shared if isinstance(shared, InboundDeduplicator) else InboundDeduplicator()
         if self.auth is None:
             data_root = getattr(getattr(self.service, "config", None), "data_root", "data")
             self.auth = AuthManager(data_root)
@@ -187,12 +198,23 @@ class HttpApi:
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 
             event = parse_onebot_event(payload)
-            claim = self.dedup.claim(event, event_time=payload.get("time"))
-            if claim is None:
-                outcome = "duplicate"
-                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
+            claim = ""
+            # Runtime v2 conversations keep their own durable de-duplication.
+            if not self._routes_to_runtime_v2(event):
+                claim = self.dedup.claim(event, event_time=payload.get("time"))
+                if claim is None:
+                    outcome = "duplicate"
+                    return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
             try:
                 message = self.service.handle_event(event)
+            except ConversationErased:
+                outcome = "ignored"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "conversation_erased"}
+            except (RuntimeBusy, PrivacyUnavailable) as exc:
+                # 503 asks NapCat to retry; the retry must not count as a duplicate.
+                self.dedup.release(claim)
+                outcome = "unavailable"
+                return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "unavailable", "reason": str(exc)}
             except Exception as exc:
                 self.dedup.release(claim)
                 outcome = "delivery_failed"
@@ -208,6 +230,10 @@ class HttpApi:
             if message is None:
                 outcome = "ignored"
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "empty event"}
+            from ..runtime_v2.contracts import Admission
+            if isinstance(message, Admission):
+                outcome = "queued"
+                return HTTPStatus.ACCEPTED, {"status": "queued", **asdict(message)}
             outcome = "ok"
             return HTTPStatus.OK, {
                 "status": "ok",
@@ -251,16 +277,27 @@ class HttpApi:
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 
             event = parse_onebot_event(payload)
-            claim = self.dedup.claim(event, event_time=payload.get("time"))
-            if claim is None:
-                outcome = "duplicate"
-                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
+            claim = ""
+            # Runtime v2 conversations keep their own durable de-duplication.
+            if not self._routes_to_runtime_v2(event):
+                claim = self.dedup.claim(event, event_time=payload.get("time"))
+                if claim is None:
+                    outcome = "duplicate"
+                    return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
             try:
                 handle_event_async = getattr(self.service, "handle_event_async", None)
                 if callable(handle_event_async):
                     message = await handle_event_async(event)
                 else:
                     message = await asyncio.to_thread(self.service.handle_event, event)
+            except ConversationErased:
+                outcome = "ignored"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "conversation_erased"}
+            except (RuntimeBusy, PrivacyUnavailable) as exc:
+                # 503 asks NapCat to retry; the retry must not count as a duplicate.
+                self.dedup.release(claim)
+                outcome = "unavailable"
+                return HTTPStatus.SERVICE_UNAVAILABLE, {"status": "unavailable", "reason": str(exc)}
             except Exception as exc:
                 self.dedup.release(claim)
                 outcome = "delivery_failed"
@@ -276,6 +313,10 @@ class HttpApi:
             if message is None:
                 outcome = "ignored"
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "empty event"}
+            from ..runtime_v2.contracts import Admission
+            if isinstance(message, Admission):
+                outcome = "queued"
+                return HTTPStatus.ACCEPTED, {"status": "queued", **asdict(message)}
             outcome = "ok"
             return HTTPStatus.OK, {
                 "status": "ok",
@@ -450,6 +491,131 @@ class HttpApi:
 
     def get_memory_panel(self) -> dict[str, Any]:
         return dict(self.service.get_memory_panel())
+
+    def _routes_to_runtime_v2(self, event: InboundEvent) -> bool:
+        runtime = getattr(self.service, "private_runtime", None)
+        return runtime is not None and bool(runtime.routes(event))
+
+    def purge_memory(self) -> dict[str, Any]:
+        return dict(self.service.memory_admin_service.purge_memory())
+
+    def runtime_v2_status(self) -> dict[str, Any]:
+        runtime = getattr(self.service, "private_runtime", None)
+        return runtime.host.status() if runtime is not None else {"enabled": False}
+
+    def runtime_v2_delivery(self, outbox_id: str) -> dict[str, Any]:
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise ValueError("runtime v2 is disabled")
+        return runtime.store.delivery_detail(outbox_id)
+
+    def runtime_v2_conversations(self, *, limit=30, after_id="") -> dict[str, Any]:
+        from ..runtime_v2.inspection import page_limit
+        limit = page_limit(limit)
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            return {"enabled": False, "conversations": [], "next_after_id": None}
+        return runtime.store.conversations(limit=limit, after_id=after_id)
+
+    def runtime_v2_conversation(self, conversation_id: str, *, limit=30, before_seq=None) -> dict[str, Any]:
+        from ..runtime_v2.inspection import page_limit, sequence_cursor
+        limit, before_seq = page_limit(limit), sequence_cursor(before_seq)
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise LookupError("runtime v2 is disabled")
+        return runtime.store.conversation_detail(conversation_id, limit=limit, before_seq=before_seq)
+
+    def runtime_v2_memories(self, conversation_id, character_id, *, memory_id="", limit=30, before_id=None):
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise LookupError("runtime v2 is disabled")
+        if not character_id:
+            raise ValueError("character_id is required")
+        if memory_id:
+            return runtime.store.memory_detail(conversation_id, character_id, memory_id)
+        return {**runtime.store.memories(conversation_id, character_id, limit=limit, before_id=before_id),
+                "structured_extraction_enabled": runtime.structured_memory_enabled}
+
+    def runtime_v2_reminders(self, conversation_id, *, task_id="", limit=30, before_id=None):
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise LookupError("runtime v2 is disabled")
+        return runtime.store.reminder_list(conversation_id, task_id=task_id, limit=limit, before_id=before_id)
+
+    def runtime_v2_privacy(self, conversation_id):
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise LookupError("runtime v2 is disabled")
+        return runtime.store.privacy_status(conversation_id)
+
+    def runtime_v2_contact_policy(self, conversation_id):
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise LookupError("runtime v2 is disabled")
+        return runtime.store.contact_policy_detail(conversation_id)
+
+    def runtime_v2_followups(self, conversation_id, *, candidate_id="", limit=30, before_id=None):
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise LookupError("runtime v2 is disabled")
+        return runtime.store.followup_list(conversation_id, candidate_id=candidate_id, limit=limit, before_id=before_id)
+
+    def runtime_v2_command(self, payload: dict[str, Any], *, actor="") -> dict[str, Any]:
+        runtime = getattr(self.service, "private_runtime", None)
+        if runtime is None:
+            raise ValueError("runtime v2 is disabled")
+        action = str(payload.get("action", ""))
+        if action == "contact_policy":
+            return runtime.change_contact_policy(payload, actor)
+        if action == "followup":
+            return runtime.change_followup(payload, actor)
+        if action == "episode_time":
+            return runtime.change_episode_time(payload, actor)
+        if action == "privacy":
+            return runtime.change_privacy(payload, actor)
+        if action == "reminder":
+            return runtime.change_reminder(payload, actor)
+        if action == "memory":
+            result = runtime.change_memory(payload, actor)
+            return {"status": "queued", **asdict(result)}
+        if action == "bind":
+            result = runtime.bind(str(payload.get("conversation_id", "")),
+                                  str(payload.get("character_id", "")), str(payload.get("request_id", "")))
+            return {"status": "queued", **asdict(result)}
+        if action in {"confirm_sent", "retry", "discard"}:
+            if action == "retry" and payload.get("acknowledge_duplicate_risk") is not True:
+                raise ValueError("retry requires acknowledge_duplicate_risk=true after checking delivery")
+            expected_attempts, expected_state = payload.get("expected_attempts"), payload.get("expected_state")
+            if expected_attempts is not None and (type(expected_attempts) is not int or expected_attempts < 1):
+                raise ValueError("expected_attempts must be a positive integer")
+            if expected_state is not None and expected_state not in ("unknown", "rejected"):
+                raise ValueError("expected_state must be unknown or rejected")
+            runtime.resolve(str(payload.get("outbox_id", "")), action, str(payload.get("note", "")),
+                            expected_attempts=expected_attempts, expected_state=expected_state)
+            return {"status": "ok"}
+        raise ValueError("unsupported runtime v2 command")
+
+    def onebot_auth_error(self, headers: Any, raw: bytes | None = None) -> tuple[int, dict[str, Any]] | None:
+        sidecar = self.service.config.qq_sidecar
+        if str(sidecar.gateway_mode).lower() != "http":
+            return HTTPStatus.NOT_FOUND, {"status": "not_found"}
+        token = str(sidecar.inbound_access_token or "")
+        if not token:
+            return HTTPStatus.SERVICE_UNAVAILABLE, {
+                "status": "callback_disabled",
+                "reason": "Configure qq_sidecar.inbound_access_token and the matching NapCat HTTP client token",
+            }
+        authorization = str(headers.get("Authorization", ""))
+        if hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
+            return None
+        signature = str(headers.get("X-Signature", ""))
+        if signature and raw is None:
+            return None  # Validate the signature after reading the bounded wire body.
+        if signature and raw is not None:
+            expected = "sha1=" + hmac.new(token.encode(), raw, hashlib.sha1).hexdigest()
+            if hmac.compare_digest(signature.encode(), expected.encode()):
+                return None
+        return HTTPStatus.UNAUTHORIZED, {"status": "unauthorized", "reason": "invalid OneBot callback token"}
 
     def save_memory_session(self, launcher_type: str, launcher_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         detail = self.service.save_memory_session(launcher_type, launcher_id, payload)
@@ -628,6 +794,15 @@ def make_handler(api: HttpApi):
                 "/api/portraits": self._get_portrait,
                 "/api/console": self._get_console,
                 "/api/runtime": self._get_runtime,
+                "/api/v2/runtime": self._get_runtime_v2,
+                "/api/v2/runtime/delivery": self._get_runtime_v2_delivery,
+                "/api/v2/runtime/conversations": self._get_runtime_v2_conversations,
+                "/api/v2/runtime/conversation": self._get_runtime_v2_conversation,
+                "/api/v2/runtime/memories": self._get_runtime_v2_memories,
+                "/api/v2/runtime/reminders": self._get_runtime_v2_reminders,
+                "/api/v2/runtime/privacy": self._get_runtime_v2_privacy,
+                "/api/v2/runtime/contact-policy": self._get_runtime_v2_contact_policy,
+                "/api/v2/runtime/followups": self._get_runtime_v2_followups,
                 "/api/panels/observability": self._get_observability_panel,
                 "/api/events/recent": self._get_recent_events,
                 "/api/events/behavior": self._get_behavior_events,
@@ -676,6 +851,7 @@ def make_handler(api: HttpApi):
 
             routes = {
                 "/api/auth/change-password": lambda p: self._post_change_password(p, current_user),
+                "/api/v2/runtime/commands": self._post_runtime_v2_command,
                 "/api/skills/reload": self._post_reload_skills,
                 "/api/providers/test": self._post_test_provider,
                 "/api/sidecar/test": self._post_test_sidecar,
@@ -693,6 +869,7 @@ def make_handler(api: HttpApi):
                 "/api/users/directory/reset-persona": self._post_directory_member_reset_persona,
                 "/api/users/directory/sync": self._post_directory_sync,
                 "/api/knowledge/save": self._post_knowledge_save,
+                "/api/memory/purge": self._post_memory_purge,
                 "/api/marketplace/import": self._post_marketplace_import,
                 "/api/skill-packs/export": self._post_skill_pack_export,
                 "/api/skill-packs/import": self._post_skill_pack_import,
@@ -942,6 +1119,115 @@ def make_handler(api: HttpApi):
         def _get_healthz(self, parsed) -> None:
             self._write_json(HTTPStatus.OK, {"status": "ok"})
 
+        def _get_runtime_v2(self, parsed) -> None:
+            self._write_json(HTTPStatus.OK, api.runtime_v2_status())
+
+        def _get_runtime_v2_delivery(self, parsed) -> None:
+            outbox_id = parse_qs(parsed.query).get("outbox_id", [""])[0]
+            try:
+                result = api.runtime_v2_delivery(outbox_id)
+            except ValueError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _post_runtime_v2_command(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                user = api.auth_state(self._session_token()).get("user") or {}
+                result = api.runtime_v2_command(payload, actor=str(user.get("username", "")))
+            except (ValueError, RuntimeError) as exc:
+                self._write_json(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _get_runtime_v2_conversations(self, parsed) -> None:
+            query = parse_qs(parsed.query)
+            try:
+                result = api.runtime_v2_conversations(limit=query.get("limit", ["30"])[0],
+                    after_id=query.get("after_id", [""])[0])
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _get_runtime_v2_conversation(self, parsed) -> None:
+            query = parse_qs(parsed.query)
+            try:
+                result = api.runtime_v2_conversation(query.get("conversation_id", [""])[0],
+                    limit=query.get("limit", ["30"])[0], before_seq=query.get("before_seq", [None])[0])
+            except LookupError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+                return
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _get_runtime_v2_memories(self, parsed) -> None:
+            query = parse_qs(parsed.query)
+            try:
+                result = api.runtime_v2_memories(query.get("conversation_id", [""])[0], query.get("character_id", [""])[0],
+                    memory_id=query.get("memory_id", [""])[0], limit=query.get("limit", ["30"])[0],
+                    before_id=query.get("before_id", [None])[0])
+            except LookupError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+                return
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _get_runtime_v2_reminders(self, parsed) -> None:
+            query = parse_qs(parsed.query)
+            try:
+                result = api.runtime_v2_reminders(query.get("conversation_id", [""])[0],
+                    task_id=query.get("task_id", [""])[0], limit=query.get("limit", ["30"])[0], before_id=query.get("before_id", [None])[0])
+            except LookupError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+                return
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _get_runtime_v2_privacy(self, parsed) -> None:
+            try:
+                result = api.runtime_v2_privacy(parse_qs(parsed.query).get("conversation_id", [""])[0])
+            except LookupError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+                return
+            except (ValueError, RuntimeError) as exc:
+                self._write_json(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _get_runtime_v2_followups(self, parsed) -> None:
+            query = parse_qs(parsed.query)
+            try:
+                result = api.runtime_v2_followups(query.get("conversation_id", [""])[0], candidate_id=query.get("candidate_id", [""])[0],
+                    limit=query.get("limit", ["30"])[0], before_id=query.get("before_id", [None])[0])
+            except LookupError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+                return
+            except (ValueError, RuntimeError) as exc:
+                self._write_json(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
+        def _get_runtime_v2_contact_policy(self, parsed) -> None:
+            try:
+                result = api.runtime_v2_contact_policy(parse_qs(parsed.query).get("conversation_id", [""])[0])
+            except LookupError as exc:
+                self._write_json(HTTPStatus.NOT_FOUND, {"status": "not_found", "reason": str(exc)})
+                return
+            except (ValueError, RuntimeError) as exc:
+                self._write_json(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
+
         def _get_metrics(self, parsed) -> None:
             self._write_text(
                 HTTPStatus.OK,
@@ -1106,7 +1392,12 @@ def make_handler(api: HttpApi):
             self._write_json(HTTPStatus.OK, {"sessions": api.list_sessions(limit=limit)})
 
         def _post_onebot_events(self, parsed) -> None:
-            payload = self._read_json_body()
+            error = api.onebot_auth_error(self.headers)
+            if error is not None:
+                self.close_connection = True
+                self._write_json(*error)
+                return
+            payload = self._read_json_body(onebot=True)
             if payload is None:
                 return
             status, body = api.handle_json(payload)
@@ -1115,6 +1406,16 @@ def make_handler(api: HttpApi):
                 self.end_headers()
                 return
             self._write_json(status, body)
+
+        def _post_memory_purge(self, parsed) -> None:
+            if self._read_json_body(allow_empty=True) is None:
+                return
+            try:
+                result = api.purge_memory()
+            except ValueError as exc:
+                self._write_json(HTTPStatus.CONFLICT, {"status": "conflict", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
 
         def _post_auth_bootstrap(self, parsed) -> None:
             payload = self._read_json_body()
@@ -1153,7 +1454,7 @@ def make_handler(api: HttpApi):
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
                 return
-            self._write_json(HTTPStatus.OK, body)
+            self._write_json(HTTPStatus.OK, body, headers={"Set-Cookie": _build_session_cookie("", max_age=0)})
 
         def _post_reload_skills(self, parsed) -> None:
             self._read_json_body(allow_empty=True)
@@ -1178,7 +1479,13 @@ def make_handler(api: HttpApi):
             payload = self._read_json_body()
             if payload is None:
                 return
-            self._write_json(HTTPStatus.OK, api.save_character_panel(payload))
+            try:
+                result = api.save_character_panel(payload)
+            except ValueError as exc:
+                status = HTTPStatus.CONFLICT if str(exc).startswith("runtime busy:") else HTTPStatus.BAD_REQUEST
+                self._write_json(status, {"status": "conflict" if status == HTTPStatus.CONFLICT else "bad_request", "reason": str(exc)})
+                return
+            self._write_json(HTTPStatus.OK, result)
 
         def _post_character_preview(self, parsed) -> None:
             payload = self._read_json_body()
@@ -1482,7 +1789,7 @@ def make_handler(api: HttpApi):
             )
             return False
 
-        def _read_json_body(self, *, allow_empty: bool = False) -> dict[str, Any] | None:
+        def _read_json_body(self, *, allow_empty: bool = False, onebot: bool = False) -> dict[str, Any] | None:
             try:
                 raw = _read_request_body(self)
             except RequestTooLarge as exc:
@@ -1492,6 +1799,11 @@ def make_handler(api: HttpApi):
             except ValueError:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})
                 return None
+            if onebot:
+                error = api.onebot_auth_error(self.headers, raw)
+                if error is not None:
+                    self._write_json(*error)
+                    return None
             if allow_empty and not raw:
                 return {}
             try:
@@ -1500,7 +1812,7 @@ def make_handler(api: HttpApi):
             except RequestTooLarge as exc:
                 self._write_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"status": "payload_too_large", "reason": str(exc)})
                 return None
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, OSError, EOFError, zlib.error):
                 preview = raw[:200].decode("utf-8", errors="replace")
                 _LOGGER.warning("bad request body preview=%r", preview)
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request"})

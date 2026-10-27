@@ -112,10 +112,8 @@ export function mount(root) {
     try {
       const selectedBundle = await api.getCharacterPanel(name);
       const nextAssistant = selectedBundle?.shared?.assistant_name || other?.assistant_name || "";
-      const [savedBundle, savedOther] = await Promise.all([
-        api.saveCharacterPanel({ character: name, set_active: true }),
-        api.saveOtherPanel({ ...(other || {}), assistant_name: nextAssistant }),
-      ]);
+      const savedBundle = await api.saveCharacterPanel({ character: name, set_active: true });
+      const savedOther = await api.saveOtherPanel({ assistant_name: nextAssistant });
       if (stopped) return;
       other = savedOther;
       applyBundle(savedBundle);
@@ -143,20 +141,17 @@ export function mount(root) {
       };
       const syncAssistant = setActive || bundle?.current_character === editor.character;
       const otherPayload = {
-        ...other,
-        assistant_name: syncAssistant ? editor.shared.assistant_name : other.assistant_name,
+        ...(syncAssistant ? { assistant_name: editor.shared.assistant_name } : {}),
       };
-      const [savedBundle, savedOther] = await Promise.all([
-        api.saveCharacterPanel({
+      const savedBundle = await api.saveCharacterPanel({
           character: editor.character,
           set_active: setActive,
           shared_fields: cloneShared(editor.shared),
           person_fields: normalizeVariantFields(editor.person),
           group_fields: normalizeVariantFields(editor.group),
           portrait,
-        }),
-        api.saveOtherPanel(otherPayload),
-      ]);
+        });
+      const savedOther = syncAssistant ? await api.saveOtherPanel(otherPayload) : other;
       if (stopped) return;
       other = savedOther;
       applyBundle(savedBundle);

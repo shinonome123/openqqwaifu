@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
@@ -243,17 +244,28 @@ class FileMemoryStore:
     ) -> SessionMemory | None:
         if not path.exists():
             return None
-        for raw_line in reversed(path.read_text(encoding="utf-8").splitlines()):
+        last_error = None
+        for raw_line in reversed(path.read_bytes().splitlines()):
             line = raw_line.strip()
             if not line:
                 continue
-            data = json.loads(line)
+            try:
+                data = json.loads(line)
+                if not isinstance(data, dict):
+                    raise ValueError("session snapshot must be an object")
+            except (ValueError, UnicodeDecodeError) as exc:
+                last_error = exc
+                continue
+            if last_error is not None:
+                logging.getLogger(__name__).warning("Recovered previous complete session snapshot: %s", path)
             return self._session_from_payload(
                 data,
                 launcher_id=launcher_id,
                 launcher_type=launcher_type,
                 character_id=character_id,
             )
+        if last_error is not None:
+            raise ValueError(f"no valid session snapshot: {path}") from last_error
         return None
 
     def _load_legacy_snapshot(
@@ -298,9 +310,15 @@ class FileMemoryStore:
 
     def _append_snapshot(self, path: Path, session: SessionMemory) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(asdict(session), ensure_ascii=False, separators=(",", ":")))
-            handle.write("\n")
+        with path.open("a+b") as handle:
+            # Preserve an interrupted tail for diagnosis, but never concatenate
+            # the next valid snapshot onto that incomplete JSON record.
+            handle.seek(0, 2)
+            if handle.tell():
+                handle.seek(-1, 2)
+                if handle.read(1) != b"\n":
+                    handle.write(b"\n")
+            handle.write((json.dumps(asdict(session), ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
 
     def _maybe_compact(self, path: Path, session: SessionMemory) -> None:
         try:

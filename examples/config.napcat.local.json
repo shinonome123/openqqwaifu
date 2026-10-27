@@ -65,6 +65,7 @@
     "adapter_name": "napcat",
     "inbound_host": "127.0.0.1",
     "inbound_port": 8080,
+    "inbound_access_token": "",
     "outbound_base_url": "http://127.0.0.1:3000",
     "outbound_timeout_seconds": 10.0,
     "access_token": "",

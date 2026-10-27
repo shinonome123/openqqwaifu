@@ -16,9 +16,6 @@ if TYPE_CHECKING:
     from .tool_registry import ToolRegistry
 
 
-_DANGEROUS_TOOL_IDS: set[str] = {"write-file", "exec-command"}
-
-
 @dataclass(slots=True)
 class SkillExecutionContext:
     invocation: ToolInvocation
@@ -164,7 +161,7 @@ class SkillExecutor:
             raise self._error(manifest, "tool_not_registered", t("skill.tool_not_registered", tool_id=tool_id), trace_id)
         if not tool.model_callable or tool.model_handler is None:
             raise self._error(manifest, "tool_not_callable", t("skill.tool_not_callable", tool_id=tool_id), trace_id)
-        self._validate_tool_authorization(manifest, tool_id, trace_id)
+        self._validate_tool_authorization(manifest, invocation, tool_id, trace_id)
         next_invocation = self._with_manifest_args(manifest, invocation)
         self._validate_arguments(manifest, next_invocation.arguments, trace_id)
         next_invocation.tool_id = tool_id
@@ -189,7 +186,7 @@ class SkillExecutor:
             raise self._error(manifest, "tool_not_registered", t("skill.tool_not_registered", tool_id=tool_id), trace_id)
         if not tool.model_callable:
             raise self._error(manifest, "tool_not_callable", t("skill.tool_not_callable", tool_id=tool_id), trace_id)
-        self._validate_tool_authorization(manifest, tool_id, trace_id)
+        self._validate_tool_authorization(manifest, invocation, tool_id, trace_id)
         next_invocation = self._with_manifest_args(manifest, invocation)
         self._validate_arguments(manifest, next_invocation.arguments, trace_id)
         next_invocation.tool_id = tool_id
@@ -227,19 +224,13 @@ class SkillExecutor:
             result.text = result.text[: limit - 1].rstrip() + "…"
         return result
 
-    @staticmethod
-    def _validate_tool_authorization(manifest: SkillManifest, tool_id: str, trace_id: str) -> None:
-        if tool_id not in _DANGEROUS_TOOL_IDS:
-            return
-        if manifest.policy.requires_authorization:
-            return
-        raise SkillExecutor._error(
-            manifest,
-            "permission_denied",
-            t("skill.permission_denied", tool_id=tool_id),
-            trace_id,
-            details={"tool_id": tool_id, "required_policy": "requires_authorization"},
-        )
+    def _validate_tool_authorization(self, manifest: SkillManifest, invocation: ToolInvocation,
+                                     tool_id: str, trace_id: str) -> None:
+        checked = self._with_manifest_args(manifest, invocation)
+        reason = self._tools.denial_reason(tool_id, checked)
+        if reason:
+            raise self._error(manifest, "permission_denied", reason, trace_id,
+                              details={"tool_id": tool_id})
 
     @staticmethod
     def _validate_arguments(manifest: SkillManifest, arguments: dict[str, object], trace_id: str) -> None:

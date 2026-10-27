@@ -13,7 +13,7 @@ from ..models import EmotionState, InboundEvent, SessionMemory
 from ..infra import ImageClient, LLMClient, build_image_client, build_llm_client
 from ..infra.clock import format_prompt_time, local_now
 from ..infra.image_clients import ImageClientError
-from ..infra.llm_clients import LLMClientError
+from ..infra.llm_clients import LLMClientError, normalize_image_reference
 from ..memory import ROLLING_SUMMARY_KEY, clip_rolling_summary
 from ..skills import SkillSpec, ToolExecutionResult, ToolExposureContext, ToolInvocation, ToolRegistry
 
@@ -407,6 +407,25 @@ class Generator:
             and self._tools.model_schemas(tool_context)
         )
 
+    def _reply_messages(self, prompt: str, event: InboundEvent) -> list[dict[str, object]]:
+        content: str | list[dict[str, object]] = prompt
+        if self.config.multimodal_enabled and event.image_count:
+            content = [{"type": "text", "text": prompt}]
+            for payload in event.image_payloads():
+                content.append({"type": "image_url", "image_url": {"url": normalize_image_reference(payload)}})
+            if len(content) == 1:
+                raise LLMClientError("message contains no readable image reference")
+        return [
+            {"role": "system", "content": _TOOL_CALLING_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ]
+
+    def _failed_tool_reply(self, results: list[ToolExecutionResult], images: list[str]) -> GeneratedReply:
+        return GeneratedReply(
+            text=self._append_raw_tool_blocks("工具调用已结束，但未能生成最终总结。以下是真实执行结果：", results),
+            images=images,
+        )
+
     def _generate_model_reply_message(
         self,
         prompt: str,
@@ -419,7 +438,10 @@ class Generator:
         tool_context: ToolExposureContext | None,
         user: str,
     ) -> GeneratedReply:
-        if self._tool_calling_ready(tool_context):
+        has_images = self.config.multimodal_enabled and event.image_count > 0
+        if has_images and not getattr(self._llm_client, "supports_images", False):
+            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
+        if self._tool_calling_ready(tool_context) or has_images:
             try:
                 reply = self._invoke_reply_with_tools(
                     prompt,
@@ -434,7 +456,8 @@ class Generator:
                 if reply.text.strip() or reply.images:
                     return reply
             except LLMClientError:
-                pass
+                if has_images:
+                    return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
         response = self._dify_client.invoke(prompt, user=user)
         cleaned = self._clean_response(response)
         return GeneratedReply(text=cleaned)
@@ -451,7 +474,10 @@ class Generator:
         tool_context: ToolExposureContext | None,
         user: str,
     ) -> GeneratedReply:
-        if self._tool_calling_ready(tool_context):
+        has_images = self.config.multimodal_enabled and event.image_count > 0
+        if has_images and not getattr(self._llm_client, "supports_images", False):
+            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
+        if self._tool_calling_ready(tool_context) or has_images:
             try:
                 reply = await self._ainvoke_reply_with_tools(
                     prompt,
@@ -466,7 +492,8 @@ class Generator:
                 if reply.text.strip() or reply.images:
                     return reply
             except LLMClientError:
-                pass
+                if has_images:
+                    return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
         response = await self._ainvoke_client(prompt, user=user)
         cleaned = self._clean_response(response)
         return GeneratedReply(text=cleaned)
@@ -483,28 +510,32 @@ class Generator:
         tool_context: ToolExposureContext | None,
         user: str,
     ) -> GeneratedReply:
-        if self._tools is None:
-            raise LLMClientError("tool registry is not bound")
-        tools = self._tools.model_schemas(tool_context)
+        tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
+        allowed_tools = {str(tool.get("name", "")) for tool in tools}
         # The model can call any exposed skill, not only the ranked prompt cards.
         invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
-        messages = [
-            {
-                "role": "system",
-                "content": _TOOL_CALLING_SYSTEM_PROMPT,
-            },
-            {"role": "user", "content": prompt},
-        ]
+        messages = self._reply_messages(prompt, event)
         images: list[str] = []
         raw_block_results: list[ToolExecutionResult] = []
+        all_results: list[ToolExecutionResult] = []
         tool_turns: list[dict[str, object]] = []
         for _ in range(3):
-            response = self._llm_client.invoke_with_tools(messages, tools=tools, user=user)
+            try:
+                response = self._llm_client.invoke_with_tools(messages, tools=tools, user=user)
+            except LLMClientError:
+                if not all_results:
+                    raise
+                self._record_tool_turns(session, tool_turns)
+                return self._failed_tool_reply(all_results, images)
             if response.assistant_message:
                 messages.append(response.assistant_message)
             if not response.tool_calls:
                 self._record_tool_turns(session, tool_turns)
+                if not response.text.strip() and all_results:
+                    return self._failed_tool_reply(all_results, images)
                 text = self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results)
+                if not text and self.config.multimodal_enabled and event.image_count:
+                    raise LLMClientError("image model returned no content")
                 return GeneratedReply(text=text, images=images)
             for tool_call in response.tool_calls:
                 invocation = ToolInvocation(
@@ -518,7 +549,11 @@ class Generator:
                     arguments=tool_call.arguments,
                     allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
-                result = self._tools.execute_model(tool_call.tool_name, invocation)
+                if tool_call.tool_name not in allowed_tools or self._tools is None:
+                    result = ToolExecutionResult(error="模型请求了当前未提供的工具。")
+                else:
+                    result = self._tools.execute_model(tool_call.tool_name, invocation)
+                all_results.append(result)
                 tool_turns.append(self._tool_turn_record(tool_call.tool_name, tool_call.arguments, result))
                 for image_ref in result.images:
                     if image_ref not in images:
@@ -534,8 +569,15 @@ class Generator:
                     }
                 )
         self._record_tool_turns(session, tool_turns)
+        messages.append({"role": "user", "content": "工具调用轮次已用完。请根据以上真实工具结果给出最终回复，不再调用工具。"})
+        try:
+            response = self._llm_client.invoke_with_tools(messages, tools=[], user=user)
+        except LLMClientError:
+            return self._failed_tool_reply(all_results, images)
+        if response.tool_calls or not response.text.strip():
+            return self._failed_tool_reply(all_results, images)
         return GeneratedReply(
-            text=self._append_raw_tool_blocks("", raw_block_results),
+            text=self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results),
             images=images,
         )
 
@@ -551,28 +593,32 @@ class Generator:
         tool_context: ToolExposureContext | None,
         user: str,
     ) -> GeneratedReply:
-        if self._tools is None:
-            raise LLMClientError("tool registry is not bound")
-        tools = self._tools.model_schemas(tool_context)
+        tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
+        allowed_tools = {str(tool.get("name", "")) for tool in tools}
         # The model can call any exposed skill, not only the ranked prompt cards.
         invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
-        messages = [
-            {
-                "role": "system",
-                "content": _TOOL_CALLING_SYSTEM_PROMPT,
-            },
-            {"role": "user", "content": prompt},
-        ]
+        messages = self._reply_messages(prompt, event)
         images: list[str] = []
         raw_block_results: list[ToolExecutionResult] = []
+        all_results: list[ToolExecutionResult] = []
         tool_turns: list[dict[str, object]] = []
         for _ in range(3):
-            response = await self._llm_client.ainvoke_with_tools(messages, tools=tools, user=user)
+            try:
+                response = await self._llm_client.ainvoke_with_tools(messages, tools=tools, user=user)
+            except LLMClientError:
+                if not all_results:
+                    raise
+                self._record_tool_turns(session, tool_turns)
+                return self._failed_tool_reply(all_results, images)
             if response.assistant_message:
                 messages.append(response.assistant_message)
             if not response.tool_calls:
                 self._record_tool_turns(session, tool_turns)
+                if not response.text.strip() and all_results:
+                    return self._failed_tool_reply(all_results, images)
                 text = self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results)
+                if not text and self.config.multimodal_enabled and event.image_count:
+                    raise LLMClientError("image model returned no content")
                 return GeneratedReply(text=text, images=images)
             for tool_call in response.tool_calls:
                 invocation = ToolInvocation(
@@ -586,7 +632,11 @@ class Generator:
                     arguments=tool_call.arguments,
                     allowed_tool_ids=(tool_context.allowed_tool_ids if tool_context is not None else None),
                 )
-                result = await self._tools.aexecute_model(tool_call.tool_name, invocation)
+                if tool_call.tool_name not in allowed_tools or self._tools is None:
+                    result = ToolExecutionResult(error="模型请求了当前未提供的工具。")
+                else:
+                    result = await self._tools.aexecute_model(tool_call.tool_name, invocation)
+                all_results.append(result)
                 tool_turns.append(self._tool_turn_record(tool_call.tool_name, tool_call.arguments, result))
                 for image_ref in result.images:
                     if image_ref not in images:
@@ -602,8 +652,15 @@ class Generator:
                     }
                 )
         self._record_tool_turns(session, tool_turns)
+        messages.append({"role": "user", "content": "工具调用轮次已用完。请根据以上真实工具结果给出最终回复，不再调用工具。"})
+        try:
+            response = await self._llm_client.ainvoke_with_tools(messages, tools=[], user=user)
+        except LLMClientError:
+            return self._failed_tool_reply(all_results, images)
+        if response.tool_calls or not response.text.strip():
+            return self._failed_tool_reply(all_results, images)
         return GeneratedReply(
-            text=self._append_raw_tool_blocks("", raw_block_results),
+            text=self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results),
             images=images,
         )
 
@@ -832,7 +889,7 @@ class Generator:
                 return GeneratedImage(prompt=cleaned, image_ref=self._image_client.generate(cleaned))
             except ImageClientError as exc:
                 raise ValueError(str(exc)) from exc
-        return GeneratedImage(prompt=cleaned, image_ref=f"generated://{cleaned}")
+        raise ValueError("图片生成未启用或提供商未配置。")
 
     async def agenerate_image(self, prompt: str) -> GeneratedImage:
         if "generate_image" in getattr(self, "__dict__", {}) and "agenerate_image" not in getattr(self, "__dict__", {}):
@@ -848,7 +905,7 @@ class Generator:
                 )
             except ImageClientError as exc:
                 raise ValueError(str(exc)) from exc
-        return GeneratedImage(prompt=cleaned, image_ref=f"generated://{cleaned}")
+        raise ValueError("图片生成未启用或提供商未配置。")
 
     def resolve_generated_image(self, image_ref: str) -> tuple[bytes, str]:
         return self._image_client.resolve_image(image_ref)

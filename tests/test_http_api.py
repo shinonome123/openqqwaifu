@@ -165,8 +165,19 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(body["reply"]["launcher_id"], "612475113")
 
     def test_string_message_payload_is_accepted(self) -> None:
+        class _ImageClient:
+            enabled = True
+
+            def generate(self, prompt):
+                return "https://images.example.test/catgirl.png"
+
+            async def agenerate(self, prompt):
+                return self.generate(prompt)
+
+        self.service.config.image_generation.enabled = True
+        self.service.generator._image_client = _ImageClient()
         self._install_tool_client(
-            tool_name="image",
+            tool_name="image-command",
             arguments={"prompt": "catgirl"},
             final_text="图片生成好了。",
         )
@@ -181,7 +192,7 @@ class HttpApiTests(unittest.TestCase):
         status, body = self.api.handle_json(payload)
 
         self.assertEqual(status, 200)
-        self.assertEqual(body["reply"]["images"], ["generated://catgirl"])
+        self.assertEqual(body["reply"]["images"], ["https://images.example.test/catgirl.png"])
 
     def test_non_message_payload_is_ignored(self) -> None:
         payload = {"post_type": "notice"}

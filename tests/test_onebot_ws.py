@@ -4,6 +4,7 @@ import asyncio
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import WSMsgType, WSServerHandshakeError, web
 from aiohttp.test_utils import TestClient, TestServer
@@ -14,10 +15,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from waifu_standalone.config import AppConfig
-from waifu_standalone.gateways.onebot_ws import OneBotWsGateway
+from waifu_standalone.gateways.onebot_ws import OneBotWsGateway, OneBotWsActionClient, OneBotWsOutboundPort
 from waifu_standalone.http_api import HttpApi
 from waifu_standalone.http_api_async import _build_application
-from waifu_standalone.models import InboundEvent
+from waifu_standalone.models import InboundEvent, OutboundMessage
 
 
 class _ReverseWsService:
@@ -87,6 +88,54 @@ class OneBotWsGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_connection_raises(self) -> None:
         with self.assertRaises(ConnectionError):
             await self.gateway.send_action("get_status", {})
+
+    async def test_sync_apis_use_the_socket_loop_and_receive_immediate_echoes(self) -> None:
+        ws = await self.client.ws_connect("/onebot/v11/ws")
+        actions = OneBotWsActionClient(self.gateway)
+        outbound = OneBotWsOutboundPort(self.gateway)
+        calls = [
+            (lambda: actions.get_group_member_list("123"), "get_group_member_list"),
+            (lambda: actions.get_group_member_info("123", "456", no_cache=True), "get_group_member_info"),
+            (lambda: outbound.send(OutboundMessage("123", "group", "hello")), "send_group_msg"),
+        ]
+        for invoke, action_name in calls:
+            with self.subTest(action=action_name):
+                task = asyncio.create_task(asyncio.to_thread(invoke))
+                action = await asyncio.wait_for(ws.receive_json(), timeout=2)
+                self.assertEqual(action["action"], action_name)
+                await ws.send_json({"status": "ok", "retcode": 0, "data": {}, "echo": action["echo"]})
+                await asyncio.wait_for(task, timeout=2)
+                self.assertFalse(self.gateway._pending_echos)
+        close_task = asyncio.create_task(asyncio.to_thread(outbound.close))
+        await asyncio.wait_for(ws.receive(), timeout=2)
+        await asyncio.wait_for(close_task, timeout=2)
+        self.assertIsNone(self.gateway._active_ws)
+
+    async def test_async_api_can_be_called_from_a_different_loop(self) -> None:
+        ws = await self.client.ws_connect("/onebot/v11/ws")
+        task = asyncio.create_task(asyncio.to_thread(lambda: asyncio.run(self.gateway.send_action("get_status", {}))))
+        action = await asyncio.wait_for(ws.receive_json(), timeout=2)
+        await ws.send_json({"status": "ok", "retcode": 0, "data": {"online": True}, "echo": action["echo"]})
+        response = await asyncio.wait_for(task, timeout=2)
+        self.assertTrue(response["data"]["online"])
+        await ws.close()
+
+    async def test_sync_api_refuses_to_block_its_own_loop(self) -> None:
+        ws = await self.client.ws_connect("/onebot/v11/ws")
+        with self.assertRaisesRegex(RuntimeError, "async reverse-WS API"):
+            OneBotWsActionClient(self.gateway).get_group_member_list(123)
+        await ws.close()
+
+    async def test_failed_send_clears_pending_echo(self) -> None:
+        ws = await self.client.ws_connect("/onebot/v11/ws")
+        with patch.object(self.gateway._active_ws, "send_str", new=AsyncMock(side_effect=ConnectionError("closed"))):
+            with self.assertRaises(ConnectionError):
+                await self.gateway.send_action("get_status", {})
+        self.assertFalse(self.gateway._pending_echos)
+        await ws.close()
+
+    async def test_unconnected_gateway_can_be_closed_synchronously(self) -> None:
+        OneBotWsOutboundPort(self.gateway).close()
 
     async def test_new_connection_supersedes_old(self) -> None:
         ws1 = await self.client.ws_connect("/onebot/v11/ws")

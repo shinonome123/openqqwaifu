@@ -425,6 +425,13 @@ class CardManager:
                 fallback["_source"] = "session-metadata"
                 return fallback
 
+        for candidate in (self._templates_root / f"{character}_{launcher_type}.yaml",
+                          self._templates_root / f"{character}.yaml"):
+            if candidate.is_file():
+                data = parse_card_file(candidate)
+                data["_source"] = str(candidate)
+                return data
+
         fallback = self._templates_root / f"default_{launcher_type}.yaml"
         data = parse_card_file(fallback)
         data = self._override_default_template_identity(data, character=character, launcher_type=launcher_type)

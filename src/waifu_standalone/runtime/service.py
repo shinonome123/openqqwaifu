@@ -7,10 +7,12 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from weakref import WeakValueDictionary
 
 from ..character import CardManager, CharacterService
 from ..claw_runtime_admin import ClawRuntimeAdminService
@@ -24,8 +26,10 @@ from ..gateways.napcat_login import (
     qrcode_payload_to_image_source,
 )
 from ..gateways.onebot_actions import OneBotActionClient, OneBotHttpOutboundPort
+from ..gateways.inbound_dedup import InboundDeduplicator
 from ..gateways.onebot_ws import OneBotWsGateway, OneBotWsOutboundPort
 from ..infra import AsyncRuntime, ClawRuntimeBridge, build_claw_runtime_bridge
+from ..infra.session_lock import SessionLock
 from ..infra import MetricsRegistry, logging_is_configured, set_active_metrics_registry
 from ..memory import ROLLING_SUMMARY_KEY, FileMemoryStore, InMemoryStore, KnowledgeService, Memory, MemoryGraphBuilder
 from ..memory_admin import MemoryAdminService
@@ -73,6 +77,7 @@ from .container import (
 )
 from .legacy_migrator import LegacyMigrator
 from .testing import CapturingOutboundPort
+from ..runtime_v2.contracts import Admission
 
 _MASK_SENTINEL = "..."
 _BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openqqwaifu-bg")
@@ -144,6 +149,7 @@ class WaifuService:
     outbound: OutboundPort
     reverse_ws_gateway: OneBotWsGateway | None = None
     napcat_login: NapCatLoginBridge | None = None
+    private_runtime: Any = field(default=None, repr=False)
     _recent_outbound: list[OutboundMessage] = field(default_factory=list)
     _recent_events: list[dict[str, Any]] = field(default_factory=list)
     _recent_behavior_events: list[dict[str, Any]] = field(default_factory=list)
@@ -155,7 +161,12 @@ class WaifuService:
     _started_at: float = field(default_factory=time.monotonic, repr=False)
     _event_counter: int = 0
     _state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _session_locks: dict[tuple[str, str], threading.Lock] = field(default_factory=dict, repr=False)
+    _session_locks: Any = field(default_factory=WeakValueDictionary, repr=False)
+    _runtime_guard: Any = field(default_factory=threading.RLock, repr=False)
+    _active_events: int = field(default=0, repr=False)
+    # Shared with HttpApi, which claims each inbound message before handing it over.
+    inbound_dedup: InboundDeduplicator = field(default_factory=InboundDeduplicator, repr=False)
+    _closing: bool = field(default=False, repr=False)
     _background_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _background_tasks: set[Future[object]] = field(default_factory=set, repr=False)
     _memory_store_builder: Callable[[str], Any] | None = field(default=None, repr=False)
@@ -222,30 +233,88 @@ class WaifuService:
     def activate_character(self, character: str) -> str:
         return self.character_service.activate_character(character)
 
+    @contextmanager
+    def runtime_mutation(self):
+        """Keep destructive administration outside active message lifetimes.
+
+        Fail promptly rather than blocking the event loop or occupying all of
+        its workers while the active reply needs those workers to finish.
+        """
+        with self._runtime_guard:
+            with self._background_lock:
+                pending = any(not item.done() for item in self._background_tasks)
+            if self._active_events or pending:
+                raise ValueError("runtime busy: 正在处理消息或写回记忆，请稍后重试")
+            yield
+
     def _ensure_character_scope_bound(self) -> None:
         active_character = self._active_character_id()
         if self._bound_character_id == active_character:
             return
         self._rebind_character_scoped_storage(active_character)
 
-    def handle_event(self, event: InboundEvent) -> OutboundMessage | None:
-        with self._session_lock_for(event):
-            return self._handle_event_locked(event)
-
-    async def handle_event_async(self, event: InboundEvent) -> OutboundMessage | None:
-        lock = self._session_lock_for(event)
-        await asyncio.to_thread(lock.acquire)
+    def handle_event(self, event: InboundEvent) -> OutboundMessage | Admission | None:
         try:
-            return await self._handle_event_async_locked(
-                event, background_image_delivery=True
-            )
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("use await handle_event_async() inside an event loop")
+        return _ASYNC_RUNTIME.submit(self._process_event_async(event, background_image_delivery=False)).result()
+
+    async def handle_event_async(self, event: InboundEvent) -> OutboundMessage | Admission | None:
+        return await self._process_event_async(event, background_image_delivery=True)
+
+    async def _process_event_async(self, event: InboundEvent, *, background_image_delivery: bool) -> OutboundMessage | Admission | None:
+        if self.private_runtime is not None and self.private_runtime.routes(event):
+            if self._closing:
+                raise RuntimeError("service is shutting down")
+            return await asyncio.to_thread(self.private_runtime.accept, event)
+        # Never wait on a threading lock in the event loop or its worker pool.
+        while not self._runtime_guard.acquire(blocking=False):
+            await asyncio.sleep(0.01)
+        try:
+            if self._closing:
+                raise RuntimeError("service is shutting down")
+            self._ensure_character_scope_bound()
+            self._active_events += 1
+            lock = self._session_lock_for(event)
         finally:
-            lock.release()
+            self._runtime_guard.release()
+        acquired = False
+        try:
+            await lock.acquire()
+            acquired = True
+            operation = asyncio.create_task(self._handle_event_async_locked(event, background_image_delivery=background_image_delivery))
+            cancelled = False
+            while True:
+                try:
+                    result = await asyncio.shield(operation)
+                    break
+                except asyncio.CancelledError:
+                    # Threads used by the reply cannot be canceled. Keep their
+                    # session/lifecycle lease until they finish, so a switch
+                    # cannot redirect their final writes into another persona.
+                    if operation.cancelled():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+        finally:
+            if acquired:
+                lock.release()
+            with self._runtime_guard:
+                self._active_events -= 1
 
     def _handle_event_locked(self, event: InboundEvent) -> OutboundMessage | None:
         return _ASYNC_RUNTIME.submit(
             self._handle_event_async_locked(event, background_image_delivery=False)
         ).result()
+
+    def _mark_inbound_delivered(self, event: InboundEvent) -> None:
+        """Keep the inbound claim even if bookkeeping after the send fails, so a retry is not answered twice."""
+        self.inbound_dedup.mark_delivered(event)
 
     async def _handle_event_async_locked(
         self,
@@ -260,10 +329,10 @@ class WaifuService:
 
     _SESSION_LOCKS_MAX = 512
 
-    def _session_lock_for(self, event: InboundEvent) -> threading.Lock:
+    def _session_lock_for(self, event: InboundEvent) -> SessionLock:
         return self._session_lock_for_key(self._active_character_id(), event.launcher_type, event.launcher_id)
 
-    def _session_lock_for_key(self, character_id: str, launcher_type: str, launcher_id: str) -> threading.Lock:
+    def _session_lock_for_key(self, character_id: str, launcher_type: str, launcher_id: str) -> SessionLock:
         key = (
             str(character_id or "").strip(),
             str(launcher_type or "").strip(),
@@ -272,35 +341,12 @@ class WaifuService:
         with self._state_lock:
             lock = self._session_locks.get(key)
             if lock is None:
-                lock = threading.Lock()
+                lock = SessionLock()
                 self._session_locks[key] = lock
-                # Bound the lock table so a long-running server with many distinct
-                # (character, launcher) combos doesn't grow memory forever.
-                # Evict idle locks (ones nobody is currently holding) oldest-first.
-                if len(self._session_locks) > self._SESSION_LOCKS_MAX:
-                    self._evict_idle_session_locks()
             return lock
 
     def _evict_idle_session_locks(self) -> None:
-        """Drop unheld session locks, keeping map size bounded.
-
-        Called under ``self._state_lock``. A lock is only removed if ``acquire``
-        succeeds non-blocking — that proves nobody else holds it, so freeing it
-        is safe. We intentionally don't use ``WeakValueDictionary`` because the
-        caller-side ``with lock:`` blocks would be unsafe if the lock got GC'd.
-        """
-        evicted = 0
-        target = max(self._SESSION_LOCKS_MAX // 4, 1)
-        # Iterate over a snapshot so we can mutate the underlying dict.
-        for stale_key, stale_lock in list(self._session_locks.items()):
-            if evicted >= target:
-                break
-            if stale_lock.acquire(blocking=False):
-                try:
-                    self._session_locks.pop(stale_key, None)
-                    evicted += 1
-                finally:
-                    stale_lock.release()
+        """Unreferenced locks are removed by the weak table automatically."""
 
     def _submit_background_task(self, task_name: str, callback: Callable[[], object]) -> None:
         future = _BACKGROUND_EXECUTOR.submit(callback)
@@ -398,7 +444,14 @@ class WaifuService:
             wait(pending, timeout=remaining)
 
     def close(self, *, timeout: float | None = None) -> None:
+        self.begin_shutdown()
+        if self.private_runtime is not None:
+            self.private_runtime.close(timeout=60.0 if timeout is None else timeout)
+        with self._runtime_guard:
+            if self._active_events:
+                raise RuntimeError("cannot close storage while replies are active; await wait_idle first")
         self.flush_background_tasks(timeout=timeout)
+        failure = None
         for component in (
             self.generator,
             self.search,
@@ -409,7 +462,31 @@ class WaifuService:
             self.state_store,
         ):
             if component is not None:
-                _close_component(component)
+                try:
+                    _close_component(component)
+                except Exception as exc:
+                    failure = failure or exc
+        if failure is not None:
+            raise failure
+
+    def begin_shutdown(self) -> None:
+        self._closing = True
+        if self.private_runtime is not None:
+            self.private_runtime.host.begin_shutdown()
+
+    async def wait_idle(self, *, timeout: float = 60.0) -> None:
+        self.begin_shutdown()
+        deadline = time.monotonic() + timeout
+        if self.private_runtime is not None:
+            await asyncio.to_thread(self.private_runtime.host.wait_idle, timeout)
+        while True:
+            with self._background_lock:
+                pending = any(not task.done() for task in self._background_tasks)
+            if not self._active_events and not pending:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("active replies or background writes did not finish before shutdown")
+            await asyncio.sleep(0.01)
 
     def _schedule_knowledge_writeback(
         self,
@@ -541,7 +618,7 @@ class WaifuService:
                 [],
             ),
             character_id=character_id,
-            commit_lock=self._session_lock_for_key(character_id, launcher_type, launcher_id),
+            commit_lock=self._session_lock_for_key(character_id, launcher_type, launcher_id).hold(),
         )
 
     def _latest_message_text(self, event: InboundEvent, command_text: str) -> str:
@@ -891,6 +968,7 @@ class WaifuService:
                 "active_followups": active,
                 "total_events": self._event_counter,
                 "claw_runtime": self.claw_runtime.describe(refresh=False),
+                "runtime_v2": self.private_runtime.host.status() if self.private_runtime is not None else {"enabled": False},
             }
 
     def _persist_config(self) -> None:
@@ -924,6 +1002,7 @@ class WaifuService:
                 _close_component(previous_state_store)
         self.member_repository.bind(self.state_store)
         self.knowledge_repository.bind(self.state_store)
+        set_skill_telemetry_store(self.state_store)
         if hasattr(self.state_store, "set_default_character"):
             self.state_store.set_default_character(active_character)
         if hasattr(self.state_store, "refresh_knowledge_embeddings"):
@@ -1012,6 +1091,7 @@ class WaifuService:
         set_active_metrics_registry(self.metrics)
         if rebuild_generator:
             self.generator = Generator(self.config)
+            self.generator.bind_tools(self.tools)
             self.cards = self.generator._cards
             self.thoughts = Thoughts(self.config, self.generator)
             self.memory.set_character_resolver(self.cards.active_character)

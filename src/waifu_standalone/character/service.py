@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..models import InboundEvent, MessageSegment, SessionMemory
+from ..settings_admin.config_manager import CONFIG_WRITE_LOCK
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -20,10 +21,11 @@ class CharacterService:
         # Activation never deletes sessions: each character keeps its own session
         # directory and runtime DB. Clearing them is reset_character_sessions.
         svc = self.service
-        active_character = svc.cards.set_active_character(character)
-        svc.config.character = active_character
-        if active_character != svc._bound_character_id:
-            svc._rebind_character_scoped_storage(active_character)
+        with svc.runtime_mutation(), CONFIG_WRITE_LOCK:
+            active_character = svc.cards.set_active_character(character)
+            svc.config.character = active_character
+            if active_character != svc._bound_character_id:
+                svc._rebind_character_scoped_storage(active_character)
         return active_character
 
     def reset_character_sessions(self, payload: dict[str, object]) -> dict[str, object]:
@@ -37,7 +39,8 @@ class CharacterService:
         known = {str(item.get("character") or "") for item in svc.cards.list_characters()}
         if character not in known and character != svc._bound_character_id:
             raise ValueError(f"unknown character: {character}")
-        cleared = svc._clear_character_sessions(character)
+        with svc.runtime_mutation():
+            cleared = svc._clear_character_sessions(character)
         return {
             "status": "ok",
             "character": character,
@@ -55,6 +58,10 @@ class CharacterService:
         }
 
     def save_character_panel(self, payload: dict[str, object]) -> dict[str, object]:
+        with self.service.runtime_mutation():
+            return self._save_character_panel(payload)
+
+    def _save_character_panel(self, payload: dict[str, object]) -> dict[str, object]:
         svc = self.service
         character = str(payload.get("character") or svc.config.character or "default").strip() or "default"
         set_active = bool(payload.get("set_active", True))

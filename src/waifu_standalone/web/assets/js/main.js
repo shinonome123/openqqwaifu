@@ -16,6 +16,7 @@ import * as abilities from "./pages/abilities.js";
 import * as sidecar from "./pages/sidecar.js";
 import * as qqLogin from "./pages/qq_login.js";
 import * as events from "./pages/events.js";
+import * as conversations from "./pages/conversations.js";
 import * as observability from "./pages/observability.js";
 import * as advanced from "./pages/advanced.js";
 import * as userPage from "./pages/user.js";
@@ -36,6 +37,13 @@ const ROUTES = [
     labelKey: "nav.events",
     icon: iconPath("M4 6h16M4 12h16M4 18h7"),
     mount: events.mount,
+  },
+  {
+    id: "conversations",
+    group: "control",
+    labelKey: "nav.conversations",
+    icon: iconPath("M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"),
+    mount: conversations.mount,
   },
   {
     id: "observability",
