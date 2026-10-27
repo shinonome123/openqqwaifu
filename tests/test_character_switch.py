@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
@@ -128,6 +129,37 @@ class CharacterSwitchTests(unittest.TestCase):
         busy.set_result(None)
         self.service.character_switcher.pending.result(timeout=10)
         self.assertEqual(self.service._active_character_id(), "xiaokui")
+
+    def test_a_message_sent_while_the_switch_waits_is_answered_by_the_new_card(self) -> None:
+        busy = self._busy()
+        self.assertIsNone(self.service.handle_event(_group("切换小葵")))
+        threading.Timer(1.0, busy.set_result, [None]).start()
+
+        self.assertIsNotNone(self.service.handle_event(_group("你是谁")))  # held until the switch is done
+
+        self.assertEqual(self.service._active_character_id(), "xiaokui")
+        greeting = self._texts().index("小葵来啦~杂鱼们想我没？")
+        self.assertEqual(len(self._texts()), greeting + 2)  # the greeting, then the answer
+        history = self.service.memory.load(GROUP_ID, "group", character_id="xiaokui").history
+        asked = next(index for index, line in enumerate(history) if line.endswith("你是谁"))
+        self.assertLess(history.index("assistant: 小葵来啦~杂鱼们想我没？"), asked)  # handled after the switch
+
+    def test_card_commands_are_not_held_back_by_the_reply_budget(self) -> None:
+        self.service.config.rate_limits.mention_reply_burst = 1
+        self.service.config.rate_limits.mention_reply_per_hour = 0.0
+        self.service.handle_event(_group("在吗"))  # spends the only token
+        self.service.handle_event(_group("切换人物卡"))
+        self.assertTrue(self._texts()[-1].startswith("可以切换的人物卡"))
+        self._switch(_group("切换小葵"))
+        self.assertEqual(self.service._active_character_id(), "xiaokui")
+
+    def test_a_slow_switch_says_it_is_coming(self) -> None:
+        busy = self._busy()
+        with patch.object(switcher_module, "SWITCH_NOTICE_SECONDS", 0.3):
+            self.assertIsNone(self.service.handle_event(_group("切换小葵")))
+            threading.Timer(1.5, busy.set_result, [None]).start()
+            self.service.character_switcher.pending.result(timeout=10)
+        self.assertEqual(self._texts()[-2:], ["等我一下，马上换成「小葵」。", "小葵来啦~杂鱼们想我没？"])
 
     def test_a_switch_gives_up_when_the_bot_stays_busy(self) -> None:
         self._busy()

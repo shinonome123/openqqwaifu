@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，736 个，约 75 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，749 个，约 80 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -21,10 +21,18 @@
   - 看图：收到的图片由 `infra/image_inputs.py` 自己下载（走 `safe_fetch`，最多 10 MB），GIF 和动图取第一帧，长边超过 1536 像素就缩小，以 data URL 发给模型，每条消息最多 4 张。下载或解码失败、后端不支持图片、模型拒收时，当前消息末尾加「（对方发来的图片没能加载出来，你看不到它的内容）」让角色自己回应（模型拒收时去掉图片再请求一次），不再回「图片处理失败…」「当前模型后端不支持图片理解…」这类系统话。QQ 表情包（图片段 `sub_type=1`）在聊天记录里记作「发了一个表情」，模型照样看得到图。
 - 切换人物卡（`feat/persona-switch`，`character/switcher.py`）：聊天里说「切换人物卡」列出 `data/cards/` 里的卡（附带的 `default` 模板只在正在用时才列出），说「切换/切换到/切换成/切换回/换成 + 名字」就换。名字可以是卡的 ID、`assistant_name` 或 `<卡>.meta.json` 里的 `aliases`，也认互相包含的写法（「元气雌小鬼」→ 别名「雌小鬼」）；对不上任何卡的（「切换一下话题」）按普通聊天处理。群里必须明确 @，跟进窗口里的不算。换卡和控制台一样是全局的，所有私聊和群都换；`activate_character` 在有回复或后台写回在跑时会拒绝，所以命令先返回，后台每 0.5 秒重试，最多等 60 秒（`SWITCH_WAIT_SECONDS`），换好后新角色从 `greetings` 里随机挑一句打招呼，等不到就用旧角色说一句没换成。列表里每张卡的简介取 meta 的 `intro`，没有就取 Profile 第一句。`character_switch_user_ids`（顶层，默认空）非空时只有这些 QQ 号能换。每张卡的会话、成员目录和知识各自独立，换到新卡后它不认识群友的称呼，要重新认识。
 - 技能修复（`feat/persona-switch`，起因见第 3.7 节）：
-  - 群里直接 @ 机器人的消息改用每人一个的桶（`rate_limits.mention_reply_burst` / `mention_reply_per_hour`，默认 4 和 30），不再占群的共享额度；跟进窗口里的接话仍走 `group_reply_burst`。机器人之间斗嘴用光群额度后，真人 @ 照样有回应。
+  - 群里直接 @ 机器人的消息改用每人一个的桶（`rate_limits.mention_reply_burst` / `mention_reply_per_hour`，默认 8 和 120；2026-10-27 从 4 和 30 放宽，原来 owner 连着 @ 五次就被挡），不再占群的共享额度；跟进窗口里的接话仍走 `group_reply_burst`。机器人之间斗嘴用光群额度后，真人 @ 照样有回应。
   - `infra/safe_fetch.py`：解析结果落在 198.18.0.0/15（代理的 fake-IP）时，再用阿里 DoH（`https://dns.alidns.com/resolve`）查真实地址，全是公网才放行；查不到就拦。线上容器里国外域名都解析到 198.18.x.x，原来抓网页、总结链接对国外网站全部失败。
   - 技能列表（「你会什么」）只列这个人能用、能主动要求的技能，每行写一种说法和 `/skill` 写法，交给角色转述，不再贴原始代码块；没授权的人看不到文件工具和抓网页。
   - 文件工具的相对路径按第一个允许目录算（原来按配置文件所在目录），不给路径就列整个目录；默认配置下两者相同。
+- 回复变快（`fix/reply-latency`，实测见第 3.8 节）：
+  - `llm.reasoning_effort`（默认空 = 模型默认）随每个聊天请求发出；线上设成 `low`。grok-4.7 默认每条回复先想 1,500–2,700 个 token，24–40 秒；`low` 只想 300 个左右，5–8 秒。非推理模型不认这个参数，要留空。
+  - 群里没人 @ 的接话，如果轮到它时群里已经有更新的消息（`OutboundEmitter.superseded`），就不单独回，留给最新那条；它还在环境缓冲里，作为上下文进下一次回复。@ 机器人的照常回。原来每条都按顺序回，一条 15–25 秒，群里一热闹就积压几分钟。
+  - 有切换在等时，新消息先等切换完成（`CharacterSwitcher.wait_for_switch`，在拿会话锁之前），由新角色回答；切换等了 3 秒还没完成（`SWITCH_NOTICE_SECONDS`），旧角色先说一句「等我一下，马上换成「X」」。
+  - 调模型时连接在拿到响应前断开（不是超时、也没有 HTTP 状态码）就重试一次；`TransportError` 的消息里写上异常类型（原来只有「request failed: 」）。发 QQ 消息的动作不重试。
+  - 单独的 `/skill`、`/skills` 回技能列表，`/skills weather 上海` 等同 `/skill weather 上海`。共享文件夹为空时，列文件的结果写明「这是机器人的共享文件夹，不是电脑桌面」。
+  - Dockerfile 里 `npm i -g @steipete/summarize` 挪到复制代码之前，改代码不再重装（2026-10-27 一次部署因为 npm 超时构建失败）。
+  - 没改：新成员第一次说话时的称呼追问仍要调一次模型（群里的起名流程靠它的 `asked_once` 状态衔接），换到新卡后每个人第一次说话会多 2–5 秒。
 
 ## 2. 当前工作区状态
 
@@ -159,7 +167,7 @@
 - 现在有两道闸门，都在 `reply_flow/reply_gate.py`：
   - `ignore_user_ids`（顶层配置，环境变量 `OPENQQWAIFU_IGNORE_USER_IDS`，逗号分隔）：这些 QQ 号的消息永远不触发回复，私聊也一样，也不能用 `/skill`；消息仍作为群聊上下文进环境缓冲。
   - `rate_limits.group_reply_burst` / `group_reply_per_hour`（默认 8 和 60）：每个群一个令牌桶，每次回复扣一个，用完就不回，只记一条 WARNING 日志，不在群里说明。`rate_limits.exempt_user_ids` 里的人不受限，`rate_limits.enabled=false` 全关。桶在内存里，重启后是满的。
-  - 直接 @ 机器人的消息不走上面的群桶，走每个群里每人一个的桶（`mention_reply_burst` / `mention_reply_per_hour`，默认 4 和 30；burst 为 0 时回到群桶）。WARNING 日志里的 `bucket=` 说明是哪个桶。
+  - 直接 @ 机器人的消息不走上面的群桶，走每个群里每人一个的桶（`mention_reply_burst` / `mention_reply_per_hour`，默认 8 和 120；burst 为 0 时回到群桶）。切换人物卡的命令不调模型，不占任何桶。WARNING 日志里的 `bucket=` 说明是哪个桶。
 - 控制台「其他设置」接口（`/api/panels/other`）能读写 `ignore_user_ids`，页面上还没有输入框；限速参数只能改配置文件。
 
 ### 3.4 实机测试的发现（2026-10-27，模型 grok-4-fast-non-reasoning）
@@ -174,6 +182,7 @@
 ### 3.5 运行数据
 
 - `embedding.model` 由 `qwen3-vl-embedding` 改为 `text-embedding-v4`：前者在 DashScope 的 OpenAI 兼容 `/embeddings` 上不可用，每次都返回 404；后者已实测，1024 维。更换嵌入模型要重新校准 `_SEMANTIC_RELEVANCE_MIN`，`text-embedding-v4` 上相关句对约 0.42–0.64，无关句对约 0.19–0.37。
+- `llm.reasoning_effort="low"`（2026-10-27 上线 `fix/reply-latency` 时加，原因见第 3.8 节）。
 - `tool_policy`（2026-10-27 改）：`authorized_user_ids=["783190298"]`（owner）；`allowed_roots` 和 `write_allowed_roots` 都只有 `/app/data/files`（宿主机上的 `data/files/`），读写文件、列目录只能碰这个文件夹，原来是整个 `data/`（含带密钥的配置）；`write_enabled=true`，`exec_enabled=false`。抓网页（network）也随授权对 owner 打开。改前的配置备份在 `data/backups/before-file-access-20261027-083905/`。`history_window_messages=30`、`max_thinking_words=80`（2026-10-26 改）；没有 `history_window_chars`（缺省 2500）和 `timezone`（缺省 `Asia/Shanghai`）。
 - `member_persona_state.profile_summary` 里原来的 4 条画像写的全是机器人自己的傲娇人设（「masks care with complaints」之类），2026-10-27 备份后清空；抽取提示词已不再带人设。
 - 2026-10-25 清空过会话记录和知识条目，清空前的备份在系统临时目录，可能已被清理：`/private/tmp/claude-501/-Users-shinonome-openqqwaifu/bd3c61d7-dd79-4eaf-bd72-9fa0d7f1d365/scratchpad/data-backup-20261025-160341`。2026-10-27 的实测写入了新的会话（`person_783190298`、`group_612475113`）和知识。
@@ -196,6 +205,13 @@
 - 总结 `https://www.python.org/about/` 报「不能访问内网或本机地址」：容器里 www.python.org、github.com、wttr.in、duckduckgo 都解析到 198.18.x.x（宿主机代理的 fake-IP），bilibili、baidu 是真实地址。天气和搜索不经过 `safe_fetch`，所以不受影响。
 - 「你会什么」回的是带 `keywords=`、`tool=` 的原始清单，还列出了没人能用的写文件、执行命令。
 - 「看看 data 目录下有什么文件」没有调工具：`tool_policy.authorized_user_ids` 为空，文件工具对所有人关闭。
+
+### 3.8 回复慢的原因（2026-10-27）
+
+- 群里 20:58–21:01：机器人把每条消息都按顺序回，一条 15–25 秒，owner 20:58:30 的话 129 秒后才回，苦力怕的 149 秒后才回；群友说「现在还在回之前的」。单独 @ 且没人插队时 17 秒左右。
+- 每条回复：1 次向量检索 + 1 次 grok-4.7（10–19 秒）+ 新成员时 1 次称呼追问 + 分段之间 1–2.5 秒的停顿；后台还有 1 次记忆抽取。
+- 同一个真实请求（16 条消息、约 3,000 输入 token）的耗时：grok-4.7 默认 24–40 秒（思考 1,500–2,700 token），`reasoning_effort=low` 5–8 秒（约 300），grok-4.20-0309-non-reasoning 2–6 秒，grok-4.6 约 20 秒，grok-4.3 5–6 秒。
+- 修好后的 dry_run（`low`）：单条 @ 5–6 秒；5 条没 @ 的接话同时进来，只回最新一条，8.6 秒，回复里接住了两个人的话；「切换晚晴」0.7 秒换好并打招呼。
 
 ## 4. 三块（A、B、C 已完成）
 

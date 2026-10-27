@@ -317,6 +317,12 @@ class OutboundEmitter:
         if event.launcher_type == "group" and message_id:
             self._latest_group_message[str(event.launcher_id)] = message_id
 
+    def superseded(self, event: InboundEvent) -> bool:
+        """Whether a newer message has arrived in this group since ``event``."""
+        message_id = str(event.message_id or "").strip()
+        newest = self._latest_group_message.get(str(event.launcher_id), "")
+        return bool(event.launcher_type == "group" and message_id and newest and newest != message_id)
+
     def _with_quote(self, event: InboundEvent, message: OutboundMessage) -> OutboundMessage:
         """Quote the message being answered when others have spoken since, as people do."""
         message_id = str(event.message_id or "").strip()

@@ -150,7 +150,7 @@ class GuardConfigTests(unittest.TestCase):
         self.assertEqual(config.rate_limits.group_reply_per_hour, 12.0)
         defaults = self._load({}, {}).rate_limits
         self.assertEqual((defaults.group_reply_burst, defaults.group_reply_per_hour), (8, 60.0))
-        self.assertEqual((defaults.mention_reply_burst, defaults.mention_reply_per_hour), (4, 30.0))
+        self.assertEqual((defaults.mention_reply_burst, defaults.mention_reply_per_hour), (8, 120.0))
         mentions = self._load({"rate_limits": {"mention_reply_burst": 0, "mention_reply_per_hour": "12"}}, {}).rate_limits
         self.assertEqual((mentions.mention_reply_burst, mentions.mention_reply_per_hour), (0, 12.0))
 

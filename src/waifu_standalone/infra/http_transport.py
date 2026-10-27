@@ -26,10 +26,19 @@ class TransportError(RuntimeError):
         *,
         status_code: int | None = None,
         body: str = "",
+        timed_out: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+        # No answer within the timeout, as opposed to a connection that broke off.
+        self.timed_out = timed_out
+
+
+def _request_failure(exc: httpx.HTTPError) -> TransportError:
+    # Some httpx errors carry no message ("request failed: " told nothing); name the type.
+    detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return TransportError(f"request failed: {detail}", timed_out=isinstance(exc, httpx.TimeoutException))
 
 
 class SyncHttpTransport:
@@ -100,7 +109,7 @@ class SyncHttpTransport:
                 outcome="transport_error",
                 duration_seconds=time.perf_counter() - started,
             )
-            raise TransportError(f"request failed: {exc}") from exc
+            raise _request_failure(exc) from exc
         return HttpResponse(
             status_code=response.status_code,
             text=response.text,
@@ -193,7 +202,7 @@ class AsyncHttpTransport:
                 outcome="transport_error",
                 duration_seconds=time.perf_counter() - started,
             )
-            raise TransportError(f"request failed: {exc}") from exc
+            raise _request_failure(exc) from exc
         return HttpResponse(
             status_code=response.status_code,
             text=response.text,

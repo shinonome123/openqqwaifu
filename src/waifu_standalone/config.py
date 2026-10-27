@@ -39,6 +39,10 @@ class LLMConfig:
     model: str = ""
     app_type: str = "chat"
     timeout_seconds: float = 45.0
+    # 推理模型想多久（OpenAI 兼容接口的 reasoning_effort：low、medium、high），空表示用模型默认。
+    # grok-4.7 默认每条回复先想一两千个 token，24–40 秒；low 只要 5–8 秒，聊天质量看不出差别。
+    # 非推理模型（例如 grok-4.20-0309-non-reasoning）不认这个参数，留空。
+    reasoning_effort: str = ""
 
 
 @dataclass(slots=True)
@@ -178,8 +182,8 @@ class RateLimitConfig:
     # 直接 @ 机器人的消息不占上面的群额度，改用每人一个的桶：机器人之间斗嘴把群额度
     # 用光时，真人 @ 它照样有回应；反复 @ 它的机器人也只能按这个速度回。burst 为 0 时
     # @ 也走群额度（旧行为）。
-    mention_reply_burst: int = 4
-    mention_reply_per_hour: float = 30.0
+    mention_reply_burst: int = 8
+    mention_reply_per_hour: float = 120.0
     # 这些 QQ 号不受限制（例如机器人主人）。
     exempt_user_ids: list[str] = field(default_factory=list)
 

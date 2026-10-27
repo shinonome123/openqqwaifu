@@ -35,6 +35,8 @@ _IGNORED_CHARS = re.compile(r"[\s，,。.！!？?~～「」『』“”\"'：:]"
 _INTRO_MAX_CHARS = 40
 # How long a switch waits for running replies and write-backs before giving up.
 SWITCH_WAIT_SECONDS = 60.0
+# A switch still waiting after this long says so, so the chat is not left guessing.
+SWITCH_NOTICE_SECONDS = 3.0
 
 
 @dataclass(slots=True)
@@ -105,6 +107,12 @@ class CharacterSwitcher:
         # "切换一下话题" names no card: it is ordinary chat.
         return ("switch", choice) if choice is not None else None
 
+    def is_command(self, event: InboundEvent, text: str) -> bool:
+        """Whether ``text`` is a card command the bot would act on in this chat."""
+        if event.launcher_type == "group" and not event.has_bot_mention(str(self._service.config.bot_account_id or "")):
+            return False
+        return self.parse(text) is not None
+
     def _find(self, wanted: str) -> CharacterChoice | None:
         wanted = wanted.lower()
         choices = self.choices()
@@ -151,6 +159,19 @@ class CharacterSwitcher:
         self._start(event, choice)
         return True, None
 
+    async def wait_for_switch(self) -> None:
+        """Hold a new message while a switch is pending, so the new character answers it.
+
+        Messages that hold back do not count as running replies, so the switch only
+        waits for work already under way. Never longer than the switch itself may take.
+        """
+        task = self._task
+        if task is None or task.done():
+            return
+        deadline = time.monotonic() + SWITCH_WAIT_SECONDS + 5.0
+        while not task.done() and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+
     def _start(self, event: InboundEvent, choice: CharacterChoice) -> None:
         if self._task is not None and not self._task.done():
             self._task.cancel()
@@ -171,7 +192,8 @@ class CharacterSwitcher:
 
     async def _switch_when_idle(self, event: InboundEvent, choice: CharacterChoice) -> None:
         svc = self._service
-        deadline = time.monotonic() + SWITCH_WAIT_SECONDS
+        started = time.monotonic()
+        noticed = False
         while True:
             if svc._closing:
                 return
@@ -182,10 +204,14 @@ class CharacterSwitcher:
                 # activate_character refuses while a reply or memory write-back is running.
                 if not str(exc).startswith("runtime busy"):
                     raise
-                if time.monotonic() >= deadline:
+                waited = time.monotonic() - started
+                if waited >= SWITCH_WAIT_SECONDS:
                     _LOGGER.warning("character switch to %s gave up: still busy", choice.character)
                     await self._say(event, f"现在有点忙，没换成「{choice.name}」，过会儿再说一次吧。")
                     return
+                if not noticed and waited >= SWITCH_NOTICE_SECONDS:
+                    noticed = True
+                    await self._say(event, f"等我一下，马上换成「{choice.name}」。")
                 await asyncio.sleep(0.5)
         _LOGGER.info("character switched to %s from chat by %s", choice.character, event.sender_id)
         greeting = random.choice(choice.greetings) if choice.greetings else f"（已切换到「{choice.name}」）"

@@ -38,7 +38,8 @@ class ReplyFlowService:
         svc._remember_ambient_event(event, character_id=current_character)
         if not svc.gate.should_reply(event):
             return None
-        if not svc.gate.acquire_group_reply_slot(event):
+        # Card commands cost no model call; the reply budget does not hold them back.
+        if not svc.character_switcher.is_command(event, text) and not svc.gate.acquire_group_reply_slot(event):
             return None
 
         await svc.onboarding.aremember_directory_member(event)

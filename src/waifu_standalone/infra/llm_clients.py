@@ -3,12 +3,20 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from .http_transport import AsyncHttpTransport, SyncHttpTransport, TransportError
 from .observability import TransportMetricsScope
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _worth_one_retry(exc: TransportError) -> bool:
+    """A connection that broke off before any answer; not a timeout or an HTTP error."""
+    return exc.status_code is None and not exc.timed_out
 
 
 class LLMClientError(RuntimeError):
@@ -206,27 +214,37 @@ class _BaseHTTPClient:
         return False
 
     def _post_json(self, url: str, payload: dict[str, object], *, headers: dict[str, str]) -> str:
-        try:
-            return self._transport.request(
-                "POST",
-                url,
-                headers=headers,
-                json_payload=payload,
-            ).text
-        except TransportError as exc:
-            raise LLMClientError(f"llm request failed: {exc}") from exc
+        for attempt in (1, 2):
+            try:
+                return self._transport.request(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json_payload=payload,
+                ).text
+            except TransportError as exc:
+                if attempt == 1 and _worth_one_retry(exc):
+                    _LOGGER.warning("llm request broke off, retrying once: %s", exc)
+                    continue
+                raise LLMClientError(f"llm request failed: {exc}") from exc
+        raise AssertionError("unreachable")
 
     async def _apost_json(self, url: str, payload: dict[str, object], *, headers: dict[str, str]) -> str:
-        try:
-            response = await self._async_transport.request(
-                "POST",
-                url,
-                headers=headers,
-                json_payload=payload,
-            )
-            return response.text
-        except TransportError as exc:
-            raise LLMClientError(f"llm request failed: {exc}") from exc
+        for attempt in (1, 2):
+            try:
+                response = await self._async_transport.request(
+                    "POST",
+                    url,
+                    headers=headers,
+                    json_payload=payload,
+                )
+                return response.text
+            except TransportError as exc:
+                if attempt == 1 and _worth_one_retry(exc):
+                    _LOGGER.warning("llm request broke off, retrying once: %s", exc)
+                    continue
+                raise LLMClientError(f"llm request failed: {exc}") from exc
+        raise AssertionError("unreachable")
 
     def _endpoint(self, suffix: str, *, add_v1: bool = False) -> str:
         normalized = str(suffix or "").lstrip("/")
@@ -448,7 +466,7 @@ class OpenAILLMClient(_BaseHTTPClient):
     def supports_images(self) -> bool:
         return True
 
-    def __init__(self, *, base_url: str, api_key: str, model: str = "", backend: str = "openai", timeout_seconds: float = 45.0, app_type: str = "chat"):
+    def __init__(self, *, base_url: str, api_key: str, model: str = "", backend: str = "openai", timeout_seconds: float = 45.0, app_type: str = "chat", reasoning_effort: str = ""):
         super().__init__(
             base_url=base_url,
             api_key=api_key,
@@ -457,6 +475,7 @@ class OpenAILLMClient(_BaseHTTPClient):
             timeout_seconds=timeout_seconds,
             app_type=app_type,
         )
+        self.reasoning_effort = str(reasoning_effort or "").strip().lower()
 
     @property
     def enabled(self) -> bool:
@@ -489,11 +508,14 @@ class OpenAILLMClient(_BaseHTTPClient):
         )
 
     def _payload(self, query: str, *, user: str) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "model": self.model,
             "messages": [{"role": "user", "content": str(query or "")}],
             "user": user,
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+        return payload
 
     def _tool_payload(
         self,
@@ -523,6 +545,8 @@ class OpenAILLMClient(_BaseHTTPClient):
         if not tools:
             payload.pop("tools")
             payload.pop("tool_choice")
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         return payload
  
     def _normalize_tool_messages(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -1045,6 +1069,7 @@ def build_llm_client_from_values(
     backend: str = "dify",
     timeout_seconds: float = 45.0,
     app_type: str = "chat",
+    reasoning_effort: str = "",
 ) -> LLMClient:
     resolved_backend = str(backend or "dify").strip().lower() or "dify"
     if resolved_backend == "dify":
@@ -1071,6 +1096,7 @@ def build_llm_client_from_values(
             backend=resolved_backend,
             timeout_seconds=timeout_seconds,
             app_type=app_type,
+            reasoning_effort=reasoning_effort,
         )
     return DisabledLLMClient(
         base_url=base_url,
@@ -1091,4 +1117,5 @@ def build_llm_client(config: object) -> LLMClient:
         backend=str(getattr(llm_config, "backend", "dify") or "dify"),
         timeout_seconds=float(getattr(llm_config, "timeout_seconds", 45.0) or 45.0),
         app_type=str(getattr(llm_config, "app_type", "chat") or "chat"),
+        reasoning_effort=str(getattr(llm_config, "reasoning_effort", "") or ""),
     )

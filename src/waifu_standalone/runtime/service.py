@@ -272,6 +272,8 @@ class WaifuService:
     async def _process_event_async(self, event: InboundEvent, *, background_image_delivery: bool) -> OutboundMessage | Admission | None:
         # Before waiting on the chat's lock: a reply in progress must see newer messages.
         self.emitter.note_inbound(event)
+        # A pending card switch goes first; this message is then answered by the new card.
+        await self.character_switcher.wait_for_switch()
         if self.private_runtime is not None and self.private_runtime.routes(event):
             if self._closing:
                 raise RuntimeError("service is shutting down")
