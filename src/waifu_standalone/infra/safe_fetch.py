@@ -37,6 +37,8 @@ class FetchedPage:
     text: str
     headers: dict[str, str]
     truncated: bool = False
+    # The raw body, for callers that want bytes (pictures) rather than text.
+    content: bytes = b""
 
 
 def is_public_address(value: str) -> bool:
@@ -117,6 +119,7 @@ def fetch_public_url(
                         text=_decode(body, response.charset_encoding),
                         headers={str(key): str(value) for key, value in response.headers.items()},
                         truncated=truncated,
+                        content=body,
                     )
             except httpx.HTTPError as exc:
                 raise TransportError(f"request failed: {exc}") from exc

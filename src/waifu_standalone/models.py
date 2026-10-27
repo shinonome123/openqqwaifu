@@ -14,6 +14,8 @@ class MessageSegment:
     text: str = ""
     image_url: str = ""
     image_base64: str = ""
+    # A QQ sticker (表情包) rather than a photo.
+    image_sticker: bool = False
     mention_target: str = ""
     mention_display: str = ""
 
@@ -90,7 +92,11 @@ class InboundEvent:
         if not has_images:
             return text
         count = self.image_count
-        image_label = "发送了图片" if count == 1 else f"发送了{count}张图片"
+        stickers = all(segment.image_sticker for segment in self.segments if segment.kind == "image")
+        if stickers:
+            image_label = "发了一个表情" if count == 1 else f"发了{count}个表情"
+        else:
+            image_label = "发送了图片" if count == 1 else f"发送了{count}张图片"
         if text:
             return f"{image_label}，并且说：“{text}”。"
         return f"{image_label}。"

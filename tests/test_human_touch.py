@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import sys
 import tempfile
@@ -8,12 +9,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from waifu_standalone.app import build_default_service
 from waifu_standalone.config import AppConfig, SegmentedReplyConfig, StickerConfig
 from waifu_standalone.gateways.onebot_actions import build_onebot_message_segments
-from waifu_standalone.infra.llm_clients import LLMToolResponse
+from waifu_standalone.infra import image_inputs
+from waifu_standalone.infra.http_transport import TransportError
+from waifu_standalone.infra.image_inputs import ImageInputError, prepare_image_input
+from waifu_standalone.infra.llm_clients import LLMClientError, LLMToolResponse
+from waifu_standalone.infra.safe_fetch import FetchedPage
 from waifu_standalone.members.onboarding import MemberOnboarding
 from waifu_standalone.models import InboundEvent, MessageSegment, OutboundMessage
 from waifu_standalone.reply_flow import emitter as emitter_module
@@ -21,6 +28,7 @@ from waifu_standalone.reply_flow import stickers as stickers_module
 from waifu_standalone.reply_flow.emitter import conversational_chunks
 from waifu_standalone.reply_flow.stickers import strip_sticker_tags
 from waifu_standalone.settings_admin.config_manager import ConfigManager
+from waifu_standalone.web.http_api import parse_onebot_event
 
 BOT_ID = "3956638110"
 GROUP_ID = "612475113"
@@ -356,12 +364,109 @@ class StickerReplyFlowTests(_ServiceCase):
         service.handle_event(_private("真的吗"))
         self.assertNotIn("[表情包]", str(client.requests[1][0]["content"]))
 
+    def test_a_failed_model_call_leaves_a_warning_instead_of_vanishing(self) -> None:
+        service, outbound = self._service()
+        service.config.qq_sidecar.dry_run = True  # the live path: no canned fallback reply
+        client = self._chat(service, "在的")
+
+        def fail() -> None:
+            raise LLMClientError("http 503")
+
+        client.during_reply = fail
+        with self.assertLogs("waifu_standalone.reply_flow.prompt_assembler", level="WARNING") as logs:
+            self.assertIsNone(service.handle_event(_private("在吗")))
+        self.assertIn("chat reply failed: http 503", "\n".join(logs.output))
+        self.assertEqual(outbound.sent, [])
+
     def test_a_reply_that_was_only_an_unusable_tag_sends_nothing(self) -> None:
         service, outbound = self._service()
         self._chat(service, "[表情:不存在]")
 
         self.assertIsNone(service.handle_event(_private("在吗")))
         self.assertEqual(outbound.sent, [])
+
+
+def _picture(size: tuple[int, int], *, fmt: str, mode: str = "RGB", frames: int = 1) -> bytes:
+    images = [Image.new(mode, size, (200, 30, 30) if mode == "RGB" else (200, 30, 30, 120)) for _ in range(frames)]
+    buffer = io.BytesIO()
+    images[0].save(buffer, format=fmt, save_all=frames > 1, append_images=images[1:])
+    return buffer.getvalue()
+
+
+def _decoded(data_url: str) -> tuple[str, Image.Image]:
+    header, _, encoded = data_url.partition(",")
+    return header, Image.open(io.BytesIO(base64.b64decode(encoded)))
+
+
+class ImageInputTests(unittest.TestCase):
+    def test_a_small_png_jpeg_or_webp_goes_through_untouched(self) -> None:
+        for fmt, media_type in (("PNG", "image/png"), ("JPEG", "image/jpeg"), ("WEBP", "image/webp")):
+            data = _picture((64, 48), fmt=fmt)
+            self.assertEqual(
+                prepare_image_input("base64://" + base64.b64encode(data).decode()),
+                f"data:{media_type};base64,{base64.b64encode(data).decode()}",
+            )
+
+    def test_a_gif_sticker_becomes_its_first_frame(self) -> None:
+        # xAI rejects GIF outright; QQ stickers are often GIFs.
+        gif = _picture((64, 48), fmt="GIF", frames=3)
+        header, image = _decoded(prepare_image_input("data:image/gif;base64," + base64.b64encode(gif).decode()))
+        self.assertIn(header, {"data:image/jpeg;base64", "data:image/png;base64"})
+        self.assertEqual(image.size, (64, 48))
+        self.assertFalse(getattr(image, "is_animated", False))
+
+    def test_a_large_photo_is_scaled_down_and_transparency_kept(self) -> None:
+        header, image = _decoded(prepare_image_input("base64://" + base64.b64encode(_picture((3000, 1500), fmt="PNG")).decode()))
+        self.assertEqual((header, image.size), ("data:image/jpeg;base64", (1536, 768)))
+        transparent = _picture((2000, 2000), fmt="PNG", mode="RGBA")
+        header, image = _decoded(prepare_image_input("base64://" + base64.b64encode(transparent).decode()))
+        self.assertEqual((header, image.mode, image.size), ("data:image/png;base64", "RGBA", (1536, 1536)))
+
+    def test_links_are_fetched_with_a_size_cap(self) -> None:
+        png = _picture((10, 10), fmt="PNG")
+        url = "https://multimedia.nt.qq.com.cn/download?fileid=1"
+        ok = FetchedPage(url=url, status_code=200, text="", headers={}, content=png)
+        with patch.object(image_inputs, "fetch_public_url", return_value=ok) as fetch:
+            self.assertTrue(prepare_image_input(url).startswith("data:image/png;base64,"))
+        self.assertEqual(fetch.call_args.kwargs["max_bytes"], image_inputs.MAX_DOWNLOAD_BYTES)
+
+        too_big = FetchedPage(url=url, status_code=200, text="", headers={}, content=png, truncated=True)
+        for outcome in ({"return_value": too_big}, {"side_effect": TransportError("http 403")}):
+            with patch.object(image_inputs, "fetch_public_url", **outcome), self.assertRaises(ImageInputError):
+                prepare_image_input(url)
+
+    def test_what_is_not_a_picture_is_refused(self) -> None:
+        for reference in ("", "ABCDEF.jpg", "base64://bm90IGFuIGltYWdl", "data:image/png,raw"):
+            with self.assertRaises(ImageInputError):
+                prepare_image_input(reference)
+
+
+class InboundStickerTests(unittest.TestCase):
+    def _event(self, *segments: dict[str, object]) -> InboundEvent:
+        return parse_onebot_event(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 612475113,
+                "user_id": 3246300953,
+                "message_id": 1,
+                "sender": {"nickname": "大肥鱼"},
+                "message": list(segments),
+            }
+        )
+
+    def test_a_qq_sticker_reads_as_a_sticker_not_a_photo(self) -> None:
+        sticker = {"type": "image", "data": {"url": "https://multimedia.nt.qq.com.cn/a", "sub_type": 1, "summary": "[动画表情]"}}
+        photo = {"type": "image", "data": {"url": "https://multimedia.nt.qq.com.cn/b", "sub_type": 0}}
+
+        self.assertEqual(self._event(sticker).to_memory_text(), "发了一个表情。")
+        self.assertEqual(
+            self._event({"type": "text", "data": {"text": "哼"}}, sticker).to_memory_text(),
+            "发了一个表情，并且说：“哼”。",
+        )
+        self.assertEqual(self._event(photo, sticker).to_memory_text(), "发送了2张图片。")
+        # The model still sees the sticker itself.
+        self.assertEqual(self._event(sticker).image_payloads(), ["https://multimedia.nt.qq.com.cn/a"])
 
 
 class HumanTouchConfigTests(unittest.TestCase):
