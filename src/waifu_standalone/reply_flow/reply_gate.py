@@ -13,10 +13,13 @@ themselves.
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 import time
 from typing import TYPE_CHECKING
 
+from ..infra.rate_limit import TokenBucketLimiter
 from ..models import InboundEvent, OutboundMessage, SessionMemory
 
 if TYPE_CHECKING:
@@ -27,6 +30,8 @@ FOLLOW_UP_METADATA_KEY = "follow_up_until"
 PENDING_SEARCH_METADATA_KEY = "pending_search"
 PENDING_SEARCH_TTL_SECONDS = 1800.0
 LAST_SEARCH_TTL_SECONDS = 1800.0
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _safe_float(payload: dict[str, object], key: str, default: float) -> float:
@@ -43,12 +48,16 @@ class ReplyGate:
     def __init__(self, service: "WaifuService") -> None:
         self._service = service
         self._group_follow_up_until: dict[tuple[str, str], float] = {}
+        self._group_reply_limiter = TokenBucketLimiter()
 
     # ------------------------------------------------------------------
     # Entry point: should we reply?
     # ------------------------------------------------------------------
     def should_reply(self, event: InboundEvent) -> bool:
         service = self._service
+        ignored = {str(uid).strip() for uid in service.config.ignore_user_ids if str(uid).strip()}
+        if str(event.sender_id or "").strip() in ignored:
+            return False
         if event.launcher_type != "group":
             return True
         bot_account_id = str(service.config.bot_account_id or "").strip()
@@ -68,6 +77,34 @@ class ReplyGate:
         if self._has_recent_search_link_follow_up(event):
             return True
         return self._has_pending_search_follow_up(event)
+
+    def acquire_group_reply_slot(self, event: InboundEvent) -> bool:
+        """Take a token from the group's reply bucket; ``False`` means stay silent.
+
+        The follow-up window lets any message reply for a while after the bot speaks,
+        and every reply extends it, so two bots in a group can keep each other going.
+        A refused reply is not announced: telling the group would be one more message.
+        """
+        if event.launcher_type != "group":
+            return True
+        limits = self._service.config.rate_limits
+        if not limits.enabled or limits.group_reply_burst <= 0:
+            return True
+        exempt = {str(uid).strip() for uid in limits.exempt_user_ids if str(uid).strip()}
+        if str(event.sender_id or "").strip() in exempt:
+            return True
+        wait = self._group_reply_limiter.acquire(
+            [(f"group-reply:{event.launcher_id}", limits.group_reply_burst, limits.group_reply_per_hour / 3600.0)]
+        )
+        if wait > 0:
+            _LOGGER.warning(
+                "group reply rate-limited group=%s sender=%s retry_in=%s",
+                event.launcher_id,
+                event.sender_id,
+                "never" if math.isinf(wait) else f"{wait:.0f}s",
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Group follow-up window

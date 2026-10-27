@@ -151,6 +151,10 @@ class RateLimitConfig:
     network_user_per_hour: float = 60.0
     network_group_burst: int = 16
     network_group_per_hour: float = 180.0
+    # 群聊回复的总阀门：每个群一个桶，回复一次用一次。两个机器人互相 @，或在跟进窗口里
+    # 来回接话时，用完 burst 就只能按 per_hour 的速度回，不会一直刷屏。
+    group_reply_burst: int = 8
+    group_reply_per_hour: float = 60.0
     # 这些 QQ 号不受限制（例如机器人主人）。
     exempt_user_ids: list[str] = field(default_factory=list)
 
@@ -226,6 +230,8 @@ class AppConfig:
     image_command_prefix: str = "生图"
     image_command_aliases: list[str] = field(default_factory=lambda: ["draw"])
     ignore_prefixes: list[str] = field(default_factory=lambda: ["!", "？", "/"])
+    # 这些 QQ 号的消息永远不触发回复（例如群里的其他机器人），但仍作为群聊上下文保留。
+    ignore_user_ids: list[str] = field(default_factory=list)
     # Commands that still run although they start with an ignored prefix ("/skill weather-command 上海").
     explicit_skill_prefixes: list[str] = field(default_factory=lambda: ["/skill"])
     group_follow_up_window_seconds: float = 5.0

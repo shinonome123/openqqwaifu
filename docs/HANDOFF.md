@@ -1,10 +1,10 @@
-# 交接说明（2026-10-25，2026-10-26 更新）
+# 交接说明（2026-10-25，2026-10-27 更新）
 
-给新会话：这份文档只记录工程事实。先读第 1、2 节。第 4 节的 A、B、C 三块已在 2026-10-26 做完并提交（PR #27，未实机验证）；阶段 0 剩下的 P0 修复见第 2.1 节。剩下的事在各块的「没做的」、第 2.1 节的「要 owner 决定的」和第 5 节。标注「（审计结论）」的条目来自代码审查，没有逐条复核，改之前先对一下代码。
+给新会话：这份文档只记录工程事实。先读第 1、2、3 节。第 4 节的 A、B、C 三块（PR #27）、阶段 0 的 P0 修复（第 2.1 节，PR #28）和审计修复加新版私聊链路（PR #29）都已合入 main；2026-10-27 起服务在本机 Docker 里真实收发，部署和实测情况见第 3 节。剩下的事在各块的「没做的」、第 2.1 节的「要 owner 决定的」和第 5 节。标注「（审计结论）」的条目来自代码审查，没有逐条复核，改之前先对一下代码。
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，362 个（`fix/stage0-p0` 上；PR #27 上是 336 个），约 48 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，main 上 672 个（`fix/deploy-hardening` 上 678 个），约 65 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复的最终输入是一条 system 消息加一条 user 消息：
   - system：`reply_flow/prompt_assembler.py` 顶部的 `_TOOL_CALLING_SYSTEM_PROMPT`。
@@ -13,9 +13,9 @@
 
 ## 2. 当前工作区状态
 
-- `feat/memory-and-skill-overhaul`：下面七组改动拆成的 8 个提交（含测试隔离和本文档），PR #27，未合入 main。
-- `fix/stage0-p0`：基于上一条分支的 `6645f05`，阶段 0 剩下的 P0 修复，5 个修复提交加 1 个文档提交，见第 2.1 节；没有推送。PR #27 合入后，把它 rebase 到 main 再开 PR。
-- `.env`（NapCat 令牌、账号）和 `output/`（截图和 PR 草稿）在 `fix/stage0-p0` 上已加入 `.gitignore`；这条分支合入之前，主检出里它们仍是未跟踪文件，不要 `git add .`。
+- 2026-10-27 已合入 main：PR #27（下面七组改动）、PR #28（第 2.1 节）、PR #29（`codex/runtime-v2-private-flow` 拆成的三个提交：审计修复、新版私聊链路、文档，见 `docs/AUDIT_FIXES_2026-10-26.md`、`docs/RUNTIME_V2_FIRST_SLICE.md`、`docs/ARCHITECTURE_RESET_PLAN.md`）。
+- `fix/deploy-hardening`：群回复限速和忽略名单、空环境变量不覆盖配置、固定 NapCat 版本、本文档，见第 3 节。
+- `.env`（NapCat 令牌、账号）和 `output/`（截图和 PR 草稿）已在 `.gitignore` 里。
 
 改动分七组（已按这个顺序提交，下面留作每组改了什么的记录）：
 
@@ -80,9 +80,9 @@
    - `infra/safe_fetch.py`（新文件）：`check_public_url`、`fetch_public_url`、`afetch_public_url`；`skills/dispatcher.py` 的 web-fetch、summarize 内置抓取改用它，summarize CLI 调用前先 `check_public_url`。测试 `tests/test_safe_fetch.py`。
    - 测试：`tests/test_skills.py` 把 `test_slash_skill_command_no_longer_bypasses_tool_orchestrator`、`test_ignored_slash_summarize_does_not_use_legacy_dispatch` 换成 `test_slash_skill_command_runs_with_default_ignore_prefixes`、`test_other_slash_messages_are_still_ignored`、`test_slash_skill_command_respects_tool_authorization`，`test_image_request_keeps_skill_match` 改断言，另加 3 个；`tests/test_app.py` 加 5 个。
 
-### 2.1 阶段 0 的 P0 修复（分支 `fix/stage0-p0`，2026-10-26）
+### 2.1 阶段 0 的 P0 修复（PR #28，2026-10-26，已合入）
 
-`REFACTOR_ROADMAP.md` 第 1 节第 4 步的剩余项。URL 抓取拦截在 PR #27 里已经做完，这里没再动。每项一个提交，都有测试；全量 362 个测试通过。都没有在真实 QQ 环境验证。
+`REFACTOR_ROADMAP.md` 第 1 节第 4 步的剩余项。URL 抓取拦截在 PR #27 里已经做完，这里没再动。每项一个提交，都有测试；全量 362 个测试通过。2026-10-27 实机验证过 `dry_run` 和私聊、群聊的基本收发（第 3 节）。
 
 1. **`dry_run` 生效**（`c28c520`）
    - `runtime/container.py::_build_runtime_outbound`：`qq_sidecar.dry_run` 为真时返回 `CapturingOutboundPort`，配了 `outbound_base_url` 也不发；`reverse_ws` 模式保留网关，NapCat 照常连进来推事件，回复只捕获。控制台改 sidecar 配置后重建出站时同样生效。
@@ -122,18 +122,49 @@
 - 去重的时间窗（10 分钟 / 10 秒）是常量；要调的话再挪进配置。
 - 顺带发现、没有修：`settings_admin/config_manager.py::ConfigManager.load()` 里 `assistant_name` 的默认值 `"鐞夌拑"`、`image_command_prefix` 和 `image_command_aliases` 的默认值 `"鐢熷浘"` 是乱码（UTF-8 被当成 GBK 读过一次，原文是「琉璃」「生图」）；`config.py` 里的默认值是对的。配置文件里没写这几项时，生图前缀会变成乱码。线上的 `data/docker-compose-config.json` 三项都写了，目前不受影响。
 
-## 3. 运行数据与配置（`data/` 被 gitignore，不在 git 里）
+## 3. 部署、运行数据与配置（`data/`、`napcat/` 被 gitignore，不在 git 里）
 
-- `data/docker-compose-config.json` 已改：`tool_policy.exec_enabled=false`、`write_enabled=false`、`authorized_user_ids=[]`。`embedding.model` 由 `qwen3-vl-embedding` 改为 `text-embedding-v4`：前者在 DashScope 的 OpenAI 兼容 `/embeddings` 上不可用，每次都返回 404；后者已实测，1024 维。更换嵌入模型要重新校准 `_SEMANTIC_RELEVANCE_MIN`，`text-embedding-v4` 上相关句对约 0.42–0.64，无关句对约 0.19–0.37。
-- 会话记录 `data/sessions/aurora/*.jsonl` 已清空；`runtime.sqlite3` 的 `knowledge_entries` 已清空，`members`、`member_persona_state` 的画像文本已清空，成员、好感度等结构数据保留。服务启动时 `refresh_knowledge_embeddings()` 会给缺向量的条目补嵌入。清空前的备份在系统临时目录，可能被系统清理：`/private/tmp/claude-501/-Users-shinonome-openqqwaifu/bd3c61d7-dd79-4eaf-bd72-9fa0d7f1d365/scratchpad/data-backup-20261025-160341`。
-- 角色卡 `data/cards/aurora_person.yaml`、`aurora_group.yaml` 现在是测试夹具内容，是被上面第 4 组里的两个测试覆盖的。原人设文字只留在 `data/cards/aurora.meta.json` 的 `portrait_prompt` 里 `Character traits:` 下的那 8 行；恢复办法是把这 8 行写回两个 yaml 的 `Profile:`。这件事由 owner 决定，新会话不要自行改动。
-- `data/docker-compose-config.json` 里仍是 `"history_window_messages": 8`、`"max_thinking_words": 30`，没有 `history_window_chars`（缺省 2500）和 `timezone`（缺省 `Asia/Shanghai`）。A、B 块的新默认值（30、80）被这个文件覆盖，要生效需要 owner 改掉或删掉这两项。
+### 3.1 部署现状（2026-10-27）
+
+- 本机 Docker Compose（`compose.napcat.yml`）：容器 `openqqwaifu`（8080）和 `napcat`（3000/3001/6099），真实发送，`qq_sidecar.dry_run=false`。机器人 QQ `3956638110`（昵称「幸福的奴隶Bot」），好友 2 个，群 1 个（`612475113`）。
+- `data/docker-compose-config.json` 当天的改动：`qq_sidecar.gateway_mode=reverse_ws`；`qq_sidecar.access_token` 设成随机令牌，反向 WS 和 NapCat 的 HTTP 动作端口 3000 都用它（3000 映射在宿主机上，原来没有令牌）。HTTP 回调已关闭，所以不需要 `inbound_access_token`。改之前的配置、NapCat 配置和 QQ 数据备份在 `data/backups/before-deploy-20261027-023259/`。
+- 只重建 openqqwaifu：`docker compose -f compose.napcat.yml up -d --build waifu`，不会动 NapCat。改了 `napcat` 服务的定义（例如镜像标签）再 `up`，NapCat 容器会被重建，很可能要重新扫码。
+- compose 给可选设置传 `${VAR:-}`，没设置时是空字符串。以前 `_env_str` 会用这个空串覆盖配置文件里的令牌；现在空串按未设置处理（`fix/deploy-hardening`）。
+
+### 3.2 NapCat 登录
+
+- 镜像固定为 `mlikiowa/napcat-docker:v4.18.41`（NapCat 4.18.41，QQ 3.2.34-53644）。升级要有意为之，升级后准备好扫码。
+- 2026-04 的旧镜像（QQ 3.2.25）加旧 QQ 数据目录：能登录，状态 online/good，好友、资料查询都正常，但收不到任何消息，最近会话为空，查聊天记录超时。换新镜像后仍然一样；把数据目录换成空的、重新扫码后恢复。旧数据目录在 `napcat/qq.old-20261027-031156`，稳定后可删。
+- 重启 NapCat 后快速登录可能失败（「登录态已失效」），这时要重新扫码。二维码取法：`docker cp napcat:/app/napcat/cache/qrcode.png .`；或用 NapCat 日志里的「二维码解码URL」；或控制台的 QQ 登录页。二维码约 2 分钟过期，会自动刷新。要让重启后自动登录，只能在 `.env` 里配 `NAPCAT_QUICK_PASSWORD`（机器人账号的密码，由 owner 自己填）。
+- 反向 WS 断开期间（NapCat 重启、登录过程中）到达的消息不会补推，直接丢失。
+
+### 3.3 群聊防刷屏（`fix/deploy-hardening`）
+
+- 2026-10-27 15:29，群里另一个机器人「大肥鱼」（`3246300953`）和本机器人互相接话：owner @ 一次之后，跟进窗口让机器人接所有人的话，每次回复又把窗口延长，70 秒内发了 6 条，其中两条和前一条一字不差。当时靠会话外的脚本停掉了容器。
+- 现在有两道闸门，都在 `reply_flow/reply_gate.py`：
+  - `ignore_user_ids`（顶层配置，环境变量 `OPENQQWAIFU_IGNORE_USER_IDS`，逗号分隔）：这些 QQ 号的消息永远不触发回复，私聊也一样，也不能用 `/skill`；消息仍作为群聊上下文进环境缓冲。
+  - `rate_limits.group_reply_burst` / `group_reply_per_hour`（默认 8 和 60）：每个群一个令牌桶，每次回复扣一个，用完就不回，只记一条 WARNING 日志，不在群里说明。`rate_limits.exempt_user_ids` 里的人不受限，`rate_limits.enabled=false` 全关。桶在内存里，重启后是满的。
+- 控制台「其他设置」接口（`/api/panels/other`）能读写 `ignore_user_ids`，页面上还没有输入框；限速参数只能改配置文件。
+
+### 3.4 实机测试的发现（2026-10-27，模型 grok-4-fast-non-reasoning）
+
+- 私聊和群 @ 都正常，一条回复 6–9 秒，约 3 次模型调用加 1 次嵌入。群里不 @ 的消息进环境缓冲，下次回复时用上了（回复里引用了前面群聊的话题）。
+- 回复会照抄自己上一条的后半句，群里出现过两次连续相同的回复。
+- 用户说「给我讲个故事」时，回复「我就勉强讲一段」然后没有下文：角色卡 Rules 段还是测试夹具的「不超过三句话」。
+- 只发 `/skill` 不会有任何回应（`/` 是忽略前缀，只有 `/skill <技能 ID> 参数` 才会执行）。问「你会什么」会触发技能列表。
+- 群临时会话的消息（陌生人 `2747277822`）没有被处理，原因没查。
+
+### 3.5 运行数据
+
+- `embedding.model` 由 `qwen3-vl-embedding` 改为 `text-embedding-v4`：前者在 DashScope 的 OpenAI 兼容 `/embeddings` 上不可用，每次都返回 404；后者已实测，1024 维。更换嵌入模型要重新校准 `_SEMANTIC_RELEVANCE_MIN`，`text-embedding-v4` 上相关句对约 0.42–0.64，无关句对约 0.19–0.37。
+- `tool_policy.exec_enabled=false`、`write_enabled=false`、`authorized_user_ids=[]`；`history_window_messages=30`、`max_thinking_words=80`（2026-10-26 改）；没有 `history_window_chars`（缺省 2500）和 `timezone`（缺省 `Asia/Shanghai`）。
+- 2026-10-25 清空过会话记录和知识条目，清空前的备份在系统临时目录，可能已被清理：`/private/tmp/claude-501/-Users-shinonome-openqqwaifu/bd3c61d7-dd79-4eaf-bd72-9fa0d7f1d365/scratchpad/data-backup-20261025-160341`。2026-10-27 的实测写入了新的会话（`person_783190298`、`group_612475113`）和知识。
+- 角色卡 `data/cards/aurora_person.yaml`、`aurora_group.yaml`：Profile 段 2026-10-26 已换回 `aurora.meta.json` 里 `portrait_prompt` 的 8 行人设；Skills、Background、Rules、Prologue 仍是测试夹具内容（例如 Rules「不超过三句话」），要由 owner 决定怎么写。
 - 线上 `summarization_mode` 是 `true`、`memory_summary_batch_size` 是 12：现在每多出 12 行才调一次摘要。`knowledge_entries` 里如果还有旧的 `memory_type="summary"` 条目，召回会跳过，不会自动删除。
-- 以上改动之后服务没有在真实 QQ 环境跑过，Docker 当前没有运行。
 
 ## 4. 三块（A、B、C 已完成）
 
-### A. 短期窗口（已完成，未在真实 QQ 环境验证）
+### A. 短期窗口（已完成，2026-10-27 实机验证过群聊环境缓冲）
 
 原来的问题：群里没 @ 机器人的消息不入库；窗口 8 行且包含当前消息，`[Latest Message]` 又重复一次；历史行里带机器人自己的 `@号码`；机器人行的标签随当前说话人起的别名变化。
 
@@ -193,7 +224,7 @@
 - 机器人看不到图片：`InboundEvent.image_payloads()` 从没被调用，图片只存成「发送了图片」；`web/http_api.py`（105–115 行）只解析 text、image、at，引用回复、表情、语音、转发、小程序卡片会被丢掉。
 - 好感度只涨不跌（`systems/value_game.py`），情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`），主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
 - ~~激活角色会清空所有会话记录~~（2026-10-26 已修）：`activate_character` 不再带 `reset_sessions`，启用同一个角色时也不重建存储；清空会话改为单独的 `POST /api/character/reset-sessions`（`confirm` 必须等于角色代号），控制台人物卡页「重置会话…」按钮要求输入代号确认。只删会话文件（含滚动摘要），长期记忆、成员和好感度不动。
-- 群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）会让机器人接任何人的话；（审计结论）LLM 出错时异常被吞，机器人静默不回复。
+- 群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）按群算，不按人算：机器人回复后接任何人的话，每次回复都延长窗口（2026-10-27 因此和另一个机器人互相刷屏，见第 3.3 节）。（审计结论）LLM 出错时异常被吞，机器人静默不回复。
 - 召回时同步发起一次嵌入调用，延迟约一次网络往返。
 
 ## 6. 验证方法

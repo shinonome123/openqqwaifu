@@ -51,6 +51,8 @@ class ReplyFlowService:
         svc._remember_ambient_event(event, character_id=current_character)
         if not svc.gate.should_reply(event):
             return None
+        if not svc.gate.acquire_group_reply_slot(event):
+            return None
 
         await svc.onboarding.aremember_directory_member(event)
         ambient_context = svc._peek_ambient_history(event, character_id=current_character)

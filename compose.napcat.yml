@@ -44,7 +44,9 @@ services:
       start_period: 20s
 
   napcat:
-    image: mlikiowa/napcat-docker:latest
+    # Pinned: a new NapCat/QQ build can invalidate the saved login or the QQ data
+    # directory. Upgrade on purpose, and be ready to scan a QR code afterwards.
+    image: mlikiowa/napcat-docker:v4.18.41
     container_name: napcat
     environment:
       ACCOUNT: "${ACCOUNT:-}"
