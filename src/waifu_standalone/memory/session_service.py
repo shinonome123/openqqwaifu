@@ -536,6 +536,64 @@ class Memory:
             used += cost
         return "\n".join(reversed(selected_reversed))
 
+    def dialogue_turns(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        limit: int = 8,
+        max_chars: int = 0,
+        exclude_last: bool = False,
+        character_id: str = "",
+    ) -> list[tuple[str, str]]:
+        """The window ``format_dialogue`` shows, as ``(speaker, content)`` pairs.
+
+        The bot's own lines keep the speaker ``"assistant"`` so callers can send them
+        as assistant messages instead of a transcript.
+        """
+        session = self.load(launcher_id, launcher_type, character_id=character_id)
+        window = max(1, int(limit))
+        if exclude_last:
+            history_lines = session.history[-(window + 1) :][:-1]
+        else:
+            history_lines = session.history[-window:]
+        turns = [self._split_history_line(line) for line in history_lines]
+        budget = int(max_chars or 0)
+        if budget <= 0:
+            return turns
+        line_cap = min(budget, _DIALOGUE_LINE_MAX_CHARS)
+        selected: list[tuple[str, str]] = []
+        used = 0
+        for speaker, content in reversed(turns):
+            if len(speaker) + 2 + len(content) > line_cap:
+                content = content[: max(1, line_cap - len(speaker) - 3)].rstrip() + "…"
+            cost = len(speaker) + 2 + len(content) + (1 if selected else 0)
+            if used + cost > budget:
+                break
+            selected.append((speaker, content))
+            used += cost
+        return list(reversed(selected))
+
+    async def adialogue_turns(
+        self,
+        launcher_id: str,
+        launcher_type: str,
+        *,
+        limit: int = 8,
+        max_chars: int = 0,
+        exclude_last: bool = False,
+        character_id: str = "",
+    ) -> list[tuple[str, str]]:
+        return await asyncio.to_thread(
+            self.dialogue_turns,
+            launcher_id,
+            launcher_type,
+            limit=limit,
+            max_chars=max_chars,
+            exclude_last=exclude_last,
+            character_id=character_id,
+        )
+
     async def aformat_dialogue(
         self,
         launcher_id: str,

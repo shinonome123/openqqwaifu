@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from ..models import InboundEvent, SessionMemory
 from .registry import SkillSpec
+from .tool_intent import NAMING_TOOL_IDS, relevant_tool_ids
 from .tool_registry import ToolExposureContext, ToolInvocation, ToolSpec
 
 if TYPE_CHECKING:
@@ -84,16 +85,45 @@ class ToolCallingOrchestrator:
         assistant_name: str,
     ) -> ToolExposureContext:
         svc = self._service
+        allowed = self._allowed_tool_ids(event)
+        manifests = svc.skills.exposed_manifests(latest_message) if svc.config.skills_enabled else []
+        if svc.config.tools_on_demand:
+            # Only tools the wording points at, plus skills whose own keywords match.
+            wanted = relevant_tool_ids(latest_message, has_images=event.image_count > 0)
+            if self._just_asked_for_name(event, session):
+                # A bare "luna" right after the bot asked for a name is an answer.
+                wanted.update(NAMING_TOOL_IDS)
+            manifests = [
+                skill
+                for skill in manifests
+                if skill.handler_target in wanted or skill.keyword_score(latest_message) > 0
+            ]
+            wanted.update(skill.handler_target for skill in manifests)
+            allowed = allowed & wanted
         return ToolExposureContext(
             event=event,
             session=session,
             latest_message=latest_message,
             address=address,
             assistant_name=assistant_name,
-            allowed_tool_ids=self._allowed_tool_ids(event),
+            allowed_tool_ids=allowed,
             skill_cards_by_tool=self._skill_cards_by_tool(),
-            skill_manifests=svc.skills.exposed_manifests(latest_message) if svc.config.skills_enabled else [],
+            skill_manifests=manifests,
         )
+
+    def _just_asked_for_name(self, event: InboundEvent, session: SessionMemory) -> bool:
+        """The bot asks for a name once, with its first reply; this is the answer to it.
+
+        The member stays ``asked_once`` until they give a name, so the status alone
+        would offer the naming tools for the rest of the conversation.
+        """
+        member = self._service.member_repository.get_member(
+            group_id=event.launcher_id if event.launcher_type == "group" else "",
+            user_id=event.sender_id,
+        )
+        if str((member or {}).get("onboarding_status", "") or "") != "asked_once":
+            return False
+        return sum(1 for line in session.history if str(line).startswith("assistant: ")) == 1
 
     def model_schemas(self, context: ToolExposureContext) -> list[dict[str, object]]:
         return self._service.tools.model_schemas(context)

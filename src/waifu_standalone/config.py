@@ -204,11 +204,14 @@ class AppConfig:
     bot_account_id: str = ""
     group_reply_requires_mention: bool = True
     skills_enabled: bool = True
+    # 只在消息看起来需要时才把工具交给模型（天气、搜索、改称呼、链接……）；普通闲聊不带工具。
+    tools_on_demand: bool = True
     max_active_skills: int = 3
     search_enabled: bool = True
     search_result_limit: int = 3
     search_timeout_seconds: float = 8.0
-    thinking_mode: bool = True
+    # 回复前先让模型写一段内心分析再塞回提示词：多一次调用、多 2–3 秒，回复也更套路，默认关。
+    thinking_mode: bool = False
     conversation_analysis: bool = True
     summarization_mode: bool = False
     member_auto_sync: bool = True

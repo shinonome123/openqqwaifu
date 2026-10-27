@@ -346,19 +346,14 @@ class KnowledgeService:
         qq_name = str(member.get("qq_nickname", "") or "").strip() or event.sender_name
         preferred_name = str(member.get("preferred_name", "") or "").strip()
         profile_summary = str(member.get("profile_summary", "") or "").strip()
-        onboarding_status = str(member.get("onboarding_status", "") or "").strip()
-        affinity_score = float(member.get("affinity_score") or 0.0)
-        bond_stage = svc.value_game.bond_stage(affinity_score)
         if preferred_name:
-            notes.append(f"{qq_name} prefers to be called {preferred_name}.")
+            notes.append(f"现在说话的是{qq_name}，希望被叫「{preferred_name}」。")
         else:
-            notes.append(f"The current speaker is {qq_name}.")
-        notes.append(f"Bond stage with {qq_name}: {bond_stage} ({affinity_score:.2f}).")
-        profile_summary = svc.persona.sanitize_profile_summary(profile_summary)
+            notes.append(f"现在说话的是{qq_name}。")
+        alias = svc._assistant_alias_for_user(event.sender_id, character_id=current_character)
+        profile_summary = svc.persona.sanitize_profile_summary(profile_summary, extra_names={alias} if alias else None)
         if profile_summary:
-            notes.append(f"Profile summary for {qq_name}: {profile_summary}")
-        if onboarding_status and onboarding_status not in {"", "ready"}:
-            notes.append(f"{qq_name} is still in onboarding status: {onboarding_status}.")
+            notes.append(f"关于{qq_name}：{profile_summary}")
         return notes
 
     async def _adirectory_member_notes(self, event: InboundEvent) -> list[str]:
