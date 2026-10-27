@@ -176,6 +176,20 @@ class ChatMessageTests(unittest.TestCase):
         self.assertEqual(cleaned, "喜欢猫")
 
 
+    def test_leaked_special_tokens_are_removed(self) -> None:
+        self._use(_ChatClient("那小鱼就知道吹牛<|eos|>"))
+        reply = self.service.handle_event(_private("大肥鱼说它比你强"))
+        assert reply is not None
+        self.assertEqual(reply.text, "那小鱼就知道吹牛")
+
+    def test_a_habitual_ellipsis_opening_is_dropped_when_the_retry_keeps_it(self) -> None:
+        self._use(_ChatClient("……你好。", "……我叫极光。", "……别乱叫。", "……行吧。", "……行吧行吧。"))
+        for text in ("你好", "你是谁", "叫你小极", "讲个故事"):
+            reply = self.service.handle_event(_private(text))
+        assert reply is not None
+        self.assertEqual(reply.text, "行吧行吧。")
+
+
 class RepetitionEvidenceTests(unittest.TestCase):
     def test_near_copies_and_long_shared_phrases_count(self) -> None:
         previous = ["……哼，问这个干嘛，又不是给你讲故事的。随便什么模型都行。"]

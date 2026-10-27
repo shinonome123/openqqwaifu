@@ -36,6 +36,15 @@ def _squash(text: str) -> str:
     return "".join(char for char in str(text or "") if char not in _REPEAT_IGNORED_CHARS)
 
 
+def _drop_habitual_ellipsis(reply: str, previous: list[str]) -> str:
+    """Remove a leading "……" when the last three replies all opened with it as well."""
+    text = str(reply or "").strip()
+    recent = [str(item).strip() for item in previous[-3:]]
+    if text.startswith("…") and len(recent) == 3 and all(item.startswith("…") for item in recent):
+        return text.lstrip("…").lstrip("，, ") or text
+    return text
+
+
 def _repetition_evidence(reply: str, previous: list[str]) -> list[str]:
     """What a reply copies from the bot's earlier messages; empty when it is fresh.
 
@@ -728,7 +737,8 @@ class Generator:
 
     def _avoid_repetition(self, text: str, messages: list[dict[str, object]], *, user: str) -> str:
         """Ask once more when a direct reply copies the bot's earlier messages."""
-        evidence = _repetition_evidence(text, self._recent_assistant_texts(messages))
+        previous = self._recent_assistant_texts(messages)
+        evidence = _repetition_evidence(text, previous)
         if not evidence:
             return text
         try:
@@ -736,12 +746,14 @@ class Generator:
                 self._messages_against_repetition(messages, evidence), tools=[], user=user
             )
         except LLMClientError:
-            return text
+            return _drop_habitual_ellipsis(text, previous)
         retried = self._clean_response(response.text)
-        return retried if retried and not response.tool_calls else text
+        # A long run of "……" openings in the history outweighs the request to change it.
+        return _drop_habitual_ellipsis(retried if retried and not response.tool_calls else text, previous)
 
     async def _aavoid_repetition(self, text: str, messages: list[dict[str, object]], *, user: str) -> str:
-        evidence = _repetition_evidence(text, self._recent_assistant_texts(messages))
+        previous = self._recent_assistant_texts(messages)
+        evidence = _repetition_evidence(text, previous)
         if not evidence:
             return text
         try:
@@ -749,9 +761,10 @@ class Generator:
                 self._messages_against_repetition(messages, evidence), tools=[], user=user
             )
         except LLMClientError:
-            return text
+            return _drop_habitual_ellipsis(text, previous)
         retried = self._clean_response(response.text)
-        return retried if retried and not response.tool_calls else text
+        # A long run of "……" openings in the history outweighs the request to change it.
+        return _drop_habitual_ellipsis(retried if retried and not response.tool_calls else text, previous)
 
     def _invoke_reply_with_tools(
         self,
@@ -2904,6 +2917,8 @@ class Generator:
     def _clean_response(text: str) -> str:
         # Keep the model's line breaks (lists, code blocks); only tidy spaces and blank lines.
         normalized = str(text or "").replace("<think>", "").replace("</think>", "")
+        # Special tokens some providers leak into the text, such as "<|eos|>".
+        normalized = re.sub(r"<\|[A-Za-z_]{1,20}\|>", "", normalized)
         normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
         normalized = re.sub(r"(?<=\S)[ \t]+", " ", normalized)
         normalized = re.sub(r"[ \t]+\n", "\n", normalized)
