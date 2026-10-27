@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，692 个，约 65 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，723 个，约 70 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -14,6 +14,11 @@
 - 工具按需出现（`tools_on_demand`，默认开，`skills/tool_intent.py`）：消息说到天气、搜索、链接、称呼、画图、文件时才带对应工具，或者某个技能的关键词命中；普通闲聊不带工具也不带工具规则。机器人刚问过称呼时，下一条回复带称呼工具。`/skill` 不受影响。
 - 防复读：直接回复如果和机器人最近 6 条之一几乎一样、共用 10 字以上的句子、或和前 3 条用同一个开头，就带着「别重复」提示重写一次；前 3 条都以「……」开头而重写后还是，就去掉开头的「……」。
 - 每条被回复的消息通常 2 次模型调用：回复、后台知识抽取；需要工具、称呼判断或重写时多 1–2 次。`thinking_mode`（回复前的「内心分析」调用）默认关。每次召回还有 1 次嵌入调用。
+- 像真人地发（2026-10-27，`feat/human-touch`，第 3.6 节有实测）：
+  - 分段：模型写的聊天回复（`OutboundMessage.conversational`）不超过 `segmented_reply.max_total_chars`（150 字）时，按句末标点和换行拆成至多 `max_parts`（3）条，不到 4 个字的碎句并到相邻一句；条与条之间随机停 `min_delay_seconds`–`max_delay_seconds`（1–2.5 秒），dry_run 不停。列表、代码块、长回复整段发；命令结果、通知、没有模型时的兜底回复不拆。会话历史里仍是完整的一条。
+  - 引用：群里回复时，如果那条消息之后群里又有人说过话，第一条带 OneBot `reply` 段引用它；紧接着回的不引用。`OutboundEmitter.note_inbound` 在拿会话锁之前记下每个群最新的消息 id，引用与否在真正发送时判断（群回复延迟之后）。`group_reply_quote=false` 关掉。
+  - 表情包：`data/stickers/<分类>/` 里的 png、jpg、gif、webp（单张不超过 2 MB，`reply_flow/stickers.py`）。有可发的分类时，system 里加 `[表情包]` 段列出分类；模型在回复末尾写「[表情:分类]」就从该分类随机挑一张（名字对不上时取互相包含的分类，「很开心」→「开心」），`sub_type=1`（QQ 按表情显示）单独发在文字后面。同一个聊天两张之间至少隔 `stickers.min_replies_between`（3）条回复，冷却期间不出现 `[表情包]` 段。发出的标签留在历史里，没发出的标签删掉；任何消息里的标签都不会当文字发出去。冷却计数在内存里，重启清零。目前 `data/stickers/` 是空的，所以线上不会发表情。
+  - 看图：收到的图片由 `infra/image_inputs.py` 自己下载（走 `safe_fetch`，最多 10 MB），GIF 和动图取第一帧，长边超过 1536 像素就缩小，以 data URL 发给模型，每条消息最多 4 张。下载或解码失败、后端不支持图片、模型拒收时，当前消息末尾加「（对方发来的图片没能加载出来，你看不到它的内容）」让角色自己回应（模型拒收时去掉图片再请求一次），不再回「图片处理失败…」「当前模型后端不支持图片理解…」这类系统话。QQ 表情包（图片段 `sub_type=1`）在聊天记录里记作「发了一个表情」，模型照样看得到图。
 
 ## 2. 当前工作区状态
 
@@ -157,6 +162,7 @@
 - 用户说「给我讲个故事」时，回复「我就勉强讲一段」然后没有下文：角色卡 Rules 段还是测试夹具的「不超过三句话」。
 - 只发 `/skill` 不会有任何回应（`/` 是忽略前缀，只有 `/skill <技能 ID> 参数` 才会执行）。问「你会什么」会触发技能列表。
 - 群临时会话的消息（陌生人 `2747277822`）没有被处理，原因没查。
+- 群里大肥鱼发的图，机器人有一次看懂了，有一次回了「图片处理失败，暂时无法读取这张图片，请稍后重试。」，原因见第 3.6 节。
 
 ### 3.5 运行数据
 
@@ -166,6 +172,13 @@
 - 2026-10-25 清空过会话记录和知识条目，清空前的备份在系统临时目录，可能已被清理：`/private/tmp/claude-501/-Users-shinonome-openqqwaifu/bd3c61d7-dd79-4eaf-bd72-9fa0d7f1d365/scratchpad/data-backup-20261025-160341`。2026-10-27 的实测写入了新的会话（`person_783190298`、`group_612475113`）和知识。
 - 角色卡 `data/cards/aurora_person.yaml`、`aurora_group.yaml`：Profile 段 2026-10-26 已换回 `aurora.meta.json` 里 `portrait_prompt` 的 8 行人设；Skills、Background、Rules、Prologue 仍是测试夹具内容（例如 Rules「不超过三句话」），要由 owner 决定怎么写。
 - 线上 `summarization_mode` 是 `true`、`memory_summary_batch_size` 是 12：现在每多出 12 行才调一次摘要。`knowledge_entries` 里如果还有旧的 `memory_type="summary"` 条目，召回会跳过，不会自动删除。
+
+### 3.6 看图的实测（2026-10-27）
+
+- 直接调 xAI：grok-4.7 读 PNG、JPEG、WebP 正常（2–4 秒）；GIF 返回 400 `invalid_image`（「does not contain a valid JPG, PNG, WebP, or ICO image」）。把图片链接交给 xAI 自己下载也不可靠：维基百科的图片链接返回 `image_download_error`。原来的代码把 QQ 图床链接原样交给模型，所以两种情况都会失败。
+- 在 openqqwaifu 容器里直接下载 QQ 图床（`multimedia.nt.qq.com.cn`）正常，域名解析到公网地址，`safe_fetch` 放行。群里大肥鱼最近发的 4 张都是 `sub_type=1`、`summary="[动画表情]"` 的表情，3 张 PNG、1 张 JPEG，几十到几百 KB。
+- 现在的处理见第 1 节「看图」。dry_run 实测：GIF 测试图转成第一帧后 grok-4.7 能说出「红圆圈旁边一个蓝 42」；标成表情的图片，回复是「这算哪门子表情」。
+- 同一次 dry_run 里，新用户的第一条「在吗」有一次没有任何回复（5 秒）；同样的消息重放 7 次都正常。当时这条路径的模型错误不写日志，原因查不到，现在会记 WARNING。
 
 ## 4. 三块（A、B、C 已完成）
 
@@ -226,10 +239,10 @@
 
 ## 5. 其他待办（不在本轮）
 
-- 机器人看不到图片：`InboundEvent.image_payloads()` 从没被调用，图片只存成「发送了图片」；`web/http_api.py`（105–115 行）只解析 text、image、at，引用回复、表情、语音、转发、小程序卡片会被丢掉。
+- `web/http_api.py::_parse_segments` 只解析 text、image、at：引用回复（不知道对方在回哪条）、QQ 自带的小表情（`face`）、语音、转发、小程序卡片会被丢掉。图片已能看（第 1 节「看图」）。
 - 好感度只涨不跌（`systems/value_game.py`），情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`），主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
 - ~~激活角色会清空所有会话记录~~（2026-10-26 已修）：`activate_character` 不再带 `reset_sessions`，启用同一个角色时也不重建存储；清空会话改为单独的 `POST /api/character/reset-sessions`（`confirm` 必须等于角色代号），控制台人物卡页「重置会话…」按钮要求输入代号确认。只删会话文件（含滚动摘要），长期记忆、成员和好感度不动。
-- 群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）按群算，不按人算：机器人回复后接任何人的话，每次回复都延长窗口（2026-10-27 因此和另一个机器人互相刷屏，见第 3.3 节）。（审计结论）LLM 出错时异常被吞，机器人静默不回复。
+- 群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）按群算，不按人算：机器人回复后接任何人的话，每次回复都延长窗口（2026-10-27 因此和另一个机器人互相刷屏，见第 3.3 节）。（审计结论）LLM 出错时机器人静默不回复；主回复链路现在至少记一条 WARNING「chat reply failed: …」（`feat/human-touch`），其他调用（分析、抽取、摘要）仍不记。
 - 召回时同步发起一次嵌入调用，延迟约一次网络往返。
 
 ## 6. 验证方法

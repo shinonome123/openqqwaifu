@@ -36,10 +36,15 @@ def build_onebot_action(message: OutboundMessage) -> tuple[str, dict[str, object
 
 def build_onebot_message_segments(message: OutboundMessage) -> list[dict[str, object]]:
     segments: list[dict[str, object]] = []
+    if message.reply_to:
+        segments.append({"type": "reply", "data": {"id": message.reply_to}})
     if message.text:
         segments.append({"type": "text", "data": {"text": message.text}})
     for image in message.images:
         segments.append({"type": "image", "data": {"file": image}})
+    if message.sticker:
+        # sub_type 1 makes QQ show the image as a sticker rather than a photo.
+        segments.append({"type": "image", "data": {"file": message.sticker, "sub_type": 1, "summary": "[动画表情]"}})
     return segments
 
 

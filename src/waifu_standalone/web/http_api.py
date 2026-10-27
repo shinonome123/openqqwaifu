@@ -118,6 +118,7 @@ def _parse_segments(payload: dict[str, Any]) -> list[MessageSegment]:
                     kind="image",
                     image_url=str(data.get("url") or data.get("file") or ""),
                     image_base64=str(data.get("base64") or ""),
+                    image_sticker=str(data.get("sub_type", "")).strip() == "1",
                 )
             )
         elif item_type == "at":

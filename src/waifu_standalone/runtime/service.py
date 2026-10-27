@@ -37,7 +37,7 @@ from ..members import MemberOnboarding, MemberService, NamingIntentRouter, Perso
 from ..models import EmotionState, InboundEvent, MessageSegment, OutboundMessage, SessionMemory
 from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
-from ..reply_flow import Generator, OutboundEmitter, PENDING_SEARCH_METADATA_KEY, ReplyFlowService, ReplyGate
+from ..reply_flow import Generator, OutboundEmitter, PENDING_SEARCH_METADATA_KEY, ReplyFlowService, ReplyGate, StickerLibrary
 from ..repositories import (
     InMemoryRuntimeStateStore,
     KnowledgeRepository,
@@ -186,6 +186,7 @@ class WaifuService:
     notice: NoticeDispatcher = field(init=False, repr=False)
     gate: ReplyGate = field(init=False, repr=False)
     emitter: OutboundEmitter = field(init=False, repr=False)
+    stickers: StickerLibrary = field(init=False, repr=False)
     onboarding: MemberOnboarding = field(init=False, repr=False)
     migrator: LegacyMigrator = field(init=False, repr=False)
     persona: PersonaGuard = field(init=False, repr=False)
@@ -223,6 +224,7 @@ class WaifuService:
         self.naming_router = NamingIntentRouter(self)
         self.tool_orchestrator = ToolCallingOrchestrator(self)
         self.emitter = OutboundEmitter(self)
+        self.stickers = StickerLibrary(self)
         self.onboarding = MemberOnboarding(self)
         self.migrator = LegacyMigrator(self)
         self.persona = PersonaGuard(self)
@@ -266,6 +268,8 @@ class WaifuService:
         return await self._process_event_async(event, background_image_delivery=True)
 
     async def _process_event_async(self, event: InboundEvent, *, background_image_delivery: bool) -> OutboundMessage | Admission | None:
+        # Before waiting on the chat's lock: a reply in progress must see newer messages.
+        self.emitter.note_inbound(event)
         if self.private_runtime is not None and self.private_runtime.routes(event):
             if self._closing:
                 raise RuntimeError("service is shutting down")

@@ -1,24 +1,33 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from waifu_standalone.config import AppConfig
+from waifu_standalone.infra import image_inputs
 from waifu_standalone.infra.llm_clients import LLMClientError, LLMToolCall, LLMToolResponse
+from waifu_standalone.infra.safe_fetch import FetchedPage
 from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment, OutboundMessage, SessionMemory
 from waifu_standalone.reply_flow.prompt_assembler import Generator
 from waifu_standalone.runtime.container import _build_runtime_outbound
 from waifu_standalone.services import CapturingOutboundPort
 from waifu_standalone.skills import ToolExecutionResult, ToolRegistry
 from waifu_standalone.systems.searching import SearchDecider, SearchResult
+
+
+# A 1x1 PNG.
+PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+UNSEEN = "（对方发来的图片没能加载出来，你看不到它的内容）"
 
 
 class _ImageClient:
@@ -33,9 +42,11 @@ class _ModelClient:
     supports_tool_calling = True
     supports_images = True
 
-    def __init__(self, *, rounds=0, final_error=False, requested_tool="audit-echo"):
+    def __init__(self, *, rounds=0, final_error=False, image_error=False, requested_tool="audit-echo"):
         self.rounds = rounds
         self.final_error = final_error
+        # Fail only requests that carry pictures, as a provider rejecting them would.
+        self.image_error = image_error
         self.requested_tool = requested_tool
         self.requests = []
         self.plain_calls = 0
@@ -54,7 +65,7 @@ class _ModelClient:
             return LLMToolResponse(tool_calls=[call], assistant_message={
                 "role": "assistant", "content": "", "tool_calls": [call.as_assistant_tool_call()],
             })
-        if self.final_error:
+        if self.final_error or (self.image_error and isinstance(messages[-1]["content"], list)):
             raise LLMClientError("synthetic failure")
         return LLMToolResponse(text="final answer")
 
@@ -138,43 +149,59 @@ class ProviderAuditTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("当前未提供", str(client.requests[-1][0]))
 
     async def test_images_are_sent_even_without_a_tool_registry(self):
-        self.event.segments.append(MessageSegment("image", image_url="https://example.invalid/photo.png"))
+        self.event.segments.append(MessageSegment("image", image_base64=PNG_BASE64))
         for asynchronous in (False, True):
             with self.subTest(asynchronous=asynchronous):
                 client = _ModelClient()
                 generator = self.generator(client)
                 result = await self.reply(generator, asynchronous)
                 content = client.requests[0][0][1]["content"]
-                self.assertEqual(content[1], {"type": "image_url", "image_url": {"url": "https://example.invalid/photo.png"}})
+                self.assertEqual(content[1], {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG_BASE64}"}})
                 self.assertEqual(client.requests[0][1], [])
                 self.assertEqual(result.text, "final answer")
                 self.assertEqual(client.plain_calls, 0)
 
-    async def test_multimodal_switch_and_unsupported_backend_are_honored(self):
-        self.event.segments.append(MessageSegment("image", image_url="https://example.invalid/photo.png"))
+    async def test_picture_links_are_downloaded_here_and_sent_inline(self):
+        # Providers often fail to fetch QQ's CDN links themselves.
+        self.event.segments.append(MessageSegment("image", image_url="https://multimedia.nt.qq.com.cn/download?fileid=1"))
+        page = FetchedPage(url="", status_code=200, text="", headers={}, content=base64.b64decode(PNG_BASE64))
+        client = _ModelClient()
+        with patch.object(image_inputs, "fetch_public_url", return_value=page) as fetch:
+            await self.reply(self.generator(client), True)
+        self.assertEqual(fetch.call_args.args[0], "https://multimedia.nt.qq.com.cn/download?fileid=1")
+        self.assertEqual(client.requests[0][0][1]["content"][1]["image_url"]["url"], f"data:image/png;base64,{PNG_BASE64}")
+
+    async def test_multimodal_switch_and_unsupported_backend_name_the_unseen_picture(self):
+        self.event.segments.append(MessageSegment("image", image_base64=PNG_BASE64))
         for asynchronous in (False, True):
             with self.subTest(asynchronous=asynchronous):
                 client = _ModelClient()
                 generator = self.generator(client)
                 self.config.multimodal_enabled = False
                 await self.reply(generator, asynchronous)
-                # With multimodal off the message goes out as text only.
-                self.assertIsInstance(client.requests[-1][0][-1]["content"], str)
-                sent = len(client.requests)
+                # With multimodal off the message goes out as text, saying a picture was not seen.
+                self.assertEqual(client.requests[-1][0][-1]["content"], f"hello\n{UNSEEN}")
                 self.config.multimodal_enabled = True
                 client.supports_images = False
                 result = await self.reply(generator, asynchronous)
-                self.assertIn("不支持图片", result.text)
-                self.assertEqual(len(client.requests), sent)
+                self.assertEqual(client.requests[-1][0][-1]["content"], f"hello\n{UNSEEN}")
+                self.assertEqual(result.text, "final answer")  # the character answers, no system error
                 self.assertEqual(client.plain_calls, 0)
 
-    async def test_image_processing_failure_never_retries_as_text_only(self):
-        self.event.segments.append(MessageSegment("image", image_url="https://example.invalid/photo.png"))
+    async def test_a_picture_the_model_rejects_is_named_never_hidden(self):
+        self.event.segments.append(MessageSegment("image", image_base64=PNG_BASE64))
         for asynchronous in (False, True):
-            client = _ModelClient(final_error=True)
-            result = await self.reply(self.generator(client), asynchronous)
-            self.assertIn("图片处理失败", result.text)
-            self.assertEqual(client.plain_calls, 0)
+            with self.subTest(asynchronous=asynchronous):
+                client = _ModelClient(image_error=True)
+                result = await self.reply(self.generator(client), asynchronous)
+                # The retry tells the model the picture did not load instead of dropping it silently.
+                self.assertIsInstance(client.requests[0][0][-1]["content"], list)
+                self.assertEqual(client.requests[1][0][-1]["content"], f"hello\n{UNSEEN}")
+                self.assertEqual(result.text, "final answer")
+                self.assertEqual(client.plain_calls, 0)
+
+                failing = _ModelClient(final_error=True)
+                self.assertEqual((await self.reply(self.generator(failing), asynchronous)).text, "")
 
     async def test_disabled_image_generation_reports_failure(self):
         generator = self.generator(_ModelClient())

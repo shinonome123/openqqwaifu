@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from difflib import SequenceMatcher
 import re
 from dataclasses import dataclass, field, replace
@@ -14,7 +15,8 @@ from ..models import EmotionState, InboundEvent, SessionMemory
 from ..infra import ImageClient, LLMClient, build_image_client, build_llm_client
 from ..infra.clock import format_prompt_time, local_now
 from ..infra.image_clients import ImageClientError
-from ..infra.llm_clients import LLMClientError, normalize_image_reference
+from ..infra.image_inputs import ImageInputError, prepare_image_input
+from ..infra.llm_clients import LLMClientError
 from ..memory import ROLLING_SUMMARY_KEY, clip_rolling_summary
 from ..skills import SkillSpec, ToolExecutionResult, ToolExposureContext, ToolInvocation, ToolRegistry
 
@@ -30,6 +32,13 @@ _TOOL_CALLING_SYSTEM_PROMPT = (
 _REPEAT_IGNORED_CHARS = set(" \t\r\n，。！？、；：,.!?;:…~～—-“”\"'‘’（）()「」《》")
 # How many of the bot's latest messages a new reply is compared with.
 _REPEAT_LOOKBACK = 6
+# Told to the model in place of a picture it cannot see, so it neither pretends nor
+# answers with a system error.
+_IMAGE_UNSEEN_NOTE = "（对方发来的图片没能加载出来，你看不到它的内容）"
+# Pictures read per message; more cost more and slow the reply.
+_MAX_IMAGES_PER_MESSAGE = 4
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _squash(text: str) -> str:
@@ -282,6 +291,7 @@ class Generator:
         analysis_hint: str = "",
         active_skills: list[SkillSpec] | None = None,
         tool_context: ToolExposureContext | None = None,
+        sticker_hint: str = "",
         allow_fallback: bool = True,
     ) -> GeneratedReply:
         card = card_override or self._cards.load(event.launcher_type, session)
@@ -312,6 +322,7 @@ class Generator:
                         latest_message=latest_message,
                         active_skills=active_skills,
                         tool_context=tool_context,
+                        sticker_hint=sticker_hint,
                         user=self._llm_user_key(event, session, purpose="chat"),
                     )
                 else:
@@ -330,6 +341,7 @@ class Generator:
                         analysis_hint=analysis_hint,
                         latest_message=latest_message,
                         active_skills=active_skills,
+                        sticker_hint=sticker_hint,
                     )
                     reply = self._generate_model_reply_message(
                         prompt,
@@ -338,8 +350,9 @@ class Generator:
                     )
                 if reply.text.strip() or reply.images:
                     return reply
-            except LLMClientError:
-                pass
+            except LLMClientError as exc:
+                # Without a fallback the bot stays silent; leave a trace of why.
+                _LOGGER.warning("chat reply failed: %s", exc)
         if allow_fallback:
             return GeneratedReply(
                 text=self._fallback_reply(
@@ -374,6 +387,7 @@ class Generator:
         analysis_hint: str = "",
         active_skills: list[SkillSpec] | None = None,
         tool_context: ToolExposureContext | None = None,
+        sticker_hint: str = "",
         allow_fallback: bool = True,
     ) -> GeneratedReply:
         if (
@@ -427,6 +441,7 @@ class Generator:
                         latest_message=latest_message,
                         active_skills=active_skills,
                         tool_context=tool_context,
+                        sticker_hint=sticker_hint,
                         user=self._llm_user_key(event, session, purpose="chat"),
                     )
                 else:
@@ -445,6 +460,7 @@ class Generator:
                         analysis_hint=analysis_hint,
                         latest_message=latest_message,
                         active_skills=active_skills,
+                        sticker_hint=sticker_hint,
                     )
                     reply = await self._agenerate_model_reply_message(
                         prompt,
@@ -453,8 +469,9 @@ class Generator:
                     )
                 if reply.text.strip() or reply.images:
                     return reply
-            except LLMClientError:
-                pass
+            except LLMClientError as exc:
+                # Without a fallback the bot stays silent; leave a trace of why.
+                _LOGGER.warning("chat reply failed: %s", exc)
         if allow_fallback:
             return GeneratedReply(
                 text=self._fallback_reply(
@@ -513,8 +530,13 @@ class Generator:
         latest_message: str,
         active_skills: list[SkillSpec],
         include_tool_rules: bool,
+        sticker_hint: str = "",
+        images: list[str] | None = None,
     ) -> list[dict[str, object]]:
-        """Persona and context as the system message, the conversation as chat turns."""
+        """Persona and context as the system message, the conversation as chat turns.
+
+        ``images`` are the message's pictures as data URLs; any it lacks are named in a note.
+        """
         extra_sections: list[str] = []
         story_block = self._build_story_mode_block(
             event,
@@ -538,6 +560,8 @@ class Generator:
         skill_block = self._format_skill_block(active_skills)
         if skill_block:
             extra_sections.append(skill_block)
+        if sticker_hint:
+            extra_sections.append(sticker_hint)
         if include_tool_rules:
             extra_sections.append("[工具]\n" + _TOOL_CALLING_SYSTEM_PROMPT)
         system = card.system_message(
@@ -572,16 +596,39 @@ class Generator:
         if len(messages) > 1 and messages[-1]["role"] == "user":
             # Earlier lines from the same side (group chatter) join the current message.
             latest_text = f"{messages.pop()['content']}\n{latest_text}"
+        images = list(images or [])
+        if event.image_count > len(images):
+            latest_text = f"{latest_text}\n{_IMAGE_UNSEEN_NOTE}"
         content: str | list[dict[str, object]] = latest_text
-        if self.config.multimodal_enabled and event.image_count:
-            parts: list[dict[str, object]] = [{"type": "text", "text": latest_text}]
-            for payload in event.image_payloads():
-                parts.append({"type": "image_url", "image_url": {"url": normalize_image_reference(payload)}})
-            if len(parts) == 1:
-                raise LLMClientError("message contains no readable image reference")
-            content = parts
+        if images:
+            content = [
+                {"type": "text", "text": latest_text},
+                *({"type": "image_url", "image_url": {"url": image}} for image in images),
+            ]
         messages.append({"role": "user", "content": content})
         return messages
+
+    def _readable_images(self, event: InboundEvent) -> list[str]:
+        """The message's pictures as data URLs the model can read; unreadable ones are left out."""
+        if not (self.config.multimodal_enabled and getattr(self._llm_client, "supports_images", False)):
+            return []
+        images: list[str] = []
+        for reference in event.image_payloads()[:_MAX_IMAGES_PER_MESSAGE]:
+            try:
+                images.append(prepare_image_input(reference))
+            except ImageInputError as exc:
+                _LOGGER.warning("could not read an inbound picture: %s", exc)
+        return images
+
+    @staticmethod
+    def _without_images(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+        """The same request with the pictures swapped for a note that they did not load."""
+        last = dict(messages[-1])
+        parts = last.get("content")
+        if isinstance(parts, list):
+            text = next((str(part.get("text", "")) for part in parts if part.get("type") == "text"), "")
+            last["content"] = text if _IMAGE_UNSEEN_NOTE in text else f"{text}\n{_IMAGE_UNSEEN_NOTE}"
+        return [*messages[:-1], last]
 
     def _generate_chat_reply(
         self,
@@ -601,11 +648,10 @@ class Generator:
         latest_message: str,
         active_skills: list[SkillSpec],
         tool_context: ToolExposureContext | None,
+        sticker_hint: str,
         user: str,
     ) -> GeneratedReply:
-        has_images = self.config.multimodal_enabled and event.image_count > 0
-        if has_images and not getattr(self._llm_client, "supports_images", False):
-            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
+        images = self._readable_images(event) if event.image_count else []
         tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
         messages = self._build_chat_messages(
             event,
@@ -621,24 +667,27 @@ class Generator:
             analysis_hint=analysis_hint,
             latest_message=latest_message,
             active_skills=active_skills,
+            sticker_hint=sticker_hint,
             include_tool_rules=bool(tools),
+            images=images,
+        )
+        options = dict(
+            tools=tools,
+            event=event,
+            session=session,
+            assistant_name=assistant_name,
+            address=address,
+            active_skills=active_skills,
+            tool_context=tool_context,
+            user=user,
         )
         try:
-            return self._invoke_reply_with_tools(
-                messages,
-                tools=tools,
-                event=event,
-                session=session,
-                assistant_name=assistant_name,
-                address=address,
-                active_skills=active_skills,
-                tool_context=tool_context,
-                user=user,
-            )
-        except LLMClientError:
-            if has_images:
-                return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
-            raise
+            return self._invoke_reply_with_tools(messages, **options)
+        except LLMClientError as exc:
+            if not images:
+                raise
+            _LOGGER.warning("the model could not read the pictures, answering without them: %s", exc)
+        return self._invoke_reply_with_tools(self._without_images(messages), **options)
 
     async def _agenerate_chat_reply(
         self,
@@ -658,11 +707,10 @@ class Generator:
         latest_message: str,
         active_skills: list[SkillSpec],
         tool_context: ToolExposureContext | None,
+        sticker_hint: str,
         user: str,
     ) -> GeneratedReply:
-        has_images = self.config.multimodal_enabled and event.image_count > 0
-        if has_images and not getattr(self._llm_client, "supports_images", False):
-            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
+        images = await asyncio.to_thread(self._readable_images, event) if event.image_count else []
         tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
         messages = self._build_chat_messages(
             event,
@@ -678,24 +726,27 @@ class Generator:
             analysis_hint=analysis_hint,
             latest_message=latest_message,
             active_skills=active_skills,
+            sticker_hint=sticker_hint,
             include_tool_rules=bool(tools),
+            images=images,
+        )
+        options = dict(
+            tools=tools,
+            event=event,
+            session=session,
+            assistant_name=assistant_name,
+            address=address,
+            active_skills=active_skills,
+            tool_context=tool_context,
+            user=user,
         )
         try:
-            return await self._ainvoke_reply_with_tools(
-                messages,
-                tools=tools,
-                event=event,
-                session=session,
-                assistant_name=assistant_name,
-                address=address,
-                active_skills=active_skills,
-                tool_context=tool_context,
-                user=user,
-            )
-        except LLMClientError:
-            if has_images:
-                return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
-            raise
+            return await self._ainvoke_reply_with_tools(messages, **options)
+        except LLMClientError as exc:
+            if not images:
+                raise
+            _LOGGER.warning("the model could not read the pictures, answering without them: %s", exc)
+        return await self._ainvoke_reply_with_tools(self._without_images(messages), **options)
 
     def _failed_tool_reply(self, results: list[ToolExecutionResult], images: list[str]) -> GeneratedReply:
         return GeneratedReply(
@@ -705,14 +756,10 @@ class Generator:
 
     def _generate_model_reply_message(self, prompt: str, *, event: InboundEvent, user: str) -> GeneratedReply:
         """Single text prompt, for clients without chat roles (Dify)."""
-        if self.config.multimodal_enabled and event.image_count > 0:
-            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
         response = self._dify_client.invoke(prompt, user=user)
         return GeneratedReply(text=self._clean_response(response))
 
     async def _agenerate_model_reply_message(self, prompt: str, *, event: InboundEvent, user: str) -> GeneratedReply:
-        if self.config.multimodal_enabled and event.image_count > 0:
-            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
         response = await self._ainvoke_client(prompt, user=user)
         return GeneratedReply(text=self._clean_response(response))
 
@@ -1746,7 +1793,11 @@ class Generator:
         analysis_hint: str,
         latest_message: str,
         active_skills: list[SkillSpec],
+        sticker_hint: str = "",
     ) -> str:
+        if event.image_count:
+            # A single text prompt carries no pictures; say so rather than pretend.
+            latest_message = f"{latest_message}\n{_IMAGE_UNSEEN_NOTE}"
         system_prompt = card.system_prompt(
             launcher_type=event.launcher_type,
             address=address,
@@ -1781,6 +1832,8 @@ class Generator:
         skill_block = self._format_skill_block(active_skills)
         if skill_block:
             prompt_parts.append(skill_block)
+        if sticker_hint:
+            prompt_parts.append(sticker_hint)
         return "\n\n".join(part for part in prompt_parts if part.strip())
 
     def _build_onboarding_query(
