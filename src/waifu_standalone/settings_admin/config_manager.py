@@ -95,6 +95,7 @@ class ConfigManager:
             image_command_aliases=_load_str_list(raw.get("image_command_aliases"), defaults.image_command_aliases),
             ignore_prefixes=_load_str_list(raw.get("ignore_prefixes"), ["!", "/"]),
             ignore_user_ids=_load_str_list(raw.get("ignore_user_ids"), []),
+            character_switch_user_ids=_load_str_list(raw.get("character_switch_user_ids"), []),
             explicit_skill_prefixes=_load_str_list(raw.get("explicit_skill_prefixes"), ["/skill"]),
             group_follow_up_window_seconds=float(raw.get("group_follow_up_window_seconds", 5.0)),
             group_response_delay_seconds=float(raw.get("group_response_delay_seconds", 0.0)),
@@ -287,6 +288,8 @@ def _load_rate_limits(raw_value: object) -> RateLimitConfig:
             "network_group_per_hour",
             "group_reply_burst",
             "group_reply_per_hour",
+            "mention_reply_burst",
+            "mention_reply_per_hour",
         )
     }
     return RateLimitConfig(

@@ -1193,31 +1193,30 @@ class SkillDispatcher:
         )
 
     def use_skill_list_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        """What this person can ask for, and how; the character tells them in its own words."""
+        allowed = invocation.allowed_tool_ids
         skills = [
             skill
             for skill in self._service.skills.list_skills()
-            if skill.enabled and skill.skill_id != "skill-list-command"
+            if skill.enabled
+            and skill.skill_id != "skill-list-command"
+            # Prompt-only policies (keep it short, check freshness) are not things to ask for.
+            and skill.is_tool_handler
+            # Nor are tools this sender may not use, such as the file tools.
+            and (allowed is None or skill.command_tool.lower() in allowed)
         ]
         if not skills:
-            return ToolExecutionResult(error="no enabled skills", text="当前没有已启用的技能。")
+            return ToolExecutionResult(error="no enabled skills", text="当前没有可用的技能。")
         lines: list[str] = []
         items: list[dict[str, object]] = []
         for skill in skills:
-            summary = skill.name
-            if skill.description:
-                summary += f": {skill.description}"
-            if skill.keywords:
-                summary += " | keywords=" + ", ".join(skill.keywords[:3])
-            if skill.is_tool_handler:
-                summary += f" | tool={skill.command_tool}"
-            elif skill.is_prompt_policy:
-                summary += " | prompt-policy"
-            lines.append(summary)
+            ways = [f"说「{skill.keywords[0]}…」"] if skill.keywords else []
+            ways.append(f"/skill {skill.aliases[0] if skill.aliases else skill.skill_id}")
+            lines.append(f"- {skill.name}：{'，或 '.join(ways)}")
             items.append(skill.as_dict())
         return ToolExecutionResult(
-            text="\n".join(lines),
+            text="对方现在能用的技能（用你自己的话介绍，可以挑着说）：\n" + "\n".join(lines),
             metadata={"count": len(items), "skills": items},
-            display_mode="raw_block",
         )
 
     async def ause_skill_list_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1491,7 +1490,9 @@ class SkillDispatcher:
             content = path.read_text(encoding="utf-8", errors="replace")
         clipped = self._service.generator._clip(content, limit=max_chars)
         return ToolExecutionResult(
-            text=f"path: {path}\n{clipped}".strip(),
+            # Only the content: a path line the reply leaves out would get the whole
+            # block shown again, absolute path and all.
+            text=clipped.strip() or "（空文件）",
             metadata={"path": str(path), "size": path.stat().st_size},
             display_mode="raw_block",
         )
@@ -2036,10 +2037,13 @@ class SkillDispatcher:
         if not path_text:
             raise ValueError("路径不能为空。")
         candidate = Path(path_text).expanduser()
+        roots = self._tool_roots(purpose)
         if not candidate.is_absolute():
-            candidate = self._config_base_dir() / candidate
+            # A relative path names something in the first folder the tools may use
+            # (with the default roots, the folder holding the config file).
+            candidate = (roots[0] if roots else self._config_base_dir()) / candidate
         resolved = candidate.resolve(strict=False)
-        if not any(self._is_within_root(resolved, root) for root in self._tool_roots(purpose)):
+        if not any(self._is_within_root(resolved, root) for root in roots):
             raise ValueError(f"路径超出允许范围：{resolved}")
         if not allow_missing and not resolved.exists():
             raise ValueError(f"路径不存在：{resolved}")

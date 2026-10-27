@@ -81,6 +81,48 @@ class SafeFetchTests(unittest.TestCase):
                 check_public_url(url)
         check_public_url("https://public.example/post")
 
+    def test_a_fake_ip_proxy_answer_is_checked_against_the_real_addresses(self) -> None:
+        # A proxy in fake-IP mode answers every foreign name with 198.18.0.0/15.
+        proxied = {
+            "python.example": {"198.18.21.189"},
+            "rebind.example": {"198.18.0.9"},
+            "halfprivate.example": {"198.18.0.10", "10.0.0.7"},
+            "nodoh.example": {"198.18.0.11"},
+        }
+        real = {"python.example": {"151.101.0.223", "2a04:4e42:400::223"}, "rebind.example": {"127.0.0.1"}}
+        asked: list[str] = []
+
+        def doh(host: str) -> set[str]:
+            asked.append(host)
+            if host not in real:
+                raise TransportError(f"无法核实域名的真实地址：{host}")
+            return set(real[host])
+
+        with mock.patch.object(safe_fetch, "_resolve_addresses", side_effect=lambda host, port: set(proxied[host])):
+            with mock.patch.object(safe_fetch, "_resolve_over_doh", side_effect=doh):
+                check_public_url("https://python.example/about/")
+                with self.assertRaises(BlockedUrlError):
+                    check_public_url("http://rebind.example:6099/")  # really points at the host itself
+                with self.assertRaises(BlockedUrlError):
+                    check_public_url("http://halfprivate.example/")  # a private answer needs no second look
+                with self.assertRaisesRegex(TransportError, "无法核实"):
+                    check_public_url("https://nodoh.example/")
+        self.assertEqual(asked, ["python.example", "rebind.example", "nodoh.example"])
+
+    def test_the_dns_over_https_answer_keeps_only_address_records(self) -> None:
+        answers = {
+            "A": [{"type": 5, "data": "dualstack.python.map.fastly.net."}, {"type": 1, "data": "151.101.0.223"}],
+            "AAAA": [{"type": 28, "data": "2a04:4e42:400::223"}],
+        }
+
+        def fake_get(url, *, params, timeout):  # type: ignore[no-untyped-def]
+            request = httpx.Request("GET", url, params=params)
+            return httpx.Response(200, json={"Status": 0, "Answer": answers[params["type"]]}, request=request)
+
+        with mock.patch.object(safe_fetch.httpx, "get", side_effect=fake_get) as get:
+            self.assertEqual(safe_fetch._resolve_over_doh("www.python.org"), {"151.101.0.223", "2a04:4e42:400::223"})
+        self.assertEqual(get.call_args.args[0], safe_fetch.DOH_RESOLVER)
+
     def test_redirect_into_private_network_is_blocked_before_it_is_requested(self) -> None:
         requested: list[str] = []
 

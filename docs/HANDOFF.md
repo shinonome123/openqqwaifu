@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，723 个，约 70 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，736 个，约 75 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -19,6 +19,12 @@
   - 引用：群里回复时，如果那条消息之后群里又有人说过话，第一条带 OneBot `reply` 段引用它；紧接着回的不引用。`OutboundEmitter.note_inbound` 在拿会话锁之前记下每个群最新的消息 id，引用与否在真正发送时判断（群回复延迟之后）。`group_reply_quote=false` 关掉。
   - 表情包：`data/stickers/<分类>/` 里的 png、jpg、gif、webp（单张不超过 2 MB，`reply_flow/stickers.py`）。有可发的分类时，system 里加 `[表情包]` 段列出分类；模型在回复末尾写「[表情:分类]」就从该分类随机挑一张（名字对不上时取互相包含的分类，「很开心」→「开心」），`sub_type=1`（QQ 按表情显示）单独发在文字后面。同一个聊天两张之间至少隔 `stickers.min_replies_between`（3）条回复，冷却期间不出现 `[表情包]` 段。发出的标签留在历史里，没发出的标签删掉；任何消息里的标签都不会当文字发出去。冷却计数在内存里，重启清零。线上的表情包库见第 3.5 节。
   - 看图：收到的图片由 `infra/image_inputs.py` 自己下载（走 `safe_fetch`，最多 10 MB），GIF 和动图取第一帧，长边超过 1536 像素就缩小，以 data URL 发给模型，每条消息最多 4 张。下载或解码失败、后端不支持图片、模型拒收时，当前消息末尾加「（对方发来的图片没能加载出来，你看不到它的内容）」让角色自己回应（模型拒收时去掉图片再请求一次），不再回「图片处理失败…」「当前模型后端不支持图片理解…」这类系统话。QQ 表情包（图片段 `sub_type=1`）在聊天记录里记作「发了一个表情」，模型照样看得到图。
+- 切换人物卡（`feat/persona-switch`，`character/switcher.py`）：聊天里说「切换人物卡」列出 `data/cards/` 里的卡（附带的 `default` 模板只在正在用时才列出），说「切换/切换到/切换成/切换回/换成 + 名字」就换。名字可以是卡的 ID、`assistant_name` 或 `<卡>.meta.json` 里的 `aliases`，也认互相包含的写法（「元气雌小鬼」→ 别名「雌小鬼」）；对不上任何卡的（「切换一下话题」）按普通聊天处理。群里必须明确 @，跟进窗口里的不算。换卡和控制台一样是全局的，所有私聊和群都换；`activate_character` 在有回复或后台写回在跑时会拒绝，所以命令先返回，后台每 0.5 秒重试，最多等 60 秒（`SWITCH_WAIT_SECONDS`），换好后新角色从 `greetings` 里随机挑一句打招呼，等不到就用旧角色说一句没换成。列表里每张卡的简介取 meta 的 `intro`，没有就取 Profile 第一句。`character_switch_user_ids`（顶层，默认空）非空时只有这些 QQ 号能换。每张卡的会话、成员目录和知识各自独立，换到新卡后它不认识群友的称呼，要重新认识。
+- 技能修复（`feat/persona-switch`，起因见第 3.7 节）：
+  - 群里直接 @ 机器人的消息改用每人一个的桶（`rate_limits.mention_reply_burst` / `mention_reply_per_hour`，默认 4 和 30），不再占群的共享额度；跟进窗口里的接话仍走 `group_reply_burst`。机器人之间斗嘴用光群额度后，真人 @ 照样有回应。
+  - `infra/safe_fetch.py`：解析结果落在 198.18.0.0/15（代理的 fake-IP）时，再用阿里 DoH（`https://dns.alidns.com/resolve`）查真实地址，全是公网才放行；查不到就拦。线上容器里国外域名都解析到 198.18.x.x，原来抓网页、总结链接对国外网站全部失败。
+  - 技能列表（「你会什么」）只列这个人能用、能主动要求的技能，每行写一种说法和 `/skill` 写法，交给角色转述，不再贴原始代码块；没授权的人看不到文件工具和抓网页。
+  - 文件工具的相对路径按第一个允许目录算（原来按配置文件所在目录），不给路径就列整个目录；默认配置下两者相同。
 
 ## 2. 当前工作区状态
 
@@ -153,6 +159,7 @@
 - 现在有两道闸门，都在 `reply_flow/reply_gate.py`：
   - `ignore_user_ids`（顶层配置，环境变量 `OPENQQWAIFU_IGNORE_USER_IDS`，逗号分隔）：这些 QQ 号的消息永远不触发回复，私聊也一样，也不能用 `/skill`；消息仍作为群聊上下文进环境缓冲。
   - `rate_limits.group_reply_burst` / `group_reply_per_hour`（默认 8 和 60）：每个群一个令牌桶，每次回复扣一个，用完就不回，只记一条 WARNING 日志，不在群里说明。`rate_limits.exempt_user_ids` 里的人不受限，`rate_limits.enabled=false` 全关。桶在内存里，重启后是满的。
+  - 直接 @ 机器人的消息不走上面的群桶，走每个群里每人一个的桶（`mention_reply_burst` / `mention_reply_per_hour`，默认 4 和 30；burst 为 0 时回到群桶）。WARNING 日志里的 `bucket=` 说明是哪个桶。
 - 控制台「其他设置」接口（`/api/panels/other`）能读写 `ignore_user_ids`，页面上还没有输入框；限速参数只能改配置文件。
 
 ### 3.4 实机测试的发现（2026-10-27，模型 grok-4-fast-non-reasoning）
@@ -167,10 +174,11 @@
 ### 3.5 运行数据
 
 - `embedding.model` 由 `qwen3-vl-embedding` 改为 `text-embedding-v4`：前者在 DashScope 的 OpenAI 兼容 `/embeddings` 上不可用，每次都返回 404；后者已实测，1024 维。更换嵌入模型要重新校准 `_SEMANTIC_RELEVANCE_MIN`，`text-embedding-v4` 上相关句对约 0.42–0.64，无关句对约 0.19–0.37。
-- `tool_policy.exec_enabled=false`、`write_enabled=false`、`authorized_user_ids=[]`；`history_window_messages=30`、`max_thinking_words=80`（2026-10-26 改）；没有 `history_window_chars`（缺省 2500）和 `timezone`（缺省 `Asia/Shanghai`）。
+- `tool_policy`（2026-10-27 改）：`authorized_user_ids=["783190298"]`（owner）；`allowed_roots` 和 `write_allowed_roots` 都只有 `/app/data/files`（宿主机上的 `data/files/`），读写文件、列目录只能碰这个文件夹，原来是整个 `data/`（含带密钥的配置）；`write_enabled=true`，`exec_enabled=false`。抓网页（network）也随授权对 owner 打开。改前的配置备份在 `data/backups/before-file-access-20261027-083905/`。`history_window_messages=30`、`max_thinking_words=80`（2026-10-26 改）；没有 `history_window_chars`（缺省 2500）和 `timezone`（缺省 `Asia/Shanghai`）。
 - `member_persona_state.profile_summary` 里原来的 4 条画像写的全是机器人自己的傲娇人设（「masks care with complaints」之类），2026-10-27 备份后清空；抽取提示词已不再带人设。
 - 2026-10-25 清空过会话记录和知识条目，清空前的备份在系统临时目录，可能已被清理：`/private/tmp/claude-501/-Users-shinonome-openqqwaifu/bd3c61d7-dd79-4eaf-bd72-9fa0d7f1d365/scratchpad/data-backup-20261025-160341`。2026-10-27 的实测写入了新的会话（`person_783190298`、`group_612475113`）和知识。
 - 角色卡 `data/cards/aurora_person.yaml`、`aurora_group.yaml`：Profile 段 2026-10-26 已换回 `aurora.meta.json` 里 `portrait_prompt` 的 8 行人设；Skills、Background、Rules、Prologue 仍是测试夹具内容（例如 Rules「不超过三句话」），要由 owner 决定怎么写。
+- 人物卡（2026-10-27）：`data/cards/` 有三张卡，极光 `aurora`（傲娇小公主，当前在用）、小葵 `xiaokui`（元气雌小鬼，叫不认识的人「杂鱼」）、晚晴 `wanqing`（温柔大姐姐，叫不认识的人「小家伙」），每张都有私聊和群聊两份；`<卡>.meta.json` 里写了列表用的 `intro`、切换用的 `aliases` 和换上场时说的 `greetings`。加卡前的备份在 `data/backups/before-persona-cards-20261027-081816/`。
 - 表情包库 `data/stickers/`（2026-10-27 导入，约 1.1 GB）：AstrBot Meme Manager「表情包广场」索引（`anka-afk/astrbot-meme-pack-index`）的 14 个条目，其中 `ddzs987-semantic-001` 和官方表情包1号是同一批图，实际 13 个包，共 2,359 张不重复的图。各包原来的 50 种英文分类合并成 42 个中文分类（开心、生气、害羞、贴贴、宕机、要钱、早安…），对照表、每个包的来源、维护者、许可和收录张数在 `data/stickers/README.md`。文件名以包 ID 开头，去掉某个包就删这个前缀的文件。超过 2 MB 的 424 张已缩小（动图 240 像素、静图 512 像素）后收录。许可大多是「仅限非商业使用」或 CC BY-NC-SA 4.0，几个包写的是「原素材许可未指定」，owner 决定全部用于本机器人的非商业聊天。下载用的是各包仓库按索引 `ref` 的浅克隆（只取 `memes/`），整理脚本没有进仓库。线上容器扫描一次目录约 35 毫秒（第一次 191 毫秒）。
 - 线上 `summarization_mode` 是 `true`、`memory_summary_batch_size` 是 12：现在每多出 12 行才调一次摘要。`knowledge_entries` 里如果还有旧的 `memory_type="summary"` 条目，召回会跳过，不会自动删除。
 
@@ -180,6 +188,14 @@
 - 在 openqqwaifu 容器里直接下载 QQ 图床（`multimedia.nt.qq.com.cn`）正常，域名解析到公网地址，`safe_fetch` 放行。群里大肥鱼最近发的 4 张都是 `sub_type=1`、`summary="[动画表情]"` 的表情，3 张 PNG、1 张 JPEG，几十到几百 KB。
 - 现在的处理见第 1 节「看图」。dry_run 实测：GIF 测试图转成第一帧后 grok-4.7 能说出「红圆圈旁边一个蓝 42」；标成表情的图片，回复是「这算哪门子表情」。
 - 同一次 dry_run 里，新用户的第一条「在吗」有一次没有任何回复（5 秒）；同样的消息重放 7 次都正常。当时这条路径的模型错误不写日志，原因查不到，现在会记 WARNING。
+
+### 3.7 技能实测（2026-10-27，线上容器里 dry_run）
+
+- 天气、搜索、搜索来源链接、`/skill weather 上海`、会话总结都正常。
+- 群里 owner @ 机器人问天气没有回复：日志 `group reply rate-limited ... sender=783190298`，群额度在 19:28–19:39 被和大肥鱼斗嘴用光了，同一时刻排队的 7 条消息都被丢掉。
+- 总结 `https://www.python.org/about/` 报「不能访问内网或本机地址」：容器里 www.python.org、github.com、wttr.in、duckduckgo 都解析到 198.18.x.x（宿主机代理的 fake-IP），bilibili、baidu 是真实地址。天气和搜索不经过 `safe_fetch`，所以不受影响。
+- 「你会什么」回的是带 `keywords=`、`tool=` 的原始清单，还列出了没人能用的写文件、执行命令。
+- 「看看 data 目录下有什么文件」没有调工具：`tool_policy.authorized_user_ids` 为空，文件工具对所有人关闭。
 
 ## 4. 三块（A、B、C 已完成）
 

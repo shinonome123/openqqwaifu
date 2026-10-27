@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 from weakref import WeakValueDictionary
 
-from ..character import CardManager, CharacterService
+from ..character import CardManager, CharacterService, CharacterSwitcher
 from ..claw_runtime_admin import ClawRuntimeAdminService
 from ..config import AppConfig
 from ..contracts import OutboundPort
@@ -177,6 +177,7 @@ class WaifuService:
     session_repository: SessionRepository = field(init=False, repr=False)
     console: ConsolePanels = field(init=False, repr=False)
     character_service: CharacterService = field(init=False, repr=False)
+    character_switcher: CharacterSwitcher = field(init=False, repr=False)
     member_service: MemberService = field(init=False, repr=False)
     memory_admin_service: MemoryAdminService = field(init=False, repr=False)
     skills_admin_service: SkillsAdminService = field(init=False, repr=False)
@@ -209,6 +210,7 @@ class WaifuService:
         )
         self.session_repository = SessionRepository(self.memory.store)
         self.character_service = CharacterService(self)
+        self.character_switcher = CharacterSwitcher(self)
         self.member_service = MemberService(self)
         self.memory_admin_service = MemoryAdminService(self)
         self.skills_admin_service = SkillsAdminService(self)
