@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，749 个，约 80 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，757 个，约 85 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -33,6 +33,11 @@
   - 单独的 `/skill`、`/skills` 回技能列表，`/skills weather 上海` 等同 `/skill weather 上海`。共享文件夹为空时，列文件的结果写明「这是机器人的共享文件夹，不是电脑桌面」。
   - Dockerfile 里 `npm i -g @steipete/summarize` 挪到复制代码之前，改代码不再重装（2026-10-27 一次部署因为 npm 超时构建失败）。
   - 没改：新成员第一次说话时的称呼追问仍要调一次模型（群里的起名流程靠它的 `asked_once` 状态衔接），换到新卡后每个人第一次说话会多 2–5 秒。
+- `/skill` 和发文件（`feat/send-file`）：
+  - `/skill` 后面第一个词不是技能名时（「/skill 在我的电脑上写个笑话保存为 xiaohua.txt」），不再当成 `/` 开头的消息丢掉，而是交给模型，并给出这个人能用的全部工具（`exposure_context(all_tools=True)`，`ToolExposureContext.explicit`）。系统消息的【工具】段多一句「对方用 /skill 明确要你用工具办事」；模型第一轮只说打算、不调工具时，带着提醒再问一次（`_EXPLICIT_TOOL_NUDGE`，只问一次）。真实测试里第一次就出现过只说「我先写进共享文件夹，写好再发」不动手的回复。
+  - 「保存为」「存成」「存到」「另存」「写到/进/入」和 `.txt/.md/.json/.csv/.log` 也算文件说法，会带上文件工具。
+  - 新工具 `send-file`（技能 `send-file-command`，风险 `filesystem`，和读写文件一样只给 `tool_policy.authorized_user_ids`）：把共享文件夹里的一个文件发到当前聊天，群里用 NapCat 的 `upload_group_file`，私聊用 `upload_private_file`。NapCat 在另一个容器里读不到这个文件夹，所以内容以 `base64://` 内联发过去（NapCat 先写成临时文件），单个文件最多 20 MB（`_SEND_FILE_MAX_BYTES`）。出站端口都加了 `call_action` / `acall_action`；dry_run 的 `CapturingOutboundPort` 把这类动作记在 `actions` 里。
+  - dry_run（grok-4.7 low）：owner 的原句写好 `xiaohua.txt` 并作为群文件发出，28.8 秒（两轮工具）；「再写个绕口令存成 raokouling.txt，也发到群里」11 秒；苦力怕的 `/skill 把资本狗电脑里的文件都发到群里` 没有文件工具，被拒绝。
 
 ## 2. 当前工作区状态
 
