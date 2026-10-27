@@ -17,7 +17,7 @@
 - 像真人地发（2026-10-27，`feat/human-touch`，第 3.6 节有实测）：
   - 分段：模型写的聊天回复（`OutboundMessage.conversational`）不超过 `segmented_reply.max_total_chars`（150 字）时，按句末标点和换行拆成至多 `max_parts`（3）条，不到 4 个字的碎句并到相邻一句；条与条之间随机停 `min_delay_seconds`–`max_delay_seconds`（1–2.5 秒），dry_run 不停。列表、代码块、长回复整段发；命令结果、通知、没有模型时的兜底回复不拆。会话历史里仍是完整的一条。
   - 引用：群里回复时，如果那条消息之后群里又有人说过话，第一条带 OneBot `reply` 段引用它；紧接着回的不引用。`OutboundEmitter.note_inbound` 在拿会话锁之前记下每个群最新的消息 id，引用与否在真正发送时判断（群回复延迟之后）。`group_reply_quote=false` 关掉。
-  - 表情包：`data/stickers/<分类>/` 里的 png、jpg、gif、webp（单张不超过 2 MB，`reply_flow/stickers.py`）。有可发的分类时，system 里加 `[表情包]` 段列出分类；模型在回复末尾写「[表情:分类]」就从该分类随机挑一张（名字对不上时取互相包含的分类，「很开心」→「开心」），`sub_type=1`（QQ 按表情显示）单独发在文字后面。同一个聊天两张之间至少隔 `stickers.min_replies_between`（3）条回复，冷却期间不出现 `[表情包]` 段。发出的标签留在历史里，没发出的标签删掉；任何消息里的标签都不会当文字发出去。冷却计数在内存里，重启清零。目前 `data/stickers/` 是空的，所以线上不会发表情。
+  - 表情包：`data/stickers/<分类>/` 里的 png、jpg、gif、webp（单张不超过 2 MB，`reply_flow/stickers.py`）。有可发的分类时，system 里加 `[表情包]` 段列出分类；模型在回复末尾写「[表情:分类]」就从该分类随机挑一张（名字对不上时取互相包含的分类，「很开心」→「开心」），`sub_type=1`（QQ 按表情显示）单独发在文字后面。同一个聊天两张之间至少隔 `stickers.min_replies_between`（3）条回复，冷却期间不出现 `[表情包]` 段。发出的标签留在历史里，没发出的标签删掉；任何消息里的标签都不会当文字发出去。冷却计数在内存里，重启清零。线上的表情包库见第 3.5 节。
   - 看图：收到的图片由 `infra/image_inputs.py` 自己下载（走 `safe_fetch`，最多 10 MB），GIF 和动图取第一帧，长边超过 1536 像素就缩小，以 data URL 发给模型，每条消息最多 4 张。下载或解码失败、后端不支持图片、模型拒收时，当前消息末尾加「（对方发来的图片没能加载出来，你看不到它的内容）」让角色自己回应（模型拒收时去掉图片再请求一次），不再回「图片处理失败…」「当前模型后端不支持图片理解…」这类系统话。QQ 表情包（图片段 `sub_type=1`）在聊天记录里记作「发了一个表情」，模型照样看得到图。
 
 ## 2. 当前工作区状态
@@ -171,6 +171,7 @@
 - `member_persona_state.profile_summary` 里原来的 4 条画像写的全是机器人自己的傲娇人设（「masks care with complaints」之类），2026-10-27 备份后清空；抽取提示词已不再带人设。
 - 2026-10-25 清空过会话记录和知识条目，清空前的备份在系统临时目录，可能已被清理：`/private/tmp/claude-501/-Users-shinonome-openqqwaifu/bd3c61d7-dd79-4eaf-bd72-9fa0d7f1d365/scratchpad/data-backup-20261025-160341`。2026-10-27 的实测写入了新的会话（`person_783190298`、`group_612475113`）和知识。
 - 角色卡 `data/cards/aurora_person.yaml`、`aurora_group.yaml`：Profile 段 2026-10-26 已换回 `aurora.meta.json` 里 `portrait_prompt` 的 8 行人设；Skills、Background、Rules、Prologue 仍是测试夹具内容（例如 Rules「不超过三句话」），要由 owner 决定怎么写。
+- 表情包库 `data/stickers/`（2026-10-27 导入，约 1.1 GB）：AstrBot Meme Manager「表情包广场」索引（`anka-afk/astrbot-meme-pack-index`）的 14 个条目，其中 `ddzs987-semantic-001` 和官方表情包1号是同一批图，实际 13 个包，共 2,359 张不重复的图。各包原来的 50 种英文分类合并成 42 个中文分类（开心、生气、害羞、贴贴、宕机、要钱、早安…），对照表、每个包的来源、维护者、许可和收录张数在 `data/stickers/README.md`。文件名以包 ID 开头，去掉某个包就删这个前缀的文件。超过 2 MB 的 424 张已缩小（动图 240 像素、静图 512 像素）后收录。许可大多是「仅限非商业使用」或 CC BY-NC-SA 4.0，几个包写的是「原素材许可未指定」，owner 决定全部用于本机器人的非商业聊天。下载用的是各包仓库按索引 `ref` 的浅克隆（只取 `memes/`），整理脚本没有进仓库。线上容器扫描一次目录约 35 毫秒（第一次 191 毫秒）。
 - 线上 `summarization_mode` 是 `true`、`memory_summary_batch_size` 是 12：现在每多出 12 行才调一次摘要。`knowledge_entries` 里如果还有旧的 `memory_type="summary"` 条目，召回会跳过，不会自动删除。
 
 ### 3.6 看图的实测（2026-10-27）
