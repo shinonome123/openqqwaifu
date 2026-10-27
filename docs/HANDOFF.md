@@ -4,12 +4,16 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，main 上 672 个（`fix/deploy-hardening` 上 678 个），约 65 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，692 个，约 65 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
-- 一次回复的最终输入是一条 system 消息加一条 user 消息：
-  - system：`reply_flow/prompt_assembler.py` 顶部的 `_TOOL_CALLING_SYSTEM_PROMPT`。
-  - user：`character/cards.py::CharacterCard.system_prompt` 依次拼出 Profile、Skills、Background、Rules、Memories、Speaker Notes、State、Conversation、Latest Message 和输出指令；`prompt_assembler.py`（约 1403 行）再追加 `[Inner Thought]`。
-- 每条被回复的消息通常触发 3–5 次模型调用（分析、回复、后台知识抽取，外加称呼判断、摘要、工具循环的额外轮次），最多约 7 次；每次召回还有 1 次嵌入调用。
+- 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
+  - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
+  - 之后是 `Memory.dialogue_turns` 给出的历史，机器人的发言是 assistant，别人的是 user；群聊里 user 消息前带发言人名字。最后一条 user 是当前消息（图片也在这里）。
+  - 只支持单条文本提示词的后端（Dify）仍走 `CharacterCard.system_prompt` 拼成的一大段文字。
+- 机器人永远是卡片上的角色名；某个用户给它起的别名只作为一句备注（「X 管你叫「大母牛」…」），不会再替换它的名字。
+- 工具按需出现（`tools_on_demand`，默认开，`skills/tool_intent.py`）：消息说到天气、搜索、链接、称呼、画图、文件时才带对应工具，或者某个技能的关键词命中；普通闲聊不带工具也不带工具规则。机器人刚问过称呼时，下一条回复带称呼工具。`/skill` 不受影响。
+- 防复读：直接回复如果和机器人最近 6 条之一几乎一样、共用 10 字以上的句子、或和前 3 条用同一个开头，就带着「别重复」提示重写一次；前 3 条都以「……」开头而重写后还是，就去掉开头的「……」。
+- 每条被回复的消息通常 2 次模型调用：回复、后台知识抽取；需要工具、称呼判断或重写时多 1–2 次。`thinking_mode`（回复前的「内心分析」调用）默认关。每次召回还有 1 次嵌入调用。
 
 ## 2. 当前工作区状态
 
@@ -126,7 +130,7 @@
 
 ### 3.1 部署现状（2026-10-27）
 
-- 本机 Docker Compose（`compose.napcat.yml`）：容器 `openqqwaifu`（8080）和 `napcat`（3000/3001/6099），真实发送，`qq_sidecar.dry_run=false`。机器人 QQ `3956638110`（昵称「幸福的奴隶Bot」），好友 2 个，群 1 个（`612475113`）。
+- 本机 Docker Compose（`compose.napcat.yml`）：容器 `openqqwaifu`（8080）和 `napcat`（3000/3001/6099），真实发送，`qq_sidecar.dry_run=false`。2026-10-27 起聊天模型是 `grok-4.7`（xAI，每百万 token 输入 2 美元、输出 6 美元，会先思考再回答，dry_run 实测平均 15 秒、最长 34 秒），`thinking_mode=false`。机器人 QQ `3956638110`（昵称「幸福的奴隶Bot」），好友 2 个，群 1 个（`612475113`）。
 - `data/docker-compose-config.json` 当天的改动：`qq_sidecar.gateway_mode=reverse_ws`；`qq_sidecar.access_token` 设成随机令牌，反向 WS 和 NapCat 的 HTTP 动作端口 3000 都用它（3000 映射在宿主机上，原来没有令牌）。HTTP 回调已关闭，所以不需要 `inbound_access_token`。改之前的配置、NapCat 配置和 QQ 数据备份在 `data/backups/before-deploy-20261027-023259/`。
 - 只重建 openqqwaifu：`docker compose -f compose.napcat.yml up -d --build waifu`，不会动 NapCat。改了 `napcat` 服务的定义（例如镜像标签）再 `up`，NapCat 容器会被重建，很可能要重新扫码。
 - compose 给可选设置传 `${VAR:-}`，没设置时是空字符串。以前 `_env_str` 会用这个空串覆盖配置文件里的令牌；现在空串按未设置处理（`fix/deploy-hardening`）。
@@ -149,7 +153,7 @@
 ### 3.4 实机测试的发现（2026-10-27，模型 grok-4-fast-non-reasoning）
 
 - 私聊和群 @ 都正常，一条回复 6–9 秒，约 3 次模型调用加 1 次嵌入。群里不 @ 的消息进环境缓冲，下次回复时用上了（回复里引用了前面群聊的话题）。
-- 回复会照抄自己上一条的后半句，群里出现过两次连续相同的回复。
+- 回复会照抄自己上一条的后半句，群里出现过两次连续相同的回复。原因是人设只在 user 消息里、聊天记录是一段文字、别名顶替了角色名，`feat/prompt-structure` 已改；改前改后和换 grok-4.7 的 dry_run 对比见该 PR。
 - 用户说「给我讲个故事」时，回复「我就勉强讲一段」然后没有下文：角色卡 Rules 段还是测试夹具的「不超过三句话」。
 - 只发 `/skill` 不会有任何回应（`/` 是忽略前缀，只有 `/skill <技能 ID> 参数` 才会执行）。问「你会什么」会触发技能列表。
 - 群临时会话的消息（陌生人 `2747277822`）没有被处理，原因没查。
@@ -158,6 +162,7 @@
 
 - `embedding.model` 由 `qwen3-vl-embedding` 改为 `text-embedding-v4`：前者在 DashScope 的 OpenAI 兼容 `/embeddings` 上不可用，每次都返回 404；后者已实测，1024 维。更换嵌入模型要重新校准 `_SEMANTIC_RELEVANCE_MIN`，`text-embedding-v4` 上相关句对约 0.42–0.64，无关句对约 0.19–0.37。
 - `tool_policy.exec_enabled=false`、`write_enabled=false`、`authorized_user_ids=[]`；`history_window_messages=30`、`max_thinking_words=80`（2026-10-26 改）；没有 `history_window_chars`（缺省 2500）和 `timezone`（缺省 `Asia/Shanghai`）。
+- `member_persona_state.profile_summary` 里原来的 4 条画像写的全是机器人自己的傲娇人设（「masks care with complaints」之类），2026-10-27 备份后清空；抽取提示词已不再带人设。
 - 2026-10-25 清空过会话记录和知识条目，清空前的备份在系统临时目录，可能已被清理：`/private/tmp/claude-501/-Users-shinonome-openqqwaifu/bd3c61d7-dd79-4eaf-bd72-9fa0d7f1d365/scratchpad/data-backup-20261025-160341`。2026-10-27 的实测写入了新的会话（`person_783190298`、`group_612475113`）和知识。
 - 角色卡 `data/cards/aurora_person.yaml`、`aurora_group.yaml`：Profile 段 2026-10-26 已换回 `aurora.meta.json` 里 `portrait_prompt` 的 8 行人设；Skills、Background、Rules、Prologue 仍是测试夹具内容（例如 Rules「不超过三句话」），要由 owner 决定怎么写。
 - 线上 `summarization_mode` 是 `true`、`memory_summary_batch_size` 是 12：现在每多出 12 行才调一次摘要。`knowledge_entries` 里如果还有旧的 `memory_type="summary"` 条目，召回会跳过，不会自动删除。
