@@ -29,6 +29,15 @@ class StubImageGenerator:
 @dataclass(slots=True)
 class CapturingOutboundPort:
     sent: list[OutboundMessage] = field(default_factory=list)
+    # Other OneBot actions (file uploads), as (action, params).
+    actions: list[tuple[str, dict[str, object]]] = field(default_factory=list)
 
     def send(self, message: OutboundMessage) -> None:
         self.sent.append(message)
+
+    def call_action(self, action: str, params: dict[str, object]) -> dict[str, object]:
+        self.actions.append((action, dict(params)))
+        return {"status": "ok", "retcode": 0, "data": {}}
+
+    async def acall_action(self, action: str, params: dict[str, object]) -> dict[str, object]:
+        return self.call_action(action, params)

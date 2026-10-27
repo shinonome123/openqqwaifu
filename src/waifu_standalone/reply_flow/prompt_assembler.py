@@ -16,7 +16,7 @@ from ..infra import ImageClient, LLMClient, build_image_client, build_llm_client
 from ..infra.clock import format_prompt_time, local_now
 from ..infra.image_clients import ImageClientError
 from ..infra.image_inputs import ImageInputError, prepare_image_input
-from ..infra.llm_clients import LLMClientError
+from ..infra.llm_clients import LLMClientError, LLMToolResponse
 from ..memory import ROLLING_SUMMARY_KEY, clip_rolling_summary
 from ..skills import SkillSpec, ToolExecutionResult, ToolExposureContext, ToolInvocation, ToolRegistry
 
@@ -37,6 +37,9 @@ _REPEAT_LOOKBACK = 6
 _IMAGE_UNSEEN_NOTE = "（对方发来的图片没能加载出来，你看不到它的内容）"
 # Pictures read per message; more cost more and slow the reply.
 _MAX_IMAGES_PER_MESSAGE = 4
+# With a "/skill" request the person asked for the job itself, not a plan for it.
+_EXPLICIT_TOOL_RULE = "这条消息是对方用 /skill 发起的：对方明确要你用工具把事办了。先调用合适的工具，办完再回复，不要只说打算怎么做。"
+_EXPLICIT_TOOL_NUDGE = "（这是 /skill 请求：请直接调用工具把事办了，不要只描述打算怎么做。）"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -532,6 +535,7 @@ class Generator:
         include_tool_rules: bool,
         sticker_hint: str = "",
         images: list[str] | None = None,
+        explicit_tools: bool = False,
     ) -> list[dict[str, object]]:
         """Persona and context as the system message, the conversation as chat turns.
 
@@ -563,7 +567,8 @@ class Generator:
         if sticker_hint:
             extra_sections.append(sticker_hint)
         if include_tool_rules:
-            extra_sections.append("[工具]\n" + _TOOL_CALLING_SYSTEM_PROMPT)
+            explicit = "\n" + _EXPLICIT_TOOL_RULE if explicit_tools else ""
+            extra_sections.append("[工具]\n" + _TOOL_CALLING_SYSTEM_PROMPT + explicit)
         system = card.system_message(
             launcher_type=event.launcher_type,
             address=address,
@@ -670,6 +675,7 @@ class Generator:
             sticker_hint=sticker_hint,
             include_tool_rules=bool(tools),
             images=images,
+            explicit_tools=bool(tool_context is not None and tool_context.explicit),
         )
         options = dict(
             tools=tools,
@@ -729,6 +735,7 @@ class Generator:
             sticker_hint=sticker_hint,
             include_tool_rules=bool(tools),
             images=images,
+            explicit_tools=bool(tool_context is not None and tool_context.explicit),
         )
         options = dict(
             tools=tools,
@@ -747,6 +754,11 @@ class Generator:
                 raise
             _LOGGER.warning("the model could not read the pictures, answering without them: %s", exc)
         return await self._ainvoke_reply_with_tools(self._without_images(messages), **options)
+
+    @staticmethod
+    def _nudge_messages(response: LLMToolResponse) -> list[dict[str, object]]:
+        said = response.assistant_message or {"role": "assistant", "content": response.text}
+        return [dict(said), {"role": "user", "content": _EXPLICIT_TOOL_NUDGE}]
 
     def _failed_tool_reply(self, results: list[ToolExecutionResult], images: list[str]) -> GeneratedReply:
         return GeneratedReply(
@@ -834,6 +846,7 @@ class Generator:
         raw_block_results: list[ToolExecutionResult] = []
         all_results: list[ToolExecutionResult] = []
         tool_turns: list[dict[str, object]] = []
+        nudge = bool(tools and tool_context is not None and tool_context.explicit)
         for _ in range(3):
             try:
                 response = self._llm_client.invoke_with_tools(messages, tools=tools, user=user)
@@ -842,6 +855,11 @@ class Generator:
                     raise
                 self._record_tool_turns(session, tool_turns)
                 return self._failed_tool_reply(all_results, images)
+            if not response.tool_calls and nudge and not all_results:
+                # "/skill ...": a reply that only says what it will do is asked once to do it.
+                nudge = False
+                messages.extend(self._nudge_messages(response))
+                continue
             if not response.tool_calls:
                 self._record_tool_turns(session, tool_turns)
                 if not response.text.strip() and all_results:
@@ -920,6 +938,7 @@ class Generator:
         raw_block_results: list[ToolExecutionResult] = []
         all_results: list[ToolExecutionResult] = []
         tool_turns: list[dict[str, object]] = []
+        nudge = bool(tools and tool_context is not None and tool_context.explicit)
         for _ in range(3):
             try:
                 response = await self._llm_client.ainvoke_with_tools(messages, tools=tools, user=user)
@@ -928,6 +947,11 @@ class Generator:
                     raise
                 self._record_tool_turns(session, tool_turns)
                 return self._failed_tool_reply(all_results, images)
+            if not response.tool_calls and nudge and not all_results:
+                # "/skill ...": a reply that only says what it will do is asked once to do it.
+                nudge = False
+                messages.extend(self._nudge_messages(response))
+                continue
             if not response.tool_calls:
                 self._record_tool_turns(session, tool_turns)
                 if not response.text.strip() and all_results:

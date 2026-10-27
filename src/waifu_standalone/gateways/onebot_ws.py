@@ -234,6 +234,13 @@ class OneBotWsOutboundPort(OutboundPort):
         response = await self._gateway.send_action(action, params)
         return ensure_onebot_action_result(response)
 
+    def call_action(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Any other OneBot action, such as ``upload_group_file``."""
+        return self._gateway.run_sync(lambda: self.acall_action(action, params))
+
+    async def acall_action(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+        return ensure_onebot_action_result(await self._gateway.send_action(action, params))
+
     def close(self) -> None:
         self._gateway.close_sync()
 

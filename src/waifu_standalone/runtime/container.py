@@ -437,6 +437,25 @@ def _build_service(
         risk_level="filesystem",
     )
     tools.register(
+        "send-file",
+        name="发送文件",
+        description="把机器人共享文件夹里的一个文件作为 QQ 文件发到当前聊天：群里是群文件，私聊是私聊文件。路径写相对路径。",
+        handler=service.dispatcher.run_send_file_tool,
+        async_handler=service.dispatcher.arun_send_file_tool,
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "共享文件夹里的文件路径，例如 xiaohua.txt。"},
+                "name": {"type": "string", "description": "发出去时显示的文件名，不写就用原文件名。"},
+            },
+            "required": ["path"],
+        },
+        model_handler=service.dispatcher.use_send_file_tool,
+        async_model_handler=service.dispatcher.ause_send_file_tool,
+        model_callable=True,
+        risk_level="filesystem",
+    )
+    tools.register(
         "exec-command",
         name="执行命令",
         description="在允许目录内执行非 shell 的本地命令。",

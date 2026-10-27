@@ -268,6 +268,7 @@ default_args: {}
                     "search-links-command",
                     "weather-command",
                     "write-file-command",
+                    "send-file-command",
                     "exec-command",
                 },
                 skill_ids,
@@ -943,9 +944,9 @@ Use summarize for URLs.
         tool_ids = {item["id"] for item in tools["items"]}
         aliases_by_id = {item["id"]: set(item.get("aliases", [])) for item in tools["items"]}
 
-        self.assertEqual(tools["count"], 17)
+        self.assertEqual(tools["count"], 18)
         self.assertEqual(tools["alias_count"], 66)
-        self.assertEqual(tools["model_callable_count"], 16)
+        self.assertEqual(tools["model_callable_count"], 17)
         self.assertSetEqual(
             tool_ids,
             {
@@ -961,6 +962,7 @@ Use summarize for URLs.
                 "read-file",
                 "list-files",
                 "write-file",
+                "send-file",
                 "exec-command",
                 "set-preferred-name",
                 "set-assistant-alias",
@@ -1135,8 +1137,9 @@ Use summarize for URLs.
     def test_other_slash_messages_are_still_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, outbound = build_default_service(AppConfig(data_root=tmpdir))
-            for text in ("/help", "/skill no-such-skill hi"):
-                reply = service.handle_event(
+
+            def send(text: str):  # type: ignore[no-untyped-def]
+                return service.handle_event(
                     InboundEvent(
                         launcher_id="783190298",
                         launcher_type="person",
@@ -1145,8 +1148,11 @@ Use summarize for URLs.
                         segments=[MessageSegment(kind="text", text=text)],
                     )
                 )
-                self.assertIsNone(reply, text)
+
+            self.assertIsNone(send("/help"))
             self.assertEqual(outbound.sent, [])
+            # "/skill" followed by words that name no skill is a request for the model.
+            self.assertIsNotNone(send("/skill 帮我写个小笑话"))
 
     def test_slash_skill_command_respects_tool_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

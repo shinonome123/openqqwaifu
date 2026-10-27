@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 
 NAMING_TOOL_IDS = ("set-preferred-name", "set-assistant-alias", "reject-third-party-naming", "clarify-naming-intent")
-_FILE_TOOLS = ("read-file", "list-files", "write-file", "exec-command")
+_FILE_TOOLS = ("read-file", "list-files", "write-file", "send-file", "exec-command")
 
 _INTENTS: tuple[tuple[tuple[str, ...], re.Pattern[str]], ...] = (
     # Self-introductions ("我是阿狗") and "以后就这么叫吧" count too.
@@ -32,7 +32,14 @@ _INTENTS: tuple[tuple[tuple[str, ...], re.Pattern[str]], ...] = (
     (("summary",), re.compile(r"总结一下|总结下|回顾一下|刚才聊了什么|我们聊了什么|聊天记录")),
     (("image",), re.compile(r"画一|画个|画张|帮我画|生成.{0,6}图|来张|来一张|发张|配图|头像|壁纸")),
     (("skill-list",), re.compile(r"你会什么|你会干什么|你能做什么|有什么技能|有哪些能力|你可以做什么|你都会啥|什么功能")),
-    (_FILE_TOOLS, re.compile(r"文件|目录|文件夹|笔记|备忘|读取|执行|运行|命令|脚本|终端|shell", re.I)),
+    (
+        _FILE_TOOLS,
+        re.compile(
+            r"文件|目录|文件夹|笔记|备忘|读取|执行|运行|命令|脚本|终端|shell|"
+            r"保存[为成到]|存[为成到]|另存|写[到进入]|\.(?:txt|md|json|csv|log)\b",
+            re.I,
+        ),
+    ),
 )
 
 

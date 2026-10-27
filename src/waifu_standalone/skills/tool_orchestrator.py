@@ -52,14 +52,14 @@ class ToolCallingOrchestrator:
         if tool_id in {"search", "search-links"} and not svc.config.search_enabled:
             return "search is disabled"
         policy = svc.config.tool_policy
-        if (tool_id in {"read-file", "list-files", "write-file", "exec-command"}
+        if (tool_id in {"read-file", "list-files", "write-file", "send-file", "exec-command"}
                 or tool.risk_level == "command") and not policy.enabled:
             return f"{tool_id} is disabled by tool policy"
         if tool_id == "write-file" and not policy.write_enabled:
             return "write-file is disabled by tool policy"
         if (tool_id == "exec-command" or tool.risk_level == "command") and not policy.exec_enabled:
             return f"{tool_id} is disabled by tool policy"
-        if (tool_id in {"read-file", "list-files", "write-file", "exec-command"}
+        if (tool_id in {"read-file", "list-files", "write-file", "send-file", "exec-command"}
                 or tool.risk_level in _PRIVILEGED_RISK_LEVELS or requires_authorization):
             if not self._is_tool_authorized(invocation.event):
                 return f"permission denied: {tool_id} requires an authorized caller"
@@ -83,13 +83,15 @@ class ToolCallingOrchestrator:
         latest_message: str,
         address: str,
         assistant_name: str,
+        all_tools: bool = False,
     ) -> ToolExposureContext:
+        """The tools the model may call this turn; ``all_tools`` for an explicit "/skill" request."""
         svc = self._service
         allowed = self._allowed_tool_ids(event)
         manifests = svc.skills.exposed_manifests(latest_message) if svc.config.skills_enabled else []
         if svc.config.tools_on_demand:
             # Only tools the wording points at, plus skills whose own keywords match.
-            wanted = relevant_tool_ids(latest_message, has_images=event.image_count > 0)
+            wanted = set(allowed) if all_tools else relevant_tool_ids(latest_message, has_images=event.image_count > 0)
             if self._just_asked_for_name(event, session):
                 # A bare "luna" right after the bot asked for a name is an answer.
                 wanted.update(NAMING_TOOL_IDS)
@@ -122,6 +124,7 @@ class ToolCallingOrchestrator:
             allowed_tool_ids=allowed,
             skill_cards_by_tool=self._skill_cards_by_tool(),
             skill_manifests=manifests,
+            explicit=all_tools,
         )
 
     def _just_asked_for_name(self, event: InboundEvent, session: SessionMemory) -> bool:

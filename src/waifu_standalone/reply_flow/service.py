@@ -31,7 +31,15 @@ class ReplyFlowService:
             return None
         # "/skill <name> ..." is a command even though "/" is an ignored prefix.
         explicit_skill = svc.dispatcher.resolve_explicit_skill_request(text)
-        if explicit_skill is None and text and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes):
+        # "/skill 在我的电脑上写个笑话" names no skill: the model takes the request, with
+        # every tool this person may use, instead of the "/" message being dropped.
+        free_request = "" if explicit_skill is not None else svc.dispatcher.free_skill_request(text)
+        if (
+            explicit_skill is None
+            and not free_request
+            and text
+            and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes)
+        ):
             return None
         # Keep ambient group chatter until the bot is addressed, so the next reply
         # has the surrounding conversation instead of only the @ message.
@@ -105,6 +113,7 @@ class ReplyFlowService:
             latest_message=latest_message,
             address=address,
             assistant_name=assistant_name,
+            all_tools=bool(free_request),
         )
         if live_runtime and not svc.generator.llm_ready:
             unavailable = OutboundMessage(
