@@ -81,6 +81,8 @@ class ToolExposureContext:
     allowed_tool_ids: set[str] | None = None
     skill_cards_by_tool: dict[str, list[SkillSpec]] = field(default_factory=dict)
     skill_manifests: list[SkillSpec] = field(default_factory=list)
+    # A "/skill" request: the person asked outright for the job to be done with tools.
+    explicit: bool = False
 
 
 ToolExposurePolicy = Callable[[ToolExposureContext], bool]
@@ -144,7 +146,7 @@ class ToolRegistry:
             return f"tool is not registered: {tool_id}"
         if self.execution_policy is not None:
             return self.execution_policy(spec, invocation)
-        if (spec.tool_id in {"read-file", "list-files", "write-file", "exec-command"} or spec.risk_level == "command"
+        if (spec.tool_id in {"read-file", "list-files", "write-file", "send-file", "exec-command"} or spec.risk_level == "command"
                 or (invocation.skill is not None and invocation.skill.policy.requires_authorization)):
             return f"permission denied: {spec.tool_id} requires an authorized caller policy"
         return ""
@@ -152,7 +154,7 @@ class ToolRegistry:
     def _exposure_denied(self, spec: ToolSpec, context: ToolExposureContext | None,
                          skill: SkillSpec | None = None) -> bool:
         if context is None:
-            return bool(self.execution_policy or spec.tool_id in {"read-file", "list-files", "write-file", "exec-command"}
+            return bool(self.execution_policy or spec.tool_id in {"read-file", "list-files", "write-file", "send-file", "exec-command"}
                         or spec.risk_level == "command")
         return bool(self.denial_reason(spec.tool_id, ToolInvocation(
             tool_id=spec.tool_id, raw_args="", event=context.event, session=context.session, skill=skill,

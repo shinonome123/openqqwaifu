@@ -13,6 +13,7 @@ than copying state.
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import json
 import logging
@@ -52,6 +53,8 @@ _SKILL_ICONS: dict[str, str] = {
 }
 
 _LOGGER = logging.getLogger(__name__)
+# Largest file the send-file tool uploads; it travels base64-encoded over the OneBot link.
+_SEND_FILE_MAX_BYTES = 20 * 1024 * 1024
 
 # Rate-limit category per tool (see RateLimitConfig); search, fetch and
 # summarize share the "network" buckets.
@@ -143,6 +146,23 @@ class SkillDispatcher:
                 raw_args = str(slash_match.group("args") or "").strip()
                 return skill, raw_args
         return None
+
+    def free_skill_request(self, text: str) -> str:
+        """The request in "/skill 在我的电脑上写个笑话" whose first word names no skill; "" otherwise.
+
+        Call it after ``resolve_explicit_skill_request`` found nothing.
+        """
+        if not self._service.config.skills_enabled:
+            return ""
+        normalized = " ".join(str(text or "").split()).strip()
+        for prefix in self._service.config.explicit_skill_prefixes:
+            cleaned_prefix = str(prefix or "").strip()
+            if not cleaned_prefix:
+                continue
+            match = re.match(rf"^{re.escape(cleaned_prefix)}s?\s+(?P<rest>.+)$", normalized, flags=re.IGNORECASE)
+            if match is not None:
+                return match.group("rest").strip()
+        return ""
 
     def resolve_image_command(self, text: str) -> tuple[SkillSpec, str] | None:
         """``生图 一只猫``: the image prefix runs the image skill directly, not via the model."""
@@ -1027,6 +1047,13 @@ class SkillDispatcher:
         result = await self.ause_write_file_tool(invocation)
         return await self._aemit_tool_execution_result(invocation, result)
 
+    def run_send_file_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        return self._emit_tool_execution_result(invocation, self.use_send_file_tool(invocation))
+
+    async def arun_send_file_tool(self, invocation: ToolInvocation) -> OutboundMessage:
+        result = await self.ause_send_file_tool(invocation)
+        return await self._aemit_tool_execution_result(invocation, result)
+
     def run_exec_command_tool(self, invocation: ToolInvocation) -> OutboundMessage:
         return self._emit_tool_execution_result(invocation, self.use_exec_command_tool(invocation))
 
@@ -1579,6 +1606,65 @@ class SkillDispatcher:
 
     async def ause_write_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
         return await asyncio.to_thread(self.use_write_file_tool, invocation)
+
+    def _prepare_file_upload(self, invocation: ToolInvocation) -> tuple[str, dict[str, object], str] | ToolExecutionResult:
+        """The OneBot upload for a file in the shared folder, or why there is none."""
+        if reason := self._service.tools.denial_reason("send-file", invocation):
+            return ToolExecutionResult(error=reason, text=reason)
+        raw_path = self._normalized_tool_text(invocation.argument("path") or invocation.raw_args)
+        if not raw_path:
+            return ToolExecutionResult(error="missing path", text="请提供要发送的文件路径。")
+        try:
+            path = self._resolve_tool_path(raw_path, allow_missing=False, purpose="read")
+        except ValueError as exc:
+            return ToolExecutionResult(error=str(exc), text=str(exc))
+        size = path.stat().st_size
+        if size > _SEND_FILE_MAX_BYTES:
+            limit = _SEND_FILE_MAX_BYTES // (1024 * 1024)
+            return ToolExecutionResult(error="file too large", text=f"文件太大（{size / 1024 / 1024:.1f} MB），最多 {limit} MB。")
+        name = str(invocation.argument("name") or "").strip() or path.name
+        event = invocation.event
+        target: int | str = int(event.launcher_id) if str(event.launcher_id).isdigit() else str(event.launcher_id)
+        # NapCat runs in its own container and cannot read this folder: the content goes inline.
+        content = "base64://" + base64.b64encode(path.read_bytes()).decode("ascii")
+        if event.launcher_type == "group":
+            return "upload_group_file", {"group_id": target, "file": content, "name": name}, name
+        return "upload_private_file", {"user_id": target, "file": content, "name": name}, name
+
+    @staticmethod
+    def _file_upload_result(invocation: ToolInvocation, action: str, name: str) -> ToolExecutionResult:
+        where = "群文件" if invocation.event.launcher_type == "group" else "私聊文件"
+        return ToolExecutionResult(text=f"已把「{name}」作为{where}发出去了。", metadata={"name": name, "action": action})
+
+    def use_send_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        prepared = self._prepare_file_upload(invocation)
+        if isinstance(prepared, ToolExecutionResult):
+            return prepared
+        action, params, name = prepared
+        call = getattr(self._service.outbound, "call_action", None)
+        if not callable(call):
+            return ToolExecutionResult(error="unsupported outbound", text="现在的发送通道不支持发文件。")
+        try:
+            call(action, params)
+        except Exception as exc:  # a OneBot refusal or a dropped connection
+            _LOGGER.warning("file upload failed: %s", exc)
+            return ToolExecutionResult(error=str(exc), text=f"文件没发出去：{exc}")
+        return self._file_upload_result(invocation, action, name)
+
+    async def ause_send_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        prepared = await asyncio.to_thread(self._prepare_file_upload, invocation)
+        if isinstance(prepared, ToolExecutionResult):
+            return prepared
+        action, params, name = prepared
+        call = getattr(self._service.outbound, "acall_action", None)
+        if not callable(call):
+            return ToolExecutionResult(error="unsupported outbound", text="现在的发送通道不支持发文件。")
+        try:
+            await call(action, params)
+        except Exception as exc:  # a OneBot refusal or a dropped connection
+            _LOGGER.warning("file upload failed: %s", exc)
+            return ToolExecutionResult(error=str(exc), text=f"文件没发出去：{exc}")
+        return self._file_upload_result(invocation, action, name)
 
     def use_exec_command_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
         if reason := self._service.tools.denial_reason("exec-command", invocation):

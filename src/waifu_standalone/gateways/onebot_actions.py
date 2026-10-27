@@ -157,6 +157,13 @@ class OneBotHttpOutboundPort:
         action, payload = build_onebot_action(message)
         return await self.client.apost_action(action, payload)
 
+    def call_action(self, action: str, params: dict[str, object]) -> dict[str, object]:
+        """Any other OneBot action, such as ``upload_group_file``."""
+        return self.client.post_action(action, params)
+
+    async def acall_action(self, action: str, params: dict[str, object]) -> dict[str, object]:
+        return await self.client.apost_action(action, params)
+
     def _coerce_target_id(self, launcher_id: str) -> int | str:
         return _coerce_target_id(launcher_id)
 

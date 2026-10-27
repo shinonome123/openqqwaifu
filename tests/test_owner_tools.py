@@ -88,7 +88,10 @@ class SharedFolderTests(unittest.TestCase):
 
         # No file skill's own keyword appears in these; the wording alone has to bring the tools.
         for text in ("看看文件夹里现在有什么", "把刚才那个笔记读给我听"):
-            self.assertEqual(offered(OWNER, text), ["list-files-command", "read-file-command", "write-file-command"])
+            self.assertEqual(
+                offered(OWNER, text),
+                ["list-files-command", "read-file-command", "send-file-command", "write-file-command"],
+            )
             self.assertEqual(offered("10001", text), [])
 
     def test_nothing_outside_the_shared_folder_is_reachable(self) -> None:
