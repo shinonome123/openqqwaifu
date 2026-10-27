@@ -413,6 +413,7 @@ class SettingsAdminService:
             "image_command_prefix": svc.config.image_command_prefix,
             "image_command_aliases": list(svc.config.image_command_aliases),
             "ignore_prefixes": list(svc.config.ignore_prefixes),
+            "ignore_user_ids": list(svc.config.ignore_user_ids),
             "group_follow_up_window_seconds": svc.config.group_follow_up_window_seconds,
             "group_response_delay_seconds": svc.config.group_response_delay_seconds,
             "repeat_trigger_count": svc.config.repeat_trigger_count,
@@ -441,6 +442,7 @@ class SettingsAdminService:
                 payload.get("image_command_aliases", svc.config.image_command_aliases)
             )
             svc.config.ignore_prefixes = svc._coerce_list(payload.get("ignore_prefixes", svc.config.ignore_prefixes))
+            svc.config.ignore_user_ids = svc._coerce_list(payload.get("ignore_user_ids", svc.config.ignore_user_ids))
             svc.config.group_follow_up_window_seconds = max(
                 0.0,
                 float(svc.config.group_follow_up_window_seconds if follow_up_raw is None else follow_up_raw),

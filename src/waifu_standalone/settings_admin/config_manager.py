@@ -89,6 +89,7 @@ class ConfigManager:
             image_command_prefix=str(raw.get("image_command_prefix", defaults.image_command_prefix)),
             image_command_aliases=_load_str_list(raw.get("image_command_aliases"), defaults.image_command_aliases),
             ignore_prefixes=_load_str_list(raw.get("ignore_prefixes"), ["!", "/"]),
+            ignore_user_ids=_load_str_list(raw.get("ignore_user_ids"), []),
             explicit_skill_prefixes=_load_str_list(raw.get("explicit_skill_prefixes"), ["/skill"]),
             group_follow_up_window_seconds=float(raw.get("group_follow_up_window_seconds", 5.0)),
             group_response_delay_seconds=float(raw.get("group_response_delay_seconds", 0.0)),
@@ -253,6 +254,8 @@ def _load_rate_limits(raw_value: object) -> RateLimitConfig:
             "network_user_per_hour",
             "network_group_burst",
             "network_group_per_hour",
+            "group_reply_burst",
+            "group_reply_per_hour",
         )
     }
     return RateLimitConfig(
@@ -348,6 +351,9 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     exempt_user_ids = os.getenv("OPENQQWAIFU_RATE_LIMITS_EXEMPT_USER_IDS")
     if exempt_user_ids is not None:
         rate_limits.exempt_user_ids = _load_str_list(exempt_user_ids, rate_limits.exempt_user_ids)
+    ignore_user_ids = os.getenv("OPENQQWAIFU_IGNORE_USER_IDS")
+    if ignore_user_ids is not None:
+        config.ignore_user_ids = _load_str_list(ignore_user_ids, config.ignore_user_ids)
 
     claw_runtime = config.claw_runtime
     claw_runtime.enabled = _env_bool("OPENQQWAIFU_CLAW_RUNTIME_ENABLED", claw_runtime.enabled)
@@ -955,8 +961,10 @@ def _normalize_webui_settings(base_url: str, webui_token: str) -> tuple[str, str
 
 
 def _env_str(name: str, default: str = "") -> str:
+    # An empty value counts as unset. compose.napcat.yml passes ${VAR:-} for optional
+    # settings, and an empty string must not wipe a token set in the config file.
     value = os.getenv(name)
-    if value is None:
+    if value is None or not str(value).strip():
         return default
     return str(value).strip()
 
