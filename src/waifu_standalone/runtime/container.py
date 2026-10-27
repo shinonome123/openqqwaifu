@@ -383,7 +383,7 @@ def _build_service(
     tools.register(
         "read-file",
         name="读取文件",
-        description="读取工作区或数据目录内的本地文本文件。",
+        description="读取机器人能用的文件夹里的文本文件。路径写相对路径（例如 notes/todo.txt）即可。",
         handler=service.dispatcher.run_read_file_tool,
         async_handler=service.dispatcher.arun_read_file_tool,
         parameters={
@@ -401,7 +401,7 @@ def _build_service(
     tools.register(
         "list-files",
         name="列出文件",
-        description="列出工作区或数据目录内的目录内容。",
+        description="列出机器人能用的文件夹里的文件。不给路径就列出整个文件夹，子目录写相对路径。",
         handler=service.dispatcher.run_list_files_tool,
         async_handler=service.dispatcher.arun_list_files_tool,
         parameters={
@@ -419,7 +419,7 @@ def _build_service(
     tools.register(
         "write-file",
         name="写入文件",
-        description="向工作区或数据目录内的文件写入文本内容。",
+        description="把文本写进机器人能用的文件夹里的文件（不存在就新建）。路径写相对路径即可。",
         handler=service.dispatcher.run_write_file_tool,
         async_handler=service.dispatcher.arun_write_file_tool,
         parameters={

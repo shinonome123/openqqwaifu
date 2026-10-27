@@ -93,6 +93,19 @@ class ToolCallingOrchestrator:
             if self._just_asked_for_name(event, session):
                 # A bare "luna" right after the bot asked for a name is an answer.
                 wanted.update(NAMING_TOOL_IDS)
+            # The skills behind the wanted tools come along even when no skill keyword
+            # ranked them: "看看文件夹里有什么" names no file skill, yet wants list-files.
+            listed = {skill.skill_id for skill in manifests}
+            for skill in svc.skills.list_skills() if svc.config.skills_enabled else []:
+                if (
+                    skill.skill_id not in listed
+                    and skill.is_tool_handler
+                    and skill.model_visible
+                    and not skill.validation_errors
+                    and skill.handler_target in wanted & allowed
+                ):
+                    manifests.append(skill)
+                    listed.add(skill.skill_id)
             manifests = [
                 skill
                 for skill in manifests
