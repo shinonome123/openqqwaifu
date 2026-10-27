@@ -41,6 +41,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "skill.tool_empty_result": "tool returned no content.",
         "skill.claw_success": "Executed through ClawRuntime.",
         "skill.claw_failed": "ClawRuntime could not execute this tool.",
+        "skill.rate_limited": "{address}, {tool} has been used a lot just now. Try again in {wait}.",
+        "skill.rate_limit.image": "image generation",
+        "skill.rate_limit.network": "web lookups",
+        "skill.rate_limit.seconds": "{count}s",
+        "skill.rate_limit.minutes": "{count} min",
+        "skill.rate_limit.later": "a while",
     },
     "zh_CN": {
         "skill.disabled": "技能已禁用",
@@ -79,6 +85,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "skill.tool_empty_result": "工具没有返回内容。",
         "skill.claw_success": "已通过 ClawRuntime 执行。",
         "skill.claw_failed": "ClawRuntime 未能执行该工具。",
+        "skill.rate_limited": "{address}，{tool}刚才用得有点多，{wait}后再来吧。",
+        "skill.rate_limit.image": "生图",
+        "skill.rate_limit.network": "联网查询",
+        "skill.rate_limit.seconds": "{count} 秒",
+        "skill.rate_limit.minutes": "{count} 分钟",
+        "skill.rate_limit.later": "过一会儿",
     },
 }
 

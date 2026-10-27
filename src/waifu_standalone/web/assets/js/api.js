@@ -73,6 +73,8 @@ export const api = {
     ),
   saveCharacterPanel: (payload) => request("POST", "/api/panels/character", payload),
   previewCharacter: (payload) => request("POST", "/api/character/preview", payload),
+  resetCharacterSessions: (character, confirm) =>
+    request("POST", "/api/character/reset-sessions", { character, confirm }),
 
   getAiPanel: () => request("GET", "/api/panels/ai"),
   saveAiPanel: (payload) => request("POST", "/api/panels/ai", payload),

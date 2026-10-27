@@ -182,8 +182,6 @@ class ConfigManagerTests(unittest.TestCase):
         self.assertTrue(http_servers[0]["enable"])
 
         self.assertEqual(config.qq_sidecar.outbound_base_url, "http://127.0.0.1:3000")
-        # Legacy dry_run remains readable for old config files, but runtime delivery is
-        # decided by outbound_base_url and ignores this product-path flag.
         self.assertTrue(config.qq_sidecar.dry_run)
 
     def test_autodiscovery_preserves_existing_napcat_entries(self) -> None:
@@ -506,6 +504,17 @@ class ConfigManagerTests(unittest.TestCase):
         )
         self.assertEqual(len(raw["network"]["httpServers"]), 1)
         self.assertEqual(raw["network"]["httpServers"][0]["name"], "openqqwaifu-actions")
+
+    def test_env_override_turns_on_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"qq_sidecar": {"dry_run": False}}), encoding="utf-8")
+
+            with patch.dict(os.environ, {"OPENQQWAIFU_QQ_SIDECAR_DRY_RUN": "true"}, clear=False):
+                config = ConfigManager(config_path).load()
+
+        self.assertTrue(config.qq_sidecar.dry_run)
 
     def test_env_override_can_rebind_relative_data_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

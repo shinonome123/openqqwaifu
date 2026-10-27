@@ -2015,17 +2015,17 @@ class WaifuServiceTests(unittest.TestCase):
             self.assertEqual(saved["current_character"], "aurora")
             self.assertEqual(reloaded.get_character_panel()["current_character"], "aurora")
 
-    def test_save_character_panel_switch_resets_character_sessions(self) -> None:
+    def test_save_character_panel_switch_keeps_character_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(data_root=tmpdir, character="default")
             service, _ = build_file_service(config)
             aurora_sessions = FileMemoryStore(Path(tmpdir) / "sessions" / "aurora", scoped_character_id="aurora")
-            polluted = aurora_sessions.load("612475113", "group")
-            polluted.history = [
-                "tester: stale question",
-                "assistant: stale answer",
+            earlier = aurora_sessions.load("612475113", "group")
+            earlier.history = [
+                "tester: earlier question",
+                "assistant: earlier answer",
             ]
-            aurora_sessions.save(polluted)
+            aurora_sessions.save(earlier)
 
             service.save_character_panel(
                 {
@@ -2044,7 +2044,62 @@ class WaifuServiceTests(unittest.TestCase):
             switched = service.memory.load("612475113", "group", character_id="aurora")
 
             self.assertEqual(switched.character_id, "aurora")
-            self.assertEqual(switched.history, [])
+            self.assertEqual(switched.history, ["tester: earlier question", "assistant: earlier answer"])
+
+    def test_save_and_activate_same_character_keeps_sessions_and_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_file_service(AppConfig(data_root=tmpdir, character="default"))
+            session = service.memory.load("783190298", "person", character_id="default")
+            session.history = ["tester: remember me", "assistant: sure"]
+            service.memory.store.save(session)
+            state_store = service.state_store
+
+            saved = service.save_character_panel(
+                {
+                    "character": "default",
+                    "set_active": True,
+                    "person_fields": {"profile": ["calm"]},
+                }
+            )
+
+            self.assertEqual(saved["current_character"], "default")
+            self.assertIs(service.state_store, state_store)
+            reloaded = service.memory.load("783190298", "person", character_id="default")
+            self.assertEqual(reloaded.history, ["tester: remember me", "assistant: sure"])
+
+    def test_reset_character_sessions_requires_matching_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service, _ = build_file_service(AppConfig(data_root=tmpdir, character="default"))
+            service.save_character_panel(
+                {"character": "aurora", "set_active": False, "person_fields": {"profile": ["calm"]}}
+            )
+            for launcher_id in ("783190298", "783190299"):
+                session = service.memory.load(launcher_id, "person", character_id="default")
+                session.history = ["tester: hi", "assistant: hi"]
+                service.memory.store.save(session)
+            aurora_sessions = FileMemoryStore(Path(tmpdir) / "sessions" / "aurora", scoped_character_id="aurora")
+            aurora_session = aurora_sessions.load("612475113", "group")
+            aurora_session.history = ["tester: aurora only"]
+            aurora_sessions.save(aurora_session)
+
+            for payload in (
+                {"character": "default"},
+                {"character": "default", "confirm": "aurora"},
+                {"character": "../default", "confirm": "../default"},
+            ):
+                with self.assertRaises(ValueError):
+                    service.reset_character_sessions(payload)
+            self.assertEqual(len(service.memory.store.list_sessions()), 2)
+
+            result = service.reset_character_sessions({"character": "aurora", "confirm": "aurora"})
+            self.assertEqual(result["cleared_sessions"], 1)
+            self.assertEqual(aurora_sessions.list_sessions(), [])
+            self.assertEqual(len(service.memory.store.list_sessions()), 2)
+
+            result = service.reset_character_sessions({"character": "default", "confirm": "default"})
+            self.assertEqual(result["cleared_sessions"], 2)
+            self.assertEqual(result["current_character"], "default")
+            self.assertEqual(service.memory.store.list_sessions(), [])
 
     def test_save_character_panel_switches_to_character_scoped_runtime_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2150,10 +2205,10 @@ class WaifuServiceTests(unittest.TestCase):
             service.gate.refresh_follow_up_window(event)
             self.assertTrue(service.gate.is_follow_up_window_active("612475113"))
 
-            service.activate_character("aurora", reset_sessions=False)
+            service.activate_character("aurora")
             self.assertFalse(service.gate.is_follow_up_window_active("612475113"))
 
-            service.activate_character("default", reset_sessions=False)
+            service.activate_character("default")
             self.assertTrue(service.gate.is_follow_up_window_active("612475113"))
 
     def test_preview_character_panel_uses_unsaved_editor_fields(self) -> None:
@@ -2760,6 +2815,49 @@ class WaifuServiceTests(unittest.TestCase):
             _, outbound = build_runtime_service(config)
 
             self.assertIsInstance(outbound, OneBotHttpOutboundPort)
+
+    def test_runtime_service_dry_run_captures_even_with_sidecar_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                qq_sidecar=QQSidecarConfig(outbound_base_url="http://127.0.0.1:3000", dry_run=True),
+            )
+
+            service, outbound = build_runtime_service(config)
+            result = service.handle_event(
+                InboundEvent(
+                    launcher_id="783190298",
+                    launcher_type="person",
+                    sender_id="783190298",
+                    sender_name="tester",
+                    segments=[MessageSegment(kind="text", text="hello")],
+                )
+            )
+
+            self.assertIsInstance(outbound, CapturingOutboundPort)
+            self.assertIs(service.outbound, outbound)
+            # A dry run rehearses the live path, so a missing model is reported
+            # instead of falling back to the offline reply.
+            self.assertTrue(service._requires_live_llm())
+            assert result is not None
+            self.assertIn("AI 工具编排模型还没连上", result.text)
+            self.assertEqual([message.text for message in outbound.sent], [result.text])
+
+            service.config.qq_sidecar.dry_run = False
+            service._refresh_runtime_components(rebuild_outbound=True)
+            self.assertIsInstance(service.outbound, OneBotHttpOutboundPort)
+
+    def test_runtime_service_dry_run_keeps_reverse_ws_gateway_for_inbound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                data_root=tmpdir,
+                qq_sidecar=QQSidecarConfig(gateway_mode="reverse_ws", dry_run=True),
+            )
+
+            service, outbound = build_runtime_service(config)
+
+            self.assertIsInstance(outbound, CapturingOutboundPort)
+            self.assertIsNotNone(service.reverse_ws_gateway)
 
     def test_live_runtime_service_requires_llm_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

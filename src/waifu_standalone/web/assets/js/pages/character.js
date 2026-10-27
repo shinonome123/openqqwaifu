@@ -179,6 +179,47 @@ export function mount(root) {
     }
   }
 
+  async function resetSessions() {
+    if (!editor || saving) return;
+    const name = editor.character;
+    const confirmInput = textInput({});
+    const body = el("div", { class: "stack" }, [
+      el("div", { text: t("character.sessions.resetConfirm", { name }) }),
+      fieldRow({
+        label: t("character.sessions.resetTypeName", { name }),
+        control: confirmInput,
+      }),
+    ]);
+    const confirmed = await openModal({
+      title: t("character.sessions.resetTitle", { name }),
+      body,
+      actions: [
+        { label: t("common.cancel"), value: false },
+        { label: t("common.confirm"), value: true, variant: "danger" },
+      ],
+    });
+    if (!confirmed) return;
+    const typed = String(confirmInput.value || "").trim();
+    if (typed !== name) {
+      toastError(t("character.sessions.resetMismatch"));
+      return;
+    }
+    saving = true;
+    render();
+    try {
+      const result = await api.resetCharacterSessions(name, typed);
+      if (stopped) return;
+      toastOk(t("character.sessions.resetDone", { name, count: result?.cleared_sessions ?? 0 }));
+    } catch (err) {
+      toastError(t("actions.saveFailed", { msg: err?.message || err }));
+    } finally {
+      if (!stopped) {
+        saving = false;
+        render();
+      }
+    }
+  }
+
   async function createCharacter() {
     const nameInput = textInput({ placeholder: t("character.create.namePlaceholder") });
     const assistantInput = textInput({ placeholder: t("character.create.assistantPlaceholder") });
@@ -639,6 +680,7 @@ export function mount(root) {
           el("div", { class: "row-tight" }, [
             el("button", { type: "button", class: "btn", text: t("character.portrait.regenerate"), onClick: () => savePage({ generatePortrait: true, setActive: false }), disabled: saving }),
             el("button", { type: "button", class: "btn is-primary", text: t("character.portrait.saveActivate"), onClick: () => savePage({ setActive: true }), disabled: saving }),
+            el("button", { type: "button", class: "btn is-danger", text: t("character.sessions.reset"), onClick: resetSessions, disabled: saving }),
           ]),
         ]),
       ],

@@ -16,12 +16,34 @@ class CharacterService:
         svc = self.service
         return str(svc.cards.active_character() or svc.config.character or "default").strip() or "default"
 
-    def activate_character(self, character: str, *, reset_sessions: bool = True) -> str:
+    def activate_character(self, character: str) -> str:
+        # Activation never deletes sessions: each character keeps its own session
+        # directory and runtime DB. Clearing them is reset_character_sessions.
         svc = self.service
         active_character = svc.cards.set_active_character(character)
         svc.config.character = active_character
-        svc._rebind_character_scoped_storage(active_character, reset_sessions=reset_sessions)
+        if active_character != svc._bound_character_id:
+            svc._rebind_character_scoped_storage(active_character)
         return active_character
+
+    def reset_character_sessions(self, payload: dict[str, object]) -> dict[str, object]:
+        """Delete one character's saved sessions; ``confirm`` must repeat the name."""
+        svc = self.service
+        character = str(payload.get("character") or "").strip()
+        if not character:
+            raise ValueError("character is required")
+        if str(payload.get("confirm") or "").strip() != character:
+            raise ValueError("confirm must repeat the character name")
+        known = {str(item.get("character") or "") for item in svc.cards.list_characters()}
+        if character not in known and character != svc._bound_character_id:
+            raise ValueError(f"unknown character: {character}")
+        cleared = svc._clear_character_sessions(character)
+        return {
+            "status": "ok",
+            "character": character,
+            "cleared_sessions": cleared,
+            "current_character": svc.cards.active_character(),
+        }
 
     def get_character_panel(self, character: str = "") -> dict[str, object]:
         svc = self.service
@@ -54,7 +76,7 @@ class CharacterService:
         if isinstance(portrait, dict) and bool(portrait.get("generate", portrait.get("auto_generate", False))):
             bundle["portrait"] = self.generate_character_portrait(character, bundle, portrait)
         if set_active:
-            self.activate_character(character, reset_sessions=True)
+            self.activate_character(character)
         svc._persist_config()
         return {
             "current_character": svc.cards.active_character(),

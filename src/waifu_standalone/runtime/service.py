@@ -219,14 +219,14 @@ class WaifuService:
     def _active_character_id(self) -> str:
         return self.character_service.active_character_id()
 
-    def activate_character(self, character: str, *, reset_sessions: bool = True) -> str:
-        return self.character_service.activate_character(character, reset_sessions=reset_sessions)
+    def activate_character(self, character: str) -> str:
+        return self.character_service.activate_character(character)
 
     def _ensure_character_scope_bound(self) -> None:
         active_character = self._active_character_id()
         if self._bound_character_id == active_character:
             return
-        self._rebind_character_scoped_storage(active_character, reset_sessions=False)
+        self._rebind_character_scoped_storage(active_character)
 
     def handle_event(self, event: InboundEvent) -> OutboundMessage | None:
         with self._session_lock_for(event):
@@ -603,6 +603,9 @@ class WaifuService:
     def save_character_panel(self, payload: dict[str, object]) -> dict[str, object]:
         return self.character_service.save_character_panel(payload)
 
+    def reset_character_sessions(self, payload: dict[str, object]) -> dict[str, object]:
+        return self.character_service.reset_character_sessions(payload)
+
     def get_character_portrait(self, character: str) -> tuple[bytes, str] | None:
         return self.character_service.get_character_portrait(character)
 
@@ -909,7 +912,7 @@ class WaifuService:
         self.config.bot_account_id = uin
         self._persist_config()
 
-    def _rebind_character_scoped_storage(self, character_id: str, *, reset_sessions: bool = False) -> None:
+    def _rebind_character_scoped_storage(self, character_id: str) -> None:
         active_character = str(character_id or "").strip() or self._active_character_id()
         if self._memory_store_builder is not None:
             self.memory.store = self._memory_store_builder(active_character)
@@ -927,7 +930,7 @@ class WaifuService:
             self.state_store.refresh_knowledge_embeddings()
         self.memory.set_character_resolver(self.cards.active_character)
         self._bound_character_id = active_character
-        self._reset_character_runtime_context(reset_sessions=reset_sessions)
+        self._reset_character_runtime_context()
 
     def _ambient_history_key(
         self,
@@ -980,11 +983,25 @@ class WaifuService:
         with self._state_lock:
             self._ambient_history.pop(key, None)
 
-    def _reset_character_runtime_context(self, *, reset_sessions: bool = False) -> None:
-        if reset_sessions:
-            clear_sessions = getattr(self.memory.store, "clear", None)
-            if callable(clear_sessions):
-                clear_sessions()
+    def _clear_character_sessions(self, character_id: str) -> int:
+        """Delete every saved session of one character; returns how many there were."""
+        target = str(character_id or "").strip() or self._active_character_id()
+        if target == self._bound_character_id:
+            store = self.memory.store
+        elif self._memory_store_builder is not None:
+            store = self._memory_store_builder(target)
+        else:
+            raise ValueError(f"sessions of {target} are not reachable from this service")
+        list_sessions = getattr(store, "list_sessions", None)
+        cleared = len(list_sessions()) if callable(list_sessions) else 0
+        clear_sessions = getattr(store, "clear", None)
+        if callable(clear_sessions):
+            clear_sessions()
+        if store is self.memory.store:
+            self._reset_character_runtime_context()
+        return cleared
+
+    def _reset_character_runtime_context(self) -> None:
         with self._state_lock:
             self.gate.clear_all_windows_locked()
             self._recent_behavior_events.clear()
@@ -1087,12 +1104,16 @@ class WaifuService:
         )
 
     def _outbound_mode_label(self) -> str:
+        if self.config.qq_sidecar.dry_run:
+            return "dry-run (capture)"
         if not self.config.qq_sidecar.outbound_base_url:
             return "offline"
         return f"{self.config.qq_sidecar.adapter_name} -> {self.config.qq_sidecar.outbound_base_url}"
 
     def _requires_live_llm(self) -> bool:
-        return not isinstance(self.outbound, CapturingOutboundPort)
+        # A dry run rehearses the live path (real model, no offline fallbacks);
+        # only the delivery is captured.
+        return self.config.qq_sidecar.dry_run or not isinstance(self.outbound, CapturingOutboundPort)
 
     @staticmethod
     def _message_to_dict(message: OutboundMessage) -> dict[str, object]:

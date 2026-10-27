@@ -225,6 +225,7 @@ class _AioHttpDispatcher:
             "/api/sidecar/test": self._post_test_sidecar,
             "/api/panels/character": self._post_character_panel,
             "/api/character/preview": self._post_character_preview,
+            "/api/character/reset-sessions": self._post_character_reset_sessions,
             "/api/panels/ai": self._post_ai_panel,
             "/api/panels/abilities": self._post_abilities_panel,
             "/api/proactive/draft": self._post_proactive_draft,
@@ -711,6 +712,22 @@ class _AioHttpDispatcher:
             return _json_response(
                 HTTPStatus.OK,
                 await self._call_api_in_thread(self.api.preview_character_panel, payload or {}),
+            )
+        except ValueError as exc:
+            return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+    async def _post_character_reset_sessions(
+        self,
+        request: web.Request,
+        current_user: dict[str, Any] | None,
+    ) -> web.Response:
+        payload, response = await _read_json_body(request)
+        if response is not None:
+            return response
+        try:
+            return _json_response(
+                HTTPStatus.OK,
+                await self._call_api_in_thread(self.api.reset_character_sessions, payload or {}),
             )
         except ValueError as exc:
             return _json_response(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})

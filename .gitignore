@@ -18,3 +18,9 @@ napcat/qq/*
 .codex-server*.log
 .codex-temp/
 
+
+# Local secrets (NapCat token, accounts) and scratch output such as screenshots and PR drafts.
+.env
+.env.*
+!.env.example
+output/

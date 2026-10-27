@@ -16,6 +16,7 @@ from ..config import (
     MarketplaceSourceConfig,
     PluginsConfig,
     QQSidecarConfig,
+    RateLimitConfig,
     ToolPolicyConfig,
 )
 
@@ -41,6 +42,7 @@ class ConfigManager:
         embedding = EmbeddingConfig(**raw.get("embedding", {}))
         marketplace = _load_marketplace(raw.get("marketplace"))
         tool_policy = _load_tool_policy(raw.get("tool_policy"))
+        rate_limits = _load_rate_limits(raw.get("rate_limits"))
         claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
         config = AppConfig(
@@ -96,6 +98,7 @@ class ConfigManager:
             embedding=embedding,
             marketplace=marketplace,
             tool_policy=tool_policy,
+            rate_limits=rate_limits,
             claw_runtime=claw_runtime,
             plugins=plugins,
             qq_sidecar=qq_sidecar,
@@ -225,6 +228,39 @@ def _load_tool_policy(raw_value: object) -> ToolPolicyConfig:
     )
 
 
+def _load_rate_limits(raw_value: object) -> RateLimitConfig:
+    if not isinstance(raw_value, dict):
+        return RateLimitConfig()
+    defaults = RateLimitConfig()
+    numbers = {
+        key: _non_negative(raw_value.get(key), getattr(defaults, key))
+        for key in (
+            "image_user_burst",
+            "image_user_per_hour",
+            "image_group_burst",
+            "image_group_per_hour",
+            "network_user_burst",
+            "network_user_per_hour",
+            "network_group_burst",
+            "network_group_per_hour",
+        )
+    }
+    return RateLimitConfig(
+        enabled=bool(raw_value.get("enabled", defaults.enabled)),
+        exempt_user_ids=_load_str_list(raw_value.get("exempt_user_ids"), defaults.exempt_user_ids),
+        **numbers,
+    )
+
+
+def _non_negative(raw_value: object, default: int | float) -> int | float:
+    if raw_value is None:
+        return default
+    try:
+        return max(type(default)(0), type(default)(raw_value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _coerce_story_style(raw_value: object) -> str:
     normalized = str(raw_value or "").strip().lower()
     if normalized == "subtle":
@@ -288,6 +324,12 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     authorized_user_ids = os.getenv("OPENQQWAIFU_TOOL_POLICY_AUTHORIZED_USER_IDS")
     if authorized_user_ids is not None:
         tool_policy.authorized_user_ids = _load_str_list(authorized_user_ids, tool_policy.authorized_user_ids)
+
+    rate_limits = config.rate_limits
+    rate_limits.enabled = _env_bool("OPENQQWAIFU_RATE_LIMITS_ENABLED", rate_limits.enabled)
+    exempt_user_ids = os.getenv("OPENQQWAIFU_RATE_LIMITS_EXEMPT_USER_IDS")
+    if exempt_user_ids is not None:
+        rate_limits.exempt_user_ids = _load_str_list(exempt_user_ids, rate_limits.exempt_user_ids)
 
     claw_runtime = config.claw_runtime
     claw_runtime.enabled = _env_bool("OPENQQWAIFU_CLAW_RUNTIME_ENABLED", claw_runtime.enabled)
@@ -379,9 +421,8 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
         "OPENQQWAIFU_QQ_SIDECAR_REVERSE_WS_SEND_TIMEOUT_SECONDS",
         qq_sidecar.reverse_ws_send_timeout_seconds,
     )
-    # Kept for old config compatibility only. Delivery mode is derived from
-    # outbound_base_url; dry-run no longer changes runtime behavior.
-    _env_bool("OPENQQWAIFU_QQ_SIDECAR_DRY_RUN", qq_sidecar.dry_run)
+    # Dry run captures replies instead of sending them (see _build_runtime_outbound).
+    qq_sidecar.dry_run = _env_bool("OPENQQWAIFU_QQ_SIDECAR_DRY_RUN", qq_sidecar.dry_run)
     return config
 
 

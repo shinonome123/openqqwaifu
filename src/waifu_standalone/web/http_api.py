@@ -9,13 +9,14 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from ..gateways.inbound_dedup import InboundDeduplicator
 from ..models import InboundEvent, MessageSegment
 from ..infra import MetricsRegistry, logging_is_configured
 from .auth import AuthManager
@@ -145,6 +146,8 @@ class HttpApi:
     service: Any
     auth: AuthManager | None = None
     metrics: MetricsRegistry | None = None
+    # Shared by the HTTP callback and reverse-WS paths, which both end in handle_json[_async].
+    dedup: InboundDeduplicator = field(default_factory=InboundDeduplicator)
 
     def __post_init__(self) -> None:
         if self.auth is None:
@@ -184,9 +187,14 @@ class HttpApi:
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 
             event = parse_onebot_event(payload)
+            claim = self.dedup.claim(event, event_time=payload.get("time"))
+            if claim is None:
+                outcome = "duplicate"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
             try:
                 message = self.service.handle_event(event)
             except Exception as exc:
+                self.dedup.release(claim)
                 outcome = "delivery_failed"
                 if logging_is_configured():
                     _LOGGER.exception(
@@ -243,6 +251,10 @@ class HttpApi:
                 return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "unsupported post_type"}
 
             event = parse_onebot_event(payload)
+            claim = self.dedup.claim(event, event_time=payload.get("time"))
+            if claim is None:
+                outcome = "duplicate"
+                return HTTPStatus.ACCEPTED, {"status": "ignored", "reason": "duplicate message"}
             try:
                 handle_event_async = getattr(self.service, "handle_event_async", None)
                 if callable(handle_event_async):
@@ -250,6 +262,7 @@ class HttpApi:
                 else:
                     message = await asyncio.to_thread(self.service.handle_event, event)
             except Exception as exc:
+                self.dedup.release(claim)
                 outcome = "delivery_failed"
                 if logging_is_configured():
                     _LOGGER.exception(
@@ -419,6 +432,9 @@ class HttpApi:
 
     def save_character_panel(self, payload: dict[str, Any]) -> dict[str, Any]:
         return dict(self.service.save_character_panel(payload))
+
+    def reset_character_sessions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return dict(self.service.reset_character_sessions(payload))
 
     def get_character_portrait(self, character: str) -> tuple[bytes, str] | None:
         return self.service.get_character_portrait(character)
@@ -665,6 +681,7 @@ def make_handler(api: HttpApi):
                 "/api/sidecar/test": self._post_test_sidecar,
                 "/api/panels/character": self._post_character_panel,
                 "/api/character/preview": self._post_character_preview,
+                "/api/character/reset-sessions": self._post_character_reset_sessions,
                 "/api/panels/ai": self._post_ai_panel,
                 "/api/panels/abilities": self._post_abilities_panel,
                 "/api/proactive/draft": self._post_proactive_draft,
@@ -1169,6 +1186,15 @@ def make_handler(api: HttpApi):
                 return
             try:
                 self._write_json(HTTPStatus.OK, api.preview_character_panel(payload))
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
+
+        def _post_character_reset_sessions(self, parsed) -> None:
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                self._write_json(HTTPStatus.OK, api.reset_character_sessions(payload))
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"status": "bad_request", "reason": str(exc)})
 

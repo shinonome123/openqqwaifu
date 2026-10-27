@@ -142,8 +142,11 @@ def _build_runtime_outbound(
             access_token=app_config.qq_sidecar.reverse_ws_access_token or app_config.qq_sidecar.access_token,
             send_timeout_seconds=app_config.qq_sidecar.reverse_ws_send_timeout_seconds,
         )
+        if app_config.qq_sidecar.dry_run:
+            # NapCat still connects for inbound events; replies are only captured.
+            return CapturingOutboundPort(), gateway
         return OneBotWsOutboundPort(gateway), gateway
-    if not app_config.qq_sidecar.outbound_base_url:
+    if app_config.qq_sidecar.dry_run or not app_config.qq_sidecar.outbound_base_url:
         return CapturingOutboundPort(), None
     client = OneBotActionClient(
         base_url=app_config.qq_sidecar.outbound_base_url,
