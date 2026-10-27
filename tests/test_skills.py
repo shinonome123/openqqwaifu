@@ -1213,7 +1213,7 @@ Use summarize for URLs.
         self.assertIsNone(extract("drawing is fun"))
         self.assertEqual(extract("生图一只猫"), "一只猫")
 
-    def test_base_tools_are_exposed_whatever_the_keyword_ranking(self) -> None:
+    def test_tools_follow_the_message_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, _ = build_default_service(AppConfig(data_root=tmpdir, max_active_skills=1))
             event = InboundEvent(
@@ -1232,6 +1232,21 @@ Use summarize for URLs.
                 assistant_name="极光",
             )
 
+            names = {str(item["name"]) for item in service.tools.model_schemas(context)}
+            # "带伞" points at the weather; nothing in the message asks for a search or a link.
+            self.assertIn("weather-command", names)
+            self.assertNotIn("search-command", names)
+            self.assertNotIn("summarize-command", names)
+            chat = service.tool_orchestrator.exposure_context(
+                event, session, latest_message="给我讲个故事吧", address="tester", assistant_name="极光"
+            )
+            self.assertEqual(service.tools.model_schemas(chat), [])
+            # With tools_on_demand off, the fixed base set is always offered again.
+            service.config.tool_policy.authorized_user_ids = []
+            service.config.tools_on_demand = False
+            context = service.tool_orchestrator.exposure_context(
+                event, session, latest_message="出门要带伞吗", address="tester", assistant_name="极光"
+            )
             names = {str(item["name"]) for item in service.tools.model_schemas(context)}
             self.assertLessEqual({"weather-command", "search-command", "summarize-command"}, names)
             # Prompt skill cards are still limited to the ranked candidates.
@@ -1626,7 +1641,7 @@ Read files with the read alias.
                 launcher_type="person",
                 sender_id="783190298",
                 sender_name="tester",
-                segments=[MessageSegment(kind="text", text="北京天气怎么样")],
+                segments=[MessageSegment(kind="text", text="帮我查一下北京天气怎么样")],
             )
         )
 

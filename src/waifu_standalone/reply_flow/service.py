@@ -10,19 +10,6 @@ from ..systems.searching import SearchContext
 if TYPE_CHECKING:
     from ..app import WaifuService
 
-_RECALLED_MEMORY_PREFIX = "相关记忆："
-
-
-def _restates_memory(highlight: str, memory_hints: list[str]) -> bool:
-    if not highlight.startswith(_RECALLED_MEMORY_PREFIX):
-        return False
-    # Graph highlights clip long summaries with a trailing "..."; compare the prefix.
-    body = highlight[len(_RECALLED_MEMORY_PREFIX):].rstrip(".…").strip()
-    if not body:
-        return True
-    return any(hint.startswith(body) or body.startswith(hint) for hint in memory_hints if hint)
-
-
 class ReplyFlowService:
     def __init__(self, service: WaifuService) -> None:
         self.service = service
@@ -63,7 +50,14 @@ class ReplyFlowService:
             bot_account_id=svc.config.bot_account_id,
         )
         svc._clear_ambient_history(event, character_id=current_character)
-        assistant_name = svc._resolve_assistant_name(event, session, character_id=current_character)
+        # The bot is always the character on the card. What this person calls it (their
+        # alias for it) goes into a speaker note; it must not replace the bot's own name.
+        assistant_alias = svc._assistant_alias_for_user(event.sender_id, character_id=current_character)
+        assistant_name = (
+            svc.generator.resolve_assistant_name(event.launcher_type, session)
+            or assistant_alias
+            or svc.config.assistant_name
+        )
         session = await svc.persona.asanitize_session_state(session, assistant_name=assistant_name)
         await svc.persona.asanitize_member_state(
             group_id=event.launcher_id if event.launcher_type == "group" else "",
@@ -71,14 +65,7 @@ class ReplyFlowService:
             character_id=current_character,
         )
         address = await svc._resolve_address_async(event, session)
-        # In a group each member may call the bot by their own alias. Label the bot's
-        # history lines with the card name so the label stays the same whoever speaks;
-        # the current speaker's alias is passed as a speaker note instead.
         dialogue_assistant_name = assistant_name
-        if event.launcher_type == "group":
-            dialogue_assistant_name = (
-                svc.generator.resolve_assistant_name(event.launcher_type, session) or assistant_name
-            )
         inbound_behavior = svc.event_engine.capture_inbound(
             event,
             text=latest_message,
@@ -134,6 +121,15 @@ class ReplyFlowService:
             exclude_last=True,
             character_id=current_character,
         )
+        # The same window as chat turns, sent as user/assistant messages.
+        history_turns = await svc.memory.adialogue_turns(
+            event.launcher_id,
+            event.launcher_type,
+            limit=svc.config.history_window_messages,
+            max_chars=svc.config.history_window_chars,
+            exclude_last=True,
+            character_id=current_character,
+        )
         recalled_memory_hints = await asyncio.to_thread(
             svc.knowledge_repository.recall_knowledge,
             scopes=svc.knowledge._knowledge_scopes(event),
@@ -147,27 +143,12 @@ class ReplyFlowService:
             [str(item.get("summary", "") or "").strip() for item in knowledge_entries],
             limit=svc.config.memory_recall_limit,
         )
-        member_record = await svc.knowledge._amember_record(event)
-        behavior_context = svc._behavior_context(event)
-        graph_snapshot = svc.memory_graph.build(
-            event=event,
-            session=session,
-            member=member_record,
-            knowledge_entries=knowledge_entries,
-            behavior_events=behavior_context,
-        )
         speaker_notes = await svc.knowledge._adirectory_member_notes(event)
-        if dialogue_assistant_name != assistant_name:
+        if assistant_alias and assistant_alias != assistant_name:
             speaker_notes.insert(
                 0,
-                f"{address}叫你「{assistant_name}」；对话记录里「{dialogue_assistant_name}」的发言就是你说的。",
+                f"{address}管你叫「{assistant_alias}」，这是对方给你起的称呼；你本人仍是{assistant_name}。",
             )
-        for highlight in graph_snapshot.get("highlights", [])[:3] if isinstance(graph_snapshot, dict) else []:
-            text_hint = str(highlight or "").strip()
-            # The graph re-lists recalled memories as "相关记忆：…"; skip those already
-            # in [Memories] so the same fact is not repeated three times in the prompt.
-            if text_hint and not _restates_memory(text_hint, memory_hints):
-                speaker_notes.append(text_hint)
         analysis_hint = await svc.thoughts.aanalyze(
             event,
             session,
@@ -188,6 +169,7 @@ class ReplyFlowService:
             search_hint=search_context.summary,
             search_context=search_context.to_prompt_block(),
             conversation_view=conversation_view,
+            history_turns=history_turns,
             memory_hints=memory_hints,
             speaker_notes=speaker_notes,
             analysis_hint=analysis_hint,

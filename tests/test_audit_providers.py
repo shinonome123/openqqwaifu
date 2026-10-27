@@ -13,7 +13,7 @@ if str(ROOT / "src") not in sys.path:
 
 from waifu_standalone.config import AppConfig
 from waifu_standalone.infra.llm_clients import LLMClientError, LLMToolCall, LLMToolResponse
-from waifu_standalone.models import InboundEvent, MessageSegment, OutboundMessage, SessionMemory
+from waifu_standalone.models import EmotionState, InboundEvent, MessageSegment, OutboundMessage, SessionMemory
 from waifu_standalone.reply_flow.prompt_assembler import Generator
 from waifu_standalone.runtime.container import _build_runtime_outbound
 from waifu_standalone.services import CapturingOutboundPort
@@ -80,11 +80,10 @@ class ProviderAuditTests(unittest.IsolatedAsyncioTestCase):
         return generator
 
     async def reply(self, generator, asynchronous):
-        args = dict(event=self.event, session=self.session, assistant_name="Bot", address="Audit",
-                    active_skills=[], tool_context=None, user="audit")
+        args = dict(assistant_name="Bot", address_override="Audit", tool_context=None, allow_fallback=False)
         if asynchronous:
-            return await generator._agenerate_model_reply_message("USER_PROMPT", **args)
-        return generator._generate_model_reply_message("USER_PROMPT", **args)
+            return await generator.agenerate_reply_message(self.event, self.session, EmotionState(), **args)
+        return generator.generate_reply_message(self.event, self.session, EmotionState(), **args)
 
     async def test_tool_limit_synthesizes_with_all_results_and_tools_disabled(self):
         for asynchronous in (False, True):
@@ -159,13 +158,15 @@ class ProviderAuditTests(unittest.IsolatedAsyncioTestCase):
                 generator = self.generator(client)
                 self.config.multimodal_enabled = False
                 await self.reply(generator, asynchronous)
-                self.assertEqual(client.requests, [])
-                self.assertEqual(client.plain_calls, 1)
+                # With multimodal off the message goes out as text only.
+                self.assertIsInstance(client.requests[-1][0][-1]["content"], str)
+                sent = len(client.requests)
                 self.config.multimodal_enabled = True
                 client.supports_images = False
                 result = await self.reply(generator, asynchronous)
                 self.assertIn("不支持图片", result.text)
-                self.assertEqual(client.plain_calls, 1)
+                self.assertEqual(len(client.requests), sent)
+                self.assertEqual(client.plain_calls, 0)
 
     async def test_image_processing_failure_never_retries_as_text_only(self):
         self.event.segments.append(MessageSegment("image", image_url="https://example.invalid/photo.png"))

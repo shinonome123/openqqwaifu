@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from difflib import SequenceMatcher
 import re
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -25,6 +26,58 @@ _TOOL_CALLING_SYSTEM_PROMPT = (
     "凡是涉及保存、修改、记住称呼、用户称呼、机器人别名、偏好或长期状态的请求，"
     "必须先调用对应工具；工具未调用成功前，不得说“我记住了”“以后就叫我”“以后我叫你”或类似承诺。"
 )
+# Characters ignored when comparing a reply with the bot's earlier messages.
+_REPEAT_IGNORED_CHARS = set(" \t\r\n，。！？、；：,.!?;:…~～—-“”\"'‘’（）()「」《》")
+# How many of the bot's latest messages a new reply is compared with.
+_REPEAT_LOOKBACK = 6
+
+
+def _squash(text: str) -> str:
+    return "".join(char for char in str(text or "") if char not in _REPEAT_IGNORED_CHARS)
+
+
+def _drop_habitual_ellipsis(reply: str, previous: list[str]) -> str:
+    """Remove a leading "……" when the last three replies all opened with it as well."""
+    text = str(reply or "").strip()
+    recent = [str(item).strip() for item in previous[-3:]]
+    if text.startswith("…") and len(recent) == 3 and all(item.startswith("…") for item in recent):
+        return text.lstrip("…").lstrip("，, ") or text
+    return text
+
+
+def _repetition_evidence(reply: str, previous: list[str]) -> list[str]:
+    """What a reply copies from the bot's earlier messages; empty when it is fresh.
+
+    Catches a reply that is nearly the same as an earlier one, one that reuses a long
+    phrase (10+ characters), and the same two-character opening ("……", "哼，") used by
+    the last three replies as well.
+    """
+    reply_text = str(reply or "").strip()
+    squashed = _squash(reply_text)
+    evidence: list[str] = []
+    if len(squashed) >= 6:
+        for earlier in previous:
+            earlier_squashed = _squash(earlier)
+            if not earlier_squashed:
+                continue
+            matcher = SequenceMatcher(None, squashed, earlier_squashed, autojunk=False)
+            if matcher.ratio() >= 0.8:
+                evidence.append(str(earlier).strip()[:30])
+                continue
+            match = matcher.find_longest_match(0, len(squashed), 0, len(earlier_squashed))
+            if match.size >= 10:
+                evidence.append(squashed[match.a : match.a + match.size])
+    opening = reply_text[:2]
+    recent_openings = [str(item).strip()[:2] for item in previous[-3:]]
+    if opening and len(recent_openings) == 3 and all(item == opening for item in recent_openings):
+        evidence.append(f"每句都用「{opening}」开头")
+    unique: list[str] = []
+    for item in evidence:
+        if item and item not in unique:
+            unique.append(item)
+    return unique
+
+
 # The reply window can hold ~30 lines of group chatter; extraction only needs the
 # lines right before the latest message, so facts are not pinned on the wrong speaker.
 _KNOWLEDGE_CONTEXT_LINES = 8
@@ -223,6 +276,7 @@ class Generator:
         search_hint: str = "",
         search_context: str = "",
         conversation_view: str = "",
+        history_turns: list[tuple[str, str]] | None = None,
         memory_hints: list[str] | None = None,
         speaker_notes: list[str] | None = None,
         analysis_hint: str = "",
@@ -240,33 +294,48 @@ class Generator:
         active_skills = active_skills or []
 
         if self.llm_ready:
-            prompt = self._build_chat_query(
-                event,
-                session,
-                emotion,
-                card=card,
-                assistant_name=resolved_assistant_name,
-                address=address,
-                search_hint=search_hint,
-                search_context=search_context,
-                conversation_view=conversation_view,
-                memory_hints=memory_hints,
-                speaker_notes=speaker_notes,
-                analysis_hint=analysis_hint,
-                latest_message=latest_message,
-                active_skills=active_skills,
-            )
             try:
-                reply = self._generate_model_reply_message(
-                    prompt,
-                    event=event,
-                    session=session,
-                    assistant_name=resolved_assistant_name,
-                    address=address,
-                    active_skills=active_skills,
-                    tool_context=tool_context,
-                    user=self._llm_user_key(event, session, purpose="chat"),
-                )
+                if self._chat_messages_ready():
+                    reply = self._generate_chat_reply(
+                        event,
+                        session,
+                        emotion,
+                        card=card,
+                        assistant_name=resolved_assistant_name,
+                        address=address,
+                        search_hint=search_hint,
+                        search_context=search_context,
+                        history_turns=history_turns,
+                        memory_hints=memory_hints,
+                        speaker_notes=speaker_notes,
+                        analysis_hint=analysis_hint,
+                        latest_message=latest_message,
+                        active_skills=active_skills,
+                        tool_context=tool_context,
+                        user=self._llm_user_key(event, session, purpose="chat"),
+                    )
+                else:
+                    prompt = self._build_chat_query(
+                        event,
+                        session,
+                        emotion,
+                        card=card,
+                        assistant_name=resolved_assistant_name,
+                        address=address,
+                        search_hint=search_hint,
+                        search_context=search_context,
+                        conversation_view=conversation_view,
+                        memory_hints=memory_hints,
+                        speaker_notes=speaker_notes,
+                        analysis_hint=analysis_hint,
+                        latest_message=latest_message,
+                        active_skills=active_skills,
+                    )
+                    reply = self._generate_model_reply_message(
+                        prompt,
+                        event=event,
+                        user=self._llm_user_key(event, session, purpose="chat"),
+                    )
                 if reply.text.strip() or reply.images:
                     return reply
             except LLMClientError:
@@ -299,6 +368,7 @@ class Generator:
         search_hint: str = "",
         search_context: str = "",
         conversation_view: str = "",
+        history_turns: list[tuple[str, str]] | None = None,
         memory_hints: list[str] | None = None,
         speaker_notes: list[str] | None = None,
         analysis_hint: str = "",
@@ -339,33 +409,48 @@ class Generator:
         active_skills = active_skills or []
 
         if self.llm_ready:
-            prompt = self._build_chat_query(
-                event,
-                session,
-                emotion,
-                card=card,
-                assistant_name=resolved_assistant_name,
-                address=address,
-                search_hint=search_hint,
-                search_context=search_context,
-                conversation_view=conversation_view,
-                memory_hints=memory_hints,
-                speaker_notes=speaker_notes,
-                analysis_hint=analysis_hint,
-                latest_message=latest_message,
-                active_skills=active_skills,
-            )
             try:
-                reply = await self._agenerate_model_reply_message(
-                    prompt,
-                    event=event,
-                    session=session,
-                    assistant_name=resolved_assistant_name,
-                    address=address,
-                    active_skills=active_skills,
-                    tool_context=tool_context,
-                    user=self._llm_user_key(event, session, purpose="chat"),
-                )
+                if self._chat_messages_ready():
+                    reply = await self._agenerate_chat_reply(
+                        event,
+                        session,
+                        emotion,
+                        card=card,
+                        assistant_name=resolved_assistant_name,
+                        address=address,
+                        search_hint=search_hint,
+                        search_context=search_context,
+                        history_turns=history_turns,
+                        memory_hints=memory_hints,
+                        speaker_notes=speaker_notes,
+                        analysis_hint=analysis_hint,
+                        latest_message=latest_message,
+                        active_skills=active_skills,
+                        tool_context=tool_context,
+                        user=self._llm_user_key(event, session, purpose="chat"),
+                    )
+                else:
+                    prompt = self._build_chat_query(
+                        event,
+                        session,
+                        emotion,
+                        card=card,
+                        assistant_name=resolved_assistant_name,
+                        address=address,
+                        search_hint=search_hint,
+                        search_context=search_context,
+                        conversation_view=conversation_view,
+                        memory_hints=memory_hints,
+                        speaker_notes=speaker_notes,
+                        analysis_hint=analysis_hint,
+                        latest_message=latest_message,
+                        active_skills=active_skills,
+                    )
+                    reply = await self._agenerate_model_reply_message(
+                        prompt,
+                        event=event,
+                        user=self._llm_user_key(event, session, purpose="chat"),
+                    )
                 if reply.text.strip() or reply.images:
                     return reply
             except LLMClientError:
@@ -407,18 +492,210 @@ class Generator:
             and self._tools.model_schemas(tool_context)
         )
 
-    def _reply_messages(self, prompt: str, event: InboundEvent) -> list[dict[str, object]]:
-        content: str | list[dict[str, object]] = prompt
+    def _chat_messages_ready(self) -> bool:
+        """Whether the client takes role-tagged chat messages (and therefore tools)."""
+        return self.llm_ready and bool(getattr(self._llm_client, "supports_tool_calling", False))
+
+    def _build_chat_messages(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        emotion: EmotionState,
+        *,
+        card: CharacterCard,
+        address: str,
+        search_hint: str,
+        search_context: str,
+        history_turns: list[tuple[str, str]],
+        memory_hints: list[str],
+        speaker_notes: list[str],
+        analysis_hint: str,
+        latest_message: str,
+        active_skills: list[SkillSpec],
+        include_tool_rules: bool,
+    ) -> list[dict[str, object]]:
+        """Persona and context as the system message, the conversation as chat turns."""
+        extra_sections: list[str] = []
+        story_block = self._build_story_mode_block(
+            event,
+            card=card,
+            emotion=emotion,
+            address=address,
+            latest_message=latest_message,
+        )
+        if story_block:
+            extra_sections.append(story_block)
+        if analysis_hint:
+            extra_sections.append("[内心判断]\n" + analysis_hint)
+        if card.prologue and len(session.history) <= 1:
+            extra_sections.append(
+                "[开场语气，仅供参考，不要照抄]\n" + "\n".join(f"- {line}" for line in card.prologue)
+            )
+        if search_hint:
+            extra_sections.append(f"[联网提示]\n{search_hint}")
+        if search_context:
+            extra_sections.append(search_context)
+        skill_block = self._format_skill_block(active_skills)
+        if skill_block:
+            extra_sections.append(skill_block)
+        if include_tool_rules:
+            extra_sections.append("[工具]\n" + _TOOL_CALLING_SYSTEM_PROMPT)
+        system = card.system_message(
+            launcher_type=event.launcher_type,
+            address=address,
+            memories=memory_hints,
+            speaker_notes=speaker_notes,
+            current_time=self._prompt_time(),
+            earlier_summary=str(session.metadata.get(ROLLING_SUMMARY_KEY, "") or "").strip(),
+            extra_sections=extra_sections,
+        )
+        group = event.launcher_type == "group"
+        messages: list[dict[str, object]] = [{"role": "system", "content": system}]
+        for speaker, content in history_turns:
+            if not str(content or "").strip():
+                continue
+            if speaker == "assistant":
+                role, text = "assistant", content
+            else:
+                role, text = "user", (f"{speaker}：{content}" if group else content)
+            if len(messages) > 1 and messages[-1]["role"] == role:
+                messages[-1]["content"] = f"{messages[-1]['content']}\n{text}"
+            else:
+                messages.append({"role": role, "content": text})
+        # Start with the other side: some providers reject a leading assistant turn.
+        while len(messages) > 1 and messages[1]["role"] == "assistant":
+            messages.pop(1)
+
+        latest_text = latest_message or "（对方发来一条消息）"
+        if group:
+            latest_text = f"{event.sender_name or event.sender_id}：{latest_text}"
+        if len(messages) > 1 and messages[-1]["role"] == "user":
+            # Earlier lines from the same side (group chatter) join the current message.
+            latest_text = f"{messages.pop()['content']}\n{latest_text}"
+        content: str | list[dict[str, object]] = latest_text
         if self.config.multimodal_enabled and event.image_count:
-            content = [{"type": "text", "text": prompt}]
+            parts: list[dict[str, object]] = [{"type": "text", "text": latest_text}]
             for payload in event.image_payloads():
-                content.append({"type": "image_url", "image_url": {"url": normalize_image_reference(payload)}})
-            if len(content) == 1:
+                parts.append({"type": "image_url", "image_url": {"url": normalize_image_reference(payload)}})
+            if len(parts) == 1:
                 raise LLMClientError("message contains no readable image reference")
-        return [
-            {"role": "system", "content": _TOOL_CALLING_SYSTEM_PROMPT},
-            {"role": "user", "content": content},
-        ]
+            content = parts
+        messages.append({"role": "user", "content": content})
+        return messages
+
+    def _generate_chat_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        emotion: EmotionState,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+        search_hint: str,
+        search_context: str,
+        history_turns: list[tuple[str, str]] | None,
+        memory_hints: list[str],
+        speaker_notes: list[str],
+        analysis_hint: str,
+        latest_message: str,
+        active_skills: list[SkillSpec],
+        tool_context: ToolExposureContext | None,
+        user: str,
+    ) -> GeneratedReply:
+        has_images = self.config.multimodal_enabled and event.image_count > 0
+        if has_images and not getattr(self._llm_client, "supports_images", False):
+            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
+        tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
+        messages = self._build_chat_messages(
+            event,
+            session,
+            emotion,
+            card=card,
+            address=address,
+            search_hint=search_hint,
+            search_context=search_context,
+            history_turns=list(history_turns or []),
+            memory_hints=memory_hints,
+            speaker_notes=speaker_notes,
+            analysis_hint=analysis_hint,
+            latest_message=latest_message,
+            active_skills=active_skills,
+            include_tool_rules=bool(tools),
+        )
+        try:
+            return self._invoke_reply_with_tools(
+                messages,
+                tools=tools,
+                event=event,
+                session=session,
+                assistant_name=assistant_name,
+                address=address,
+                active_skills=active_skills,
+                tool_context=tool_context,
+                user=user,
+            )
+        except LLMClientError:
+            if has_images:
+                return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
+            raise
+
+    async def _agenerate_chat_reply(
+        self,
+        event: InboundEvent,
+        session: SessionMemory,
+        emotion: EmotionState,
+        *,
+        card: CharacterCard,
+        assistant_name: str,
+        address: str,
+        search_hint: str,
+        search_context: str,
+        history_turns: list[tuple[str, str]] | None,
+        memory_hints: list[str],
+        speaker_notes: list[str],
+        analysis_hint: str,
+        latest_message: str,
+        active_skills: list[SkillSpec],
+        tool_context: ToolExposureContext | None,
+        user: str,
+    ) -> GeneratedReply:
+        has_images = self.config.multimodal_enabled and event.image_count > 0
+        if has_images and not getattr(self._llm_client, "supports_images", False):
+            return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
+        tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
+        messages = self._build_chat_messages(
+            event,
+            session,
+            emotion,
+            card=card,
+            address=address,
+            search_hint=search_hint,
+            search_context=search_context,
+            history_turns=list(history_turns or []),
+            memory_hints=memory_hints,
+            speaker_notes=speaker_notes,
+            analysis_hint=analysis_hint,
+            latest_message=latest_message,
+            active_skills=active_skills,
+            include_tool_rules=bool(tools),
+        )
+        try:
+            return await self._ainvoke_reply_with_tools(
+                messages,
+                tools=tools,
+                event=event,
+                session=session,
+                assistant_name=assistant_name,
+                address=address,
+                active_skills=active_skills,
+                tool_context=tool_context,
+                user=user,
+            )
+        except LLMClientError:
+            if has_images:
+                return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
+            raise
 
     def _failed_tool_reply(self, results: list[ToolExecutionResult], images: list[str]) -> GeneratedReply:
         return GeneratedReply(
@@ -426,82 +703,74 @@ class Generator:
             images=images,
         )
 
-    def _generate_model_reply_message(
-        self,
-        prompt: str,
-        *,
-        event: InboundEvent,
-        session: SessionMemory,
-        assistant_name: str,
-        address: str,
-        active_skills: list[SkillSpec],
-        tool_context: ToolExposureContext | None,
-        user: str,
-    ) -> GeneratedReply:
-        has_images = self.config.multimodal_enabled and event.image_count > 0
-        if has_images and not getattr(self._llm_client, "supports_images", False):
+    def _generate_model_reply_message(self, prompt: str, *, event: InboundEvent, user: str) -> GeneratedReply:
+        """Single text prompt, for clients without chat roles (Dify)."""
+        if self.config.multimodal_enabled and event.image_count > 0:
             return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
-        if self._tool_calling_ready(tool_context) or has_images:
-            try:
-                reply = self._invoke_reply_with_tools(
-                    prompt,
-                    event=event,
-                    session=session,
-                    assistant_name=assistant_name,
-                    address=address,
-                    active_skills=active_skills,
-                    tool_context=tool_context,
-                    user=user,
-                )
-                if reply.text.strip() or reply.images:
-                    return reply
-            except LLMClientError:
-                if has_images:
-                    return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
         response = self._dify_client.invoke(prompt, user=user)
-        cleaned = self._clean_response(response)
-        return GeneratedReply(text=cleaned)
+        return GeneratedReply(text=self._clean_response(response))
 
-    async def _agenerate_model_reply_message(
-        self,
-        prompt: str,
-        *,
-        event: InboundEvent,
-        session: SessionMemory,
-        assistant_name: str,
-        address: str,
-        active_skills: list[SkillSpec],
-        tool_context: ToolExposureContext | None,
-        user: str,
-    ) -> GeneratedReply:
-        has_images = self.config.multimodal_enabled and event.image_count > 0
-        if has_images and not getattr(self._llm_client, "supports_images", False):
+    async def _agenerate_model_reply_message(self, prompt: str, *, event: InboundEvent, user: str) -> GeneratedReply:
+        if self.config.multimodal_enabled and event.image_count > 0:
             return GeneratedReply(text="当前模型后端不支持图片理解，请切换到支持图片的模型后重试。")
-        if self._tool_calling_ready(tool_context) or has_images:
-            try:
-                reply = await self._ainvoke_reply_with_tools(
-                    prompt,
-                    event=event,
-                    session=session,
-                    assistant_name=assistant_name,
-                    address=address,
-                    active_skills=active_skills,
-                    tool_context=tool_context,
-                    user=user,
-                )
-                if reply.text.strip() or reply.images:
-                    return reply
-            except LLMClientError:
-                if has_images:
-                    return GeneratedReply(text="图片处理失败，暂时无法读取这张图片，请稍后重试。")
         response = await self._ainvoke_client(prompt, user=user)
-        cleaned = self._clean_response(response)
-        return GeneratedReply(text=cleaned)
+        return GeneratedReply(text=self._clean_response(response))
+
+    @staticmethod
+    def _recent_assistant_texts(messages: list[dict[str, object]]) -> list[str]:
+        texts = [
+            str(message.get("content", "") or "")
+            for message in messages
+            if message.get("role") == "assistant" and isinstance(message.get("content"), str)
+        ]
+        return [text for text in texts if text.strip()][-_REPEAT_LOOKBACK:]
+
+    @staticmethod
+    def _messages_against_repetition(messages: list[dict[str, object]], evidence: list[str]) -> list[dict[str, object]]:
+        quoted = "、".join(f"「{item}」" for item in evidence[:3])
+        system = dict(messages[0])
+        system["content"] = (
+            f"{system.get('content', '')}\n\n[别重复]\n你刚写的回复和你之前说过的话太像了：{quoted}。"
+            "这次换个说法，也换个开头；意思可以不变。"
+        )
+        return [system, *messages[1:]]
+
+    def _avoid_repetition(self, text: str, messages: list[dict[str, object]], *, user: str) -> str:
+        """Ask once more when a direct reply copies the bot's earlier messages."""
+        previous = self._recent_assistant_texts(messages)
+        evidence = _repetition_evidence(text, previous)
+        if not evidence:
+            return text
+        try:
+            response = self._llm_client.invoke_with_tools(
+                self._messages_against_repetition(messages, evidence), tools=[], user=user
+            )
+        except LLMClientError:
+            return _drop_habitual_ellipsis(text, previous)
+        retried = self._clean_response(response.text)
+        # A long run of "……" openings in the history outweighs the request to change it.
+        return _drop_habitual_ellipsis(retried if retried and not response.tool_calls else text, previous)
+
+    async def _aavoid_repetition(self, text: str, messages: list[dict[str, object]], *, user: str) -> str:
+        previous = self._recent_assistant_texts(messages)
+        evidence = _repetition_evidence(text, previous)
+        if not evidence:
+            return text
+        try:
+            response = await self._llm_client.ainvoke_with_tools(
+                self._messages_against_repetition(messages, evidence), tools=[], user=user
+            )
+        except LLMClientError:
+            return _drop_habitual_ellipsis(text, previous)
+        retried = self._clean_response(response.text)
+        # A long run of "……" openings in the history outweighs the request to change it.
+        return _drop_habitual_ellipsis(retried if retried and not response.tool_calls else text, previous)
 
     def _invoke_reply_with_tools(
         self,
-        prompt: str,
+        messages: list[dict[str, object]],
         *,
+        tools: list[dict[str, object]],
         event: InboundEvent,
         session: SessionMemory,
         assistant_name: str,
@@ -510,11 +779,10 @@ class Generator:
         tool_context: ToolExposureContext | None,
         user: str,
     ) -> GeneratedReply:
-        tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
         allowed_tools = {str(tool.get("name", "")) for tool in tools}
         # The model can call any exposed skill, not only the ranked prompt cards.
         invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
-        messages = self._reply_messages(prompt, event)
+        messages = list(messages)
         images: list[str] = []
         raw_block_results: list[ToolExecutionResult] = []
         all_results: list[ToolExecutionResult] = []
@@ -527,16 +795,19 @@ class Generator:
                     raise
                 self._record_tool_turns(session, tool_turns)
                 return self._failed_tool_reply(all_results, images)
-            if response.assistant_message:
-                messages.append(response.assistant_message)
             if not response.tool_calls:
                 self._record_tool_turns(session, tool_turns)
                 if not response.text.strip() and all_results:
                     return self._failed_tool_reply(all_results, images)
-                text = self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results)
+                text = self._clean_response(response.text)
+                if text and not all_results:
+                    text = self._avoid_repetition(text, messages, user=user)
+                text = self._append_raw_tool_blocks(text, raw_block_results)
                 if not text and self.config.multimodal_enabled and event.image_count:
                     raise LLMClientError("image model returned no content")
                 return GeneratedReply(text=text, images=images)
+            if response.assistant_message:
+                messages.append(response.assistant_message)
             for tool_call in response.tool_calls:
                 invocation = ToolInvocation(
                     tool_id=tool_call.tool_name,
@@ -583,8 +854,9 @@ class Generator:
 
     async def _ainvoke_reply_with_tools(
         self,
-        prompt: str,
+        messages: list[dict[str, object]],
         *,
+        tools: list[dict[str, object]],
         event: InboundEvent,
         session: SessionMemory,
         assistant_name: str,
@@ -593,11 +865,10 @@ class Generator:
         tool_context: ToolExposureContext | None,
         user: str,
     ) -> GeneratedReply:
-        tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
         allowed_tools = {str(tool.get("name", "")) for tool in tools}
         # The model can call any exposed skill, not only the ranked prompt cards.
         invocation_skills = self._merge_skills(active_skills, tool_context.skill_manifests if tool_context else [])
-        messages = self._reply_messages(prompt, event)
+        messages = list(messages)
         images: list[str] = []
         raw_block_results: list[ToolExecutionResult] = []
         all_results: list[ToolExecutionResult] = []
@@ -610,16 +881,19 @@ class Generator:
                     raise
                 self._record_tool_turns(session, tool_turns)
                 return self._failed_tool_reply(all_results, images)
-            if response.assistant_message:
-                messages.append(response.assistant_message)
             if not response.tool_calls:
                 self._record_tool_turns(session, tool_turns)
                 if not response.text.strip() and all_results:
                     return self._failed_tool_reply(all_results, images)
-                text = self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results)
+                text = self._clean_response(response.text)
+                if text and not all_results:
+                    text = await self._aavoid_repetition(text, messages, user=user)
+                text = self._append_raw_tool_blocks(text, raw_block_results)
                 if not text and self.config.multimodal_enabled and event.image_count:
                     raise LLMClientError("image model returned no content")
                 return GeneratedReply(text=text, images=images)
+            if response.assistant_message:
+                messages.append(response.assistant_message)
             for tool_call in response.tool_calls:
                 invocation = ToolInvocation(
                     tool_id=tool_call.tool_name,
@@ -1840,9 +2114,9 @@ class Generator:
         address: str,
         max_entries: int,
     ) -> str:
-        card = self._cards.load(event.launcher_type, session)
+        speaker = str(event.sender_name or address or event.sender_id).strip()
         lines = [
-            f"You extract durable long-term memory for {assistant_name}.",
+            f"You extract durable long-term memory about the people {assistant_name} talks to.",
             "Return JSON only.",
             (
                 'Use this schema: {"entries":[{"memory_type":"fact|preference|relationship|event",'
@@ -1855,16 +2129,21 @@ class Generator:
             "Do not store preferred-name requests or the fact that the assistant asked for onboarding.",
             "The summary must be concise and self-contained.",
             (
+                f"Lines from {assistant_name} are context only: never store {assistant_name}'s personality, "
+                f"way of talking or anything {assistant_name} said as a fact about the speaker."
+            ),
+            (
+                f"profile_summary describes only the speaker, {speaker}, in one short clause, from what they "
+                f"revealed about themselves; leave it empty otherwise. Never describe {assistant_name}."
+            ),
+            (
                 f"Today is {local_now(self.config.timezone):%Y-%m-%d (%A)}. Write dates in summaries as "
                 "absolute dates (YYYY-MM-DD); never keep relative words such as 今天, 明天, 下周三."
             ),
-            f"Speaker display name: {address or event.sender_name or event.sender_id}",
+            f"Speaker: {speaker} (QQ {event.sender_id})",
             f"Launcher type: {event.launcher_type}",
             f"Latest message: {latest_message}",
         ]
-        profile_lines = [line for line in card.profile[:3] if str(line or "").strip()]
-        if profile_lines:
-            lines.append("Persona profile: " + " | ".join(profile_lines))
         recent_lines = conversation_view.splitlines()[-_KNOWLEDGE_CONTEXT_LINES:] if conversation_view else []
         if recent_lines:
             lines.append("[Recent conversation]\n" + "\n".join(recent_lines))
@@ -2638,6 +2917,8 @@ class Generator:
     def _clean_response(text: str) -> str:
         # Keep the model's line breaks (lists, code blocks); only tidy spaces and blank lines.
         normalized = str(text or "").replace("<think>", "").replace("</think>", "")
+        # Special tokens some providers leak into the text, such as "<|eos|>".
+        normalized = re.sub(r"<\|[A-Za-z_]{1,20}\|>", "", normalized)
         normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
         normalized = re.sub(r"(?<=\S)[ \t]+", " ", normalized)
         normalized = re.sub(r"[ \t]+\n", "\n", normalized)

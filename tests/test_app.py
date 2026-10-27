@@ -1152,7 +1152,7 @@ class WaifuServiceTests(unittest.TestCase):
 
             self.assertEqual(snapshot["assistant_name"], service.cards.load("group", service.memory.load("612475113", "group", character_id="default")).assistant_name)
             self.assertEqual(snapshot["character"], "default")
-            self.assertEqual(snapshot["thinking_mode"], True)
+            self.assertEqual(snapshot["thinking_mode"], False)
             self.assertEqual(snapshot["summarization_mode"], False)
             self.assertEqual(snapshot["session_count"], 1)
             self.assertEqual(snapshot["recent_outbound_count"], 1)
@@ -2509,7 +2509,7 @@ class WaifuServiceTests(unittest.TestCase):
             self.assertEqual(sum(1 for line in session.history if "第四句" in line), 1)
             self.assertFalse(any("@999" in line or "@极光" in line for line in session.history))
 
-    def test_group_dialogue_labels_bot_with_card_name_and_passes_alias_as_note(self) -> None:
+    def test_alias_is_a_speaker_note_not_the_bots_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service, _ = build_default_service(
                 AppConfig(data_root=tmpdir, bot_account_id="999", group_reply_requires_mention=True)
@@ -2550,10 +2550,10 @@ class WaifuServiceTests(unittest.TestCase):
             view = str(captured["conversation_view"])
             self.assertIn(f"{card_name}: 早呀", view)
             self.assertNotIn("阿璃: 早呀", view)
-            # The speaker's alias still drives the persona; it is explained in Speaker Notes.
-            self.assertEqual(captured["assistant_name"], "阿璃")
+            # The bot stays the card's character; the alias is what this speaker calls it.
+            self.assertEqual(captured["assistant_name"], card_name)
             notes = [str(note) for note in captured["speaker_notes"]]  # type: ignore[union-attr]
-            self.assertTrue(any("「阿璃」" in note and f"「{card_name}」" in note for note in notes))
+            self.assertTrue(any("「阿璃」" in note and card_name in note for note in notes))
 
     def test_history_window_char_budget_drops_oldest_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

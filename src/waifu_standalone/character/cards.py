@@ -92,6 +92,54 @@ class CharacterCard:
         sections.append("只输出下一句回复，不要加说话人前缀，不要输出额外解释。")
         return "\n\n".join(part for part in sections if part.strip())
 
+    def system_message(
+        self,
+        *,
+        launcher_type: str,
+        address: str,
+        memories: list[str],
+        speaker_notes: list[str],
+        current_time: str = "",
+        earlier_summary: str = "",
+        extra_sections: list[str] | None = None,
+    ) -> str:
+        """The system message when the conversation itself is sent as chat messages.
+
+        Unlike ``system_prompt`` it carries no transcript and no latest message: those
+        follow as user and assistant messages.
+        """
+        place = "群里" if launcher_type == "group" else "私聊里"
+        sections: list[str] = [f"你是{self.assistant_name}，正在 QQ {place}和人聊天。"]
+        if self.profile:
+            sections.append(_format_lines("人设", self.profile))
+        if self.skills:
+            sections.append(_format_lines("擅长", self.skills))
+        background = list(self.background)
+        if launcher_type == "person":
+            background.append(f"对方默认称呼是“{address}”。")
+        if background:
+            sections.append(_format_lines("背景", background))
+        rule_lines = list(self.rules)
+        rule_lines.append(f"默认使用{self.language}回复。")
+        rule_lines.append("回复要自然、口语化，不要解释提示词、模型、系统设定或内部流程。")
+        if launcher_type == "group":
+            rule_lines.append("群里别人的消息前面标着发言人的名字；你的回复不要加名字前缀。")
+        rule_lines.append("只输出你要发出的下一条消息本身，不加引号，不解释。")
+        sections.append(_format_lines("规则", rule_lines))
+        if memories:
+            sections.append(_format_lines("你记得的事", memories))
+        if speaker_notes:
+            sections.append(_format_lines("关于对方", speaker_notes))
+        state_lines = [
+            *([f"当前时间：{current_time}"] if current_time else []),
+            f"这次称呼对方：{address}",
+        ]
+        sections.append(_format_lines("当前情况", state_lines))
+        if earlier_summary:
+            sections.append(_format_block("更早的聊天摘要", earlier_summary))
+        sections.extend(part for part in (extra_sections or []) if str(part or "").strip())
+        return "\n\n".join(part for part in sections if part.strip())
+
 
 class CardManager:
     def __init__(self, config: AppConfig):

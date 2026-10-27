@@ -111,10 +111,15 @@ class PersonaGuard:
         lowered = str(text or "").casefold()
         return any(name and name.casefold() in lowered for name in names)
 
-    def sanitize_profile_summary(self, summary: str) -> str:
+    def sanitize_profile_summary(self, summary: str, *, extra_names: set[str] | None = None) -> str:
+        """Drop fragments that talk about the bot rather than the member.
+
+        ``extra_names`` adds names the bot goes by that the cards do not know, such
+        as the alias this member gave it.
+        """
         fragments: list[str] = []
         seen: set[str] = set()
-        assistant_names: set[str] = set()
+        assistant_names: set[str] = {name for name in (extra_names or set()) if name}
         for names in self.known_aliases().values():
             assistant_names.update(names)
         for fragment in str(summary or "").split(";"):
@@ -246,9 +251,11 @@ class PersonaGuard:
             scope_id,
             character_id=current_character,
         )
+        alias = self._service._assistant_alias_for_user(event.sender_id, character_id=current_character)
+        bot_names = {alias} if alias else None
         merged_summary = self.merge_profile_summary(
-            self.sanitize_profile_summary(str(member.get("profile_summary", "") or "")),
-            self.sanitize_profile_summary(extra_summary),
+            self.sanitize_profile_summary(str(member.get("profile_summary", "") or ""), extra_names=bot_names),
+            self.sanitize_profile_summary(extra_summary, extra_names=bot_names),
         )
         self._service.member_repository.save_member(
             {
