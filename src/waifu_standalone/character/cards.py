@@ -233,6 +233,10 @@ class CardManager:
         self._save_active_state({"character": resolved, "updated_at": time.time()})
         return resolved
 
+    def character_meta(self, character: str) -> dict[str, Any]:
+        """The character's meta file: portrait settings, and optionally intro, aliases, greetings."""
+        return self._load_character_meta(self._normalize_character_name(character))
+
     def get_editor_bundle(self, character: str) -> dict[str, object]:
         resolved = self._normalize_character_name(character or self.active_character())
         person_variant = self._editor_variant(resolved, "person")

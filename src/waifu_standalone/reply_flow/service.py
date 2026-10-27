@@ -50,6 +50,10 @@ class ReplyFlowService:
             bot_account_id=svc.config.bot_account_id,
         )
         svc._clear_ambient_history(event, character_id=current_character)
+        # "切换人物卡" lists the cards, "切换<名字>" switches to one.
+        handled, switch_reply = await svc.character_switcher.ahandle(event, text)
+        if handled:
+            return switch_reply
         # The bot is always the character on the card. What this person calls it (their
         # alias for it) goes into a speaker note; it must not replace the bot's own name.
         assistant_alias = svc._assistant_alias_for_user(event.sender_id, character_id=current_character)
