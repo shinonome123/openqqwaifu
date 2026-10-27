@@ -83,24 +83,37 @@ class ReplyGate:
 
         The follow-up window lets any message reply for a while after the bot speaks,
         and every reply extends it, so two bots in a group can keep each other going.
+        Those replies share one bucket per group. A message that @s the bot uses its
+        sender's own bucket instead, so a person is still answered after two bots
+        have used up the group's share.
         A refused reply is not announced: telling the group would be one more message.
         """
         if event.launcher_type != "group":
             return True
         limits = self._service.config.rate_limits
-        if not limits.enabled or limits.group_reply_burst <= 0:
+        if not limits.enabled:
             return True
         exempt = {str(uid).strip() for uid in limits.exempt_user_ids if str(uid).strip()}
         if str(event.sender_id or "").strip() in exempt:
             return True
-        wait = self._group_reply_limiter.acquire(
-            [(f"group-reply:{event.launcher_id}", limits.group_reply_burst, limits.group_reply_per_hour / 3600.0)]
-        )
+        bot_account_id = str(self._service.config.bot_account_id or "").strip()
+        if limits.mention_reply_burst > 0 and bot_account_id and event.has_bot_mention(bot_account_id):
+            bucket = (
+                f"group-mention:{event.launcher_id}:{event.sender_id}",
+                limits.mention_reply_burst,
+                limits.mention_reply_per_hour / 3600.0,
+            )
+        elif limits.group_reply_burst > 0:
+            bucket = (f"group-reply:{event.launcher_id}", limits.group_reply_burst, limits.group_reply_per_hour / 3600.0)
+        else:
+            return True
+        wait = self._group_reply_limiter.acquire([bucket])
         if wait > 0:
             _LOGGER.warning(
-                "group reply rate-limited group=%s sender=%s retry_in=%s",
+                "group reply rate-limited group=%s sender=%s bucket=%s retry_in=%s",
                 event.launcher_id,
                 event.sender_id,
+                bucket[0].split(":", 1)[0],
                 "never" if math.isinf(wait) else f"{wait:.0f}s",
             )
             return False

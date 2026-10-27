@@ -175,6 +175,11 @@ class RateLimitConfig:
     # 来回接话时，用完 burst 就只能按 per_hour 的速度回，不会一直刷屏。
     group_reply_burst: int = 8
     group_reply_per_hour: float = 60.0
+    # 直接 @ 机器人的消息不占上面的群额度，改用每人一个的桶：机器人之间斗嘴把群额度
+    # 用光时，真人 @ 它照样有回应；反复 @ 它的机器人也只能按这个速度回。burst 为 0 时
+    # @ 也走群额度（旧行为）。
+    mention_reply_burst: int = 4
+    mention_reply_per_hour: float = 30.0
     # 这些 QQ 号不受限制（例如机器人主人）。
     exempt_user_ids: list[str] = field(default_factory=list)
 

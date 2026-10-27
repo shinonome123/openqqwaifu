@@ -287,6 +287,8 @@ def _load_rate_limits(raw_value: object) -> RateLimitConfig:
             "network_group_per_hour",
             "group_reply_burst",
             "group_reply_per_hour",
+            "mention_reply_burst",
+            "mention_reply_per_hour",
         )
     }
     return RateLimitConfig(
