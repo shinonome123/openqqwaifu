@@ -29,6 +29,16 @@
 
 ## 架构概览
 
+新版私聊运行链路已提供默认关闭的试运行入口：持久事件、会话角色绑定、结构化上下文、Outbox、重启恢复和发送结果核对。使用范围与配置见 [第一批实现说明](docs/RUNTIME_V2_FIRST_SLICE.md)；管理员可在「会话记录」查看轮次、上下文预算、角色版本并核对发送，详见 [上下文与会话控制台](docs/RUNTIME_V2_CONSOLE.md)。[事实、经历与纠正](docs/RUNTIME_V2_MEMORY.md) 已接入持久记录、来源追踪、修订和召回；[持久提醒](docs/RUNTIME_V2_REMINDERS.md) 支持明确授权的一次性提醒、延期、取消和恢复。[会话删除与恢复屏障](docs/RUNTIME_V2_PRIVACY.md) 防止旧任务回写和恢复旧主库导致数据复活。[主动联系规则](docs/RUNTIME_V2_CONTACT_POLICY.md) 已接入逐私聊授权、时区、静默时段、频率限制和暂停恢复，现有提醒也遵守这些边界。[经历跟进候选](docs/RUNTIME_V2_FOLLOWUPS.md) 已支持来源核对、正文与时间确认、排期、失效取消和发送核对；[角色化跟进草稿](docs/RUNTIME_V2_FOLLOWUP_DRAFTS.md) 支持明确请求后台生成、来源追踪和人工选用，生成不会自动发送。[经历时间提取与澄清](docs/RUNTIME_V2_EPISODE_TIMES.md) 支持按来源解析常见时间表达、人工确认日期或时段，并在时间更正后撤销旧排期。[经历时间对话确认](docs/RUNTIME_V2_EPISODE_TIME_DIALOGUE.md) 已支持用户直接在私聊中澄清、选择、确认和更正时间，控制台保留来源审计。自动记忆提取与提醒仍分别默认关闭，无人核对的自动排期尚未开放。
+
+真实模型的有限抽样结果见 [连续对话试验](docs/RUNTIME_V2_EXPERIENCE_TRIAL.md)。DeepSeek 纯对话已体现角色差异，但结构化回复仍有空白返回，完整体验验收尚未通过；后续修复入口与合成复现材料见 [问题交接](docs/HANDOFF_DEEPSEEK_2026-10-26.md)。
+
+不连接 QQ 或真实模型即可运行演示（输出目录需为新目录）：
+
+```bash
+python -B run_cli.py runtime-v2-demo --output-dir .codex-temp/runtime-v2-demo-local
+```
+
 ```text
 NapCat / OneBot
         |
