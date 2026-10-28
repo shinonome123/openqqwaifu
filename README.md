@@ -72,6 +72,12 @@ WaifuService (app.py)
   - 内置技能 + 工作区技能 + 插件技能
   - skill pack / bundle 导入导出
   - tool alias、显式 `/skill` 调用、模型 tool loop
+- 酒馆模式（跑团）
+  - 群里 @机器人说「启动酒馆」列出剧本，说的人当房主，回「选 1」开本，机器人改当主持人
+  - 「加入」「离开」上下桌；直接说话就是行动，几秒内所有人的行动由主持人一次接上；括号（…）或 `//` 开头是场外话
+  - `.r 2d6+1 撬锁` 由程序掷骰，结果交给主持人；「酒馆状态」看谁在玩；只有房主（和 `tavern.admin_user_ids`、`tool_policy.authorized_user_ids`）能「退出酒馆模式」，30 分钟没人说话自动结束
+  - 自带 4 个本；自己的本放进 `data/tavern/scenarios/`：YAML（格式见 `src/waifu_standalone/templates/tavern/`），或直接放 SillyTavern 角色卡（`.json` / `.png`）
+  - 剧情存在 `data/tavern/`，不进角色的聊天记录和记忆
 - OpenClaw 兼容层
   - `SKILL.md` / bundle 导入
   - native plugin / bundle capability 诊断
