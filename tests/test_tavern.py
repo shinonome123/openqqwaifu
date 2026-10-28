@@ -85,11 +85,12 @@ class _GameMaster:
         pass
 
     def game_requests(self) -> list[list[dict[str, object]]]:
-        """The game master's rounds, without recaps and the character's own replies."""
+        """The game master's rounds (a story's, or a card's), without recaps and the character's own replies."""
         return [
             request
             for request in self.requests
-            if str(request[0]["content"]).startswith(("你在 QQ ", "你就是")) and "整理笔记" not in str(request[0]["content"])
+            if str(request[0]["content"]).startswith("你在 QQ ")
+            or any(message["content"] == "[Start a new Chat]" for message in request)
         ]
 
 
@@ -125,6 +126,13 @@ class TavernTests(unittest.TestCase):
 
     def _session_file(self) -> Path:
         return self.root / "tavern" / "sessions" / f"group_{GROUP_ID}.json"
+
+    def _card(self, file_name: str, data: dict[str, object], *, folder: str = "scenarios") -> None:
+        """A SillyTavern card in the tavern's scenarios (or adult) folder."""
+        target = self.root / "tavern" / folder
+        target.mkdir(parents=True, exist_ok=True)
+        card = {"spec": "chara_card_v2", "data": data}
+        (target / file_name).write_text(json.dumps(card, ensure_ascii=False), encoding="utf-8")
 
     def test_the_menu_lists_the_scenarios_and_only_the_host_picks(self) -> None:
         reply = self.service.handle_event(_group("启动酒馆", mention=True))
@@ -314,7 +322,7 @@ class TavernTests(unittest.TestCase):
         payload = json.loads(self._session_file().read_text(encoding="utf-8"))
         self.assertLessEqual(sum(len(turn["content"]) for turn in payload["turns"]), 1000 + 400)
 
-    def test_a_sillytavern_card_is_played_as_its_character(self) -> None:
+    def test_a_sillytavern_card_is_played_the_way_sillytavern_plays_it(self) -> None:
         scenarios = self.root / "tavern" / "scenarios"
         scenarios.mkdir(parents=True)
         card = {
@@ -324,10 +332,18 @@ class TavernTests(unittest.TestCase):
                 "name": "小咪",
                 "description": "{{char}}是猫咖里的猫娘店员，管{{user}}叫主人。",
                 "personality": "黏人",
-                "first_mes": "欢迎光临，{{user}}主人~",
-                "mes_example": "<START>\n{{char}}: 喵~",
+                "scenario": "午后的猫咖。",
+                "first_mes": "*小咪扑过来*\n欢迎光临，{{user}}主人~",
+                "mes_example": "<START>\n{{user}}: 摸摸头\n{{char}}: 喵~",
+                "system_prompt": "{{original}} 用中文写。",
+                "post_history_instructions": "只写小咪的反应。",
                 "creator_notes": "<p>一只会说话的猫娘</p>",
-                "character_book": {"entries": [{"keys": ["猫薄荷"], "content": "猫薄荷会让{{char}}犯迷糊。", "enabled": True}]},
+                "character_book": {
+                    "entries": [
+                        {"keys": ["猫薄荷"], "content": "猫薄荷会让{{char}}犯迷糊。", "enabled": True, "position": "after_char"},
+                        {"keys": ["铃铛"], "content": "铃铛是主人送的。", "enabled": True, "position": "before_char"},
+                    ]
+                },
             },
         }
         (scenarios / "xiaomi.png").write_bytes(_png_card(card))
@@ -341,19 +357,83 @@ class TavernTests(unittest.TestCase):
         self.assertIn("5. 老板（角色卡）：酒馆老板", menu)
         self.assertIn("6. 小咪（角色卡）：猫咖里的猫娘店员，管你叫主人", menu)  # a sentence about her, not the notes
 
-        self.gm.narrate = lambda messages: "（小咪蹭过来）主人回来啦~"
         self._send(_group("我想玩小咪"))
-        self.assertEqual(self._texts()[-1], "（小咪蹭过来）主人回来啦~")
-        opening_request = self.gm.game_requests()[-1][-1]["content"]
-        self.assertIn("欢迎光临，资本狗主人~", opening_request)  # the card's opening, as a reference
-        self.assertIn("用你在 QQ 里的口吻发第一条消息", opening_request)
+        self.assertEqual(self._texts()[-1], "小咪扑过来\n欢迎光临，资本狗主人~")  # her greeting, as SillyTavern shows it
+        self.assertEqual(self.gm.requests, [])  # nobody rewrote it
+        self.assertTrue(self._texts()[-3].startswith("《小咪》开始！"))
+        (picture,) = self.outbound.sent[-2].images  # then her picture, then her greeting
+        png = base64.b64decode(picture.removeprefix("base64://"))
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n") and png.endswith(b"IEND\xaeB`\x82"))
+        self.assertNotIn(b"chara", png)  # without the card in it
+
+        self.gm.narrate = lambda messages: "*小咪眯起眼睛*\n喵呜……"
         self._send(_group("我递给她一把猫薄荷"))
-        system = str(self.gm.game_requests()[-1][0]["content"])
-        self.assertTrue(system.startswith("你就是小咪，正在 QQ 群里跟大家对戏。"))
-        self.assertIn("动作和神态写在（）里", system)
-        self.assertIn("小咪是猫咖里的猫娘店员，管资本狗叫主人。\n性格：黏人", system)
-        self.assertIn("[世界书]\n- 猫薄荷会让小咪犯迷糊。", system)
-        self.assertIn("[说话感觉参考（格式别照抄）]\n小咪: 喵~", system)
+        self.assertEqual(self._texts()[-1], "小咪眯起眼睛\n喵呜……")
+        (request,) = self.gm.game_requests()
+        roles = [message["role"] for message in request]
+        self.assertEqual(roles, ["system", "system", "system", "assistant", "user", "system", "system"])
+        self.assertEqual(
+            request[0]["content"],
+            "Write 小咪's next reply in a fictional chat between 小咪 and 资本狗. 用中文写。\n\n"
+            "小咪是猫咖里的猫娘店员，管资本狗叫主人。\n\n[小咪's personality: 黏人]\n\n"
+            "[Circumstances and context of the dialogue: 午后的猫咖。]\n\n猫薄荷会让小咪犯迷糊。",  # 铃铛 did not come up
+        )
+        self.assertEqual(request[1]["content"], "[Example Chat]\n资本狗: 摸摸头\n小咪: 喵~")
+        self.assertEqual(request[2]["content"], "[Start a new Chat]")
+        self.assertEqual(request[3]["content"], "*小咪扑过来*\n欢迎光临，资本狗主人~")
+        self.assertEqual(request[4]["content"], "我递给她一把猫薄荷")  # one player: as typed, without a name
+        self.assertEqual(request[5]["content"], "只写小咪的反应。")
+        self.assertEqual(request[6]["content"], "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。")  # ours
+        # The story keeps her reply as she wrote it, so she goes on writing that way.
+        payload = json.loads(self._session_file().read_text(encoding="utf-8"))
+        self.assertEqual(payload["turns"][-1]["content"], "*小咪眯起眼睛*\n喵呜……")
+
+    def test_a_card_whose_picture_cannot_be_sent_still_opens(self) -> None:
+        scenarios = self.root / "tavern" / "scenarios"
+        scenarios.mkdir(parents=True)
+        (scenarios / "cat.png").write_bytes(_png_card({"spec": "chara_card_v2", "data": {"name": "小咪", "first_mes": "喵？"}}))
+        dispatch = self.service.emitter.adispatch
+
+        async def no_pictures(message, *, delay_seconds):  # type: ignore[no-untyped-def]
+            if message.images:
+                raise ConnectionError("timed out uploading the picture")
+            await dispatch(message, delay_seconds=delay_seconds)
+
+        with patch.object(self.service.emitter, "adispatch", no_pictures), self.assertLogs("waifu_standalone.tavern.mode", "WARNING"):
+            self._send(_group("启动酒馆", mention=True), _group("选小咪"))
+        self.assertTrue(self._texts()[-2].startswith("《小咪》开始！"))
+        self.assertEqual(self._texts()[-1], "喵？")
+
+    def test_a_card_played_by_several_knows_who_says_what(self) -> None:
+        self._card("cat.json", {"name": "小咪", "description": "{{char}}管{{user}}叫主人。", "first_mes": "喵？"})
+        self._send(_group("启动酒馆", mention=True), _group("选小咪"), _group("加入", sender=PLAYER))
+        self._send(_group("我摸摸她"), _group("我给她倒牛奶", sender=PLAYER))
+
+        request = self.gm.game_requests()[-1]
+        self.assertIn("小咪管资本狗、苦力怕叫主人。", str(request[0]["content"]))
+        self.assertEqual(request[-2]["content"], "【资本狗】我摸摸她\n【苦力怕】我给她倒牛奶")
+        self.assertTrue(str(request[-1]["content"]).startswith("这一局是 QQ 群里几位玩家一起玩：资本狗、苦力怕。"))
+
+    def test_a_cards_lorebook_goes_where_sillytavern_puts_it(self) -> None:
+        entries = [
+            {"keys": [], "constant": True, "content": "每轮末尾写状态。", "position": "at_depth", "extensions": {"position": 4, "depth": 0}},
+            {"keys": ["灵石"], "content": "灵石是货币。", "position": "after_char", "extensions": {"position": 3}},
+            {"keys": ["剑"], "selective": True, "secondary_keys": ["天阳"], "content": "天阳剑是灵宝。", "extensions": {"position": 0}},
+            {"keys": ["剑"], "selective": True, "secondary_keys": ["木"], "content": "一把木剑。", "extensions": {"position": 0}},
+            {"keys": ["/丹[药丸]/"], "content": "丹药能疗伤。", "insertion_order": 1},
+        ]
+        self._card("xian.json", {"name": "仙界", "description": "修仙世界。", "first_mes": "你在山门前。", "character_book": {"entries": entries}})
+        self._send(_group("启动酒馆", mention=True), _group("选仙界"), _group("我拿灵石换了天阳剑和一颗丹丸"))
+
+        request = self.gm.game_requests()[-1]
+        self.assertEqual(
+            request[0]["content"],
+            "Write 仙界's next reply in a fictional chat between 仙界 and 资本狗.\n\n天阳剑是灵宝。\n\n修仙世界。\n\n丹药能疗伤。",
+        )
+        self.assertEqual(
+            [message["content"] for message in request[1:6]],
+            ["[Start a new Chat]", "灵石是货币。", "你在山门前。", "我拿灵石换了天阳剑和一颗丹丸", "每轮末尾写状态。"],
+        )  # with the author's note four deep (here: the top of the chat), and at depth 0 after the last line
 
     def test_a_fault_in_tavern_mode_does_not_silence_the_character(self) -> None:
         async def broken(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -382,42 +462,42 @@ class TavernTests(unittest.TestCase):
         )
         self._send(_group("1"))
         self.assertEqual(self._texts()[-1], "莉央：「好。」\n（33｜安心｜有人在听）\n可以选：① 上台　② 等等")
-        # The model keeps seeing its own tags, so it goes on writing them.
+        # The model keeps seeing its own tags, so it goes on writing them; "1" sent the first option.
         self.assertEqual(self.gm.game_requests()[-1][2]["content"], opening)
+        self.assertEqual(self.gm.game_requests()[-1][-1]["content"], "【资本狗】看线索")
 
-    def test_a_character_card_chats_without_its_web_formatting(self) -> None:
-        scenarios = self.root / "tavern" / "scenarios"
-        scenarios.mkdir(parents=True)
-        card = {
-            "spec": "chara_card_v2",
-            "data": {
+    def test_a_cards_status_bar_and_buttons_reach_qq_as_lines(self) -> None:
+        greeting = "<场景>后台|雨夜|灯低</场景>\n顾绮：「这么晚还来？」\n<状态>25|试探|看他怎么答</状态>\n<选项>说目的|看证据|转身走</选项>"
+        self._card(
+            "guqi.json",
+            {
                 "name": "顾绮",
-                "description": "顾绮是剧院投资人。",
-                "first_mes": "<场景>后台|雨夜|灯低</场景>\n顾绮把\u201c成人向边界\u201d相关的线索留在手边。\n<状态>25|试探|看他怎么答</状态>\n<选项>说目的|看证据</选项>",
-                "system_prompt": "你扮演顾绮。保持角色的动机和关系节奏。\n\n【输出格式（像素酒馆美化正则依赖此格式，务必遵守）】\n5. 回复末尾两行：<状态>心动|心情|心声</状态>",
-                "post_history_instructions": "每轮先回应{{user}}。\n【输出格式·每轮必须遵守】正文照常写\n<选项>行动一|行动二|行动三</选项>",
+                "description": "顾绮是剧院投资人，35岁。",
+                "first_mes": greeting,
+                "system_prompt": "你扮演顾绮。\n【输出格式】回复末尾两行：<状态>心动|心情|心声</状态>",
+                "extensions": {"regex_scripts": [{"scriptName": "状态栏 · 心动", "findRegex": "/<状态>/g"}]},
             },
-        }
-        (scenarios / "guqi.json").write_text(json.dumps(card, ensure_ascii=False), encoding="utf-8")
-        replies = iter([
-            "（她合上文件夹，抬眼看你）这么晚还摸到后台来。\n<状态>25|试探|先看看</状态>",
-            "<场景>后台|雨夜|雨声</场景>\n顾绮：「开幕可以谈。」\n（她把节目单按在窗台上）\n<选项>出价|问节目单</选项>",
-        ])
-        self.gm.narrate = lambda messages: next(replies)
+        )
+        # A model may get a closing tag wrong, or leave it out.
+        self.gm.narrate = lambda messages: "顾绮：「证据在这。」\n<状态>31|松动|他没走</status>\n<选项>接过来|问来历|还给她"
 
         self._send(_group("启动酒馆", mention=True), _group("选顾绮"))
-        self.assertEqual(self._texts()[-1], "（她合上文件夹，抬眼看你）这么晚还摸到后台来。")
-        opening_request = self.gm.game_requests()[-1]
-        self.assertIn("顾绮把\u201c成人向边界\u201d相关的线索留在手边", opening_request[-1]["content"])
-        self.assertNotIn("<状态>", opening_request[-1]["content"])  # the reference has no tags
-        system = str(opening_request[0]["content"])
-        self.assertIn("[角色要点]\n你扮演顾绮。保持角色的动机和关系节奏。\n每轮先回应资本狗。", system)
-        self.assertNotIn("输出格式", system)
+        rules, sent = self._texts()[-2:]
+        self.assertIn("直接说话就是行动，回数字就是选那个选项", rules)
+        self.assertEqual([part.images for part in self.outbound.sent[-2:]], [[], []])  # a JSON card has no picture
+        self.assertEqual(
+            sent, "【后台｜雨夜｜灯低】\n顾绮：「这么晚还来？」\n\n心动 25 ▰▰▱▱▱▱▱▱▱▱｜心情 · 试探\n心声：看他怎么答\n\n① 说目的\n② 看证据\n③ 转身走"
+        )
 
-        self._send(_group("我是来谈剧院重新开幕的"))
-        self.assertEqual(self._texts()[-1], "开幕可以谈。\n（她把节目单按在窗台上）")
-        # What she said is kept as sent, so the story she sees stays in chat style.
-        self.assertEqual(self.gm.game_requests()[-1][-2]["content"], "（她合上文件夹，抬眼看你）这么晚还摸到后台来。")
+        self._send(_group("选②"))  # the second button
+        request = self.gm.game_requests()[-1]
+        self.assertEqual(request[-3]["content"], greeting)  # the model sees what it wrote, tags and all
+        self.assertEqual(request[-2]["content"], "看证据")
+        self.assertEqual(
+            self._texts()[-1], "顾绮：「证据在这。」\n\n心动 31 ▰▰▰▱▱▱▱▱▱▱｜心情 · 松动\n心声：他没走\n\n① 接过来\n② 问来历\n③ 还给她"
+        )
+        self._send(_group("我想想"))
+        self.assertEqual(self.gm.game_requests()[-1][-2]["content"], "我想想")
 
     def test_adult_scenarios_and_content_only_in_an_allowed_private_chat(self) -> None:
         adult = self.root / "tavern" / "adult"
@@ -445,19 +525,18 @@ class TavernTests(unittest.TestCase):
         self.assertIn("所有角色都必须是成年人", system)
         self.assertNotIn("一笔带过或转场", system)
 
-    def test_a_cards_html_opening_is_only_words_for_the_reference(self) -> None:
-        scenarios = self.root / "tavern" / "scenarios"
-        scenarios.mkdir(parents=True)
-        first_mes = "<div style=text-align:center><img src=https://example.com/a.png /><h1>{{char}}</h1></div>\n仙门大开，山风扑面。"
-        (scenarios / "xian.json").write_text(
-            json.dumps({"spec": "chara_card_v2", "data": {"name": "仙境", "first_mes": first_mes}}, ensure_ascii=False),
-            encoding="utf-8",
+    def test_a_cards_html_and_markdown_reach_qq_as_what_they_show(self) -> None:
+        greeting = (
+            "<div style=text-align:center><img src=https://example.com/a.png /><h1>{{char}}</h1></div>\r\n"
+            "*仙门大开，山风扑面。*\r\n---\r\n<details><summary><center>**面板（点击展开）**</center></summary>\r\n"
+            "<small>境界：炼气</small>\r\n</details>\r\n\r\n> 📜提示：\r\n<small>\"别回头\"</small>\r\n</plot>"
         )
+        self._card("xian.json", {"name": "仙境", "first_mes": greeting})
         self._send(_group("启动酒馆", mention=True), _group("选仙境"))
 
-        reference = str(self.gm.game_requests()[-1][-1]["content"])
-        self.assertIn("仙境\n\n仙门大开，山风扑面。", reference)
-        self.assertNotIn("<", reference.split("如下")[1].split("现在用你")[0])
+        self.assertEqual(self._texts()[-1], '仙境\n\n仙门大开，山风扑面。\n──────────\n\n面板\n\n境界：炼气\n\n📜提示：\n"别回头"')
+        payload = json.loads(self._session_file().read_text(encoding="utf-8"))
+        self.assertTrue(payload["turns"][0]["content"].startswith("<div style=text-align:center>"))
 
     def test_the_tavern_can_use_a_model_of_its_own(self) -> None:
         calls: list[tuple[dict[str, object], list[dict[str, object]]]] = []
@@ -503,35 +582,74 @@ class TavernTests(unittest.TestCase):
         self._send(_private("启动酒馆"), _private("选 1"), _private("我关上灯"))
         self.assertEqual(self._texts()[-1], "他们开始做爱。")
 
-    def test_a_card_that_is_a_game_is_narrated_not_played_as_a_person(self) -> None:
-        scenarios = self.root / "tavern" / "scenarios"
-        scenarios.mkdir(parents=True)
-        card = {
-            "spec": "chara_card_v2",
-            "data": {
+    def test_a_card_that_is_a_game_opens_with_the_greeting_that_tells_its_story(self) -> None:
+        self._card(
+            "xianxia.json",
+            {
                 "name": "逆天修仙",
                 "description": "这是一个修仙RPG游戏，仙女界不是一个特定的角色，而是一个RPG系统。",
                 "first_mes": "<div>本角色卡分享于以下：Discord 社区 点击跳转。请勿倒卖。点击右箭头开始正文内容→</div>",
                 "alternate_greetings": ["*天空裂开一道缝，一个少年从云里坠了下来，砸进仙女界的山门前。*\n守门的仙子愣住了：「男人？」"],
             },
-        }
-        (scenarios / "xianxia.json").write_text(json.dumps(card, ensure_ascii=False), encoding="utf-8")
+        )
         self.gm.narrate = lambda messages: "<div>*山门前一片寂静。*</div>\n守门仙子：「报上名来。」"
 
         menu = self.service.handle_event(_group("启动酒馆", mention=True)).text
         self.assertIn("5. 逆天修仙：", menu)
         self.assertNotIn("逆天修仙（角色卡）", menu)
         self._send(_group("选逆天修仙"))
+        # The greeting that tells the story, not the credits page.
+        self.assertEqual(self._texts()[-1], "天空裂开一道缝，一个少年从云里坠了下来，砸进仙女界的山门前。\n守门的仙子愣住了：「男人？」")
 
+        self._send(_group("我站起来拍拍土"))
         request = self.gm.game_requests()[-1]
-        system = str(request[0]["content"])
-        self.assertTrue(system.startswith("你在 QQ 群里当跑团主持人，正在主持《逆天修仙》"))
-        self.assertIn("篇幅 150 到 400 字", system)
-        opening = str(request[-1]["content"])
-        self.assertIn("以主持人的身份写开场", opening)
-        self.assertIn("天空裂开一道缝", opening)  # the greeting that tells the story,
-        self.assertNotIn("点击跳转", opening)  # not the credits page
+        self.assertTrue(str(request[0]["content"]).startswith("Write 逆天修仙's next reply in a fictional chat"))
         self.assertEqual(self._texts()[-1], "山门前一片寂静。\n\n守门仙子：「报上名来。」")  # no HTML, no asterisks
+
+    def test_a_card_with_someone_under_18_is_never_an_adult_game(self) -> None:
+        self.config.tavern.adult_user_ids = [HOST]
+        self._card(
+            "xianxia.json",
+            {"name": "仙女界", "description": "修仙 RPG。", "first_mes": "{{user}}，穿越，16岁，唯一男性。你从湖里爬上了岸。"},
+            folder="adult",
+        )
+        self._card("star.json", {"name": "织微", "description": "她 8 岁那年见过流星，如今 300 岁。人类 28~46 岁。"}, folder="adult")
+        self.assertFalse(self.service.tavern.library.get("adult/star").minors)  # a past age, and adults
+
+        self.gm.narrate = lambda messages: "他们开始做爱。"
+        self._send(_private("启动酒馆"), _private("选仙女界"))
+        self.assertIn("（卡里有人未满 18 岁，这一局不写成人内容。）", self._texts()[-2])
+        self._send(_private("我往村里走"))
+        self.assertTrue(str(self.gm.game_requests()[0][-1]["content"]).startswith("故事里有未成年人：对任何人都不写性感、暧昧"))
+        self.assertEqual(self._texts()[-1], "（这一段跳过。）")
+
+    def test_a_cards_preset_reaches_the_tavern_model(self) -> None:
+        calls: list[dict[str, float] | None] = []
+
+        class TavernModel:
+            def __init__(self, **settings):  # type: ignore[no-untyped-def]
+                pass
+
+            async def ainvoke_with_tools(self, messages, *, tools, user="", sampling=None):  # type: ignore[no-untyped-def]
+                calls.append(sampling)
+                return LLMToolResponse(text="她点点头。", assistant_message={})
+
+            def close(self) -> None:
+                pass
+
+        preset = {
+            "temperature": 0.9, "max_tokens": 4096, "top_p": "high", "frequency_penalty": 5,
+            "prompts": [{"content": "所有角色均为成年人。", "enabled": True}, {"content": "关掉的一条", "enabled": False}],
+        }
+        self._card("guqi.json", {"name": "顾绮", "first_mes": "雨夜。", "extensions": {"pixel_tavern_presets": [preset]}})
+        tavern = self.config.tavern
+        tavern.llm_base_url, tavern.llm_api_key, tavern.llm_model = "https://example.com/v1", "sk-test", "deepseek-tavern-v2-pro"
+        with patch("waifu_standalone.tavern.mode.OpenAILLMClient", TavernModel):
+            self._send(_group("启动酒馆", mention=True), _group("选顾绮"), _group("我收起伞"))
+
+        self.assertEqual(calls, [{"temperature": 0.9, "max_tokens": 4096}])  # what an API accepts
+        card = self.service.tavern.library.get("guqi").card
+        self.assertEqual(card.prompts, ["所有角色均为成年人。"])
 
     def test_the_config_file_sets_the_tavern(self) -> None:
         # ConfigManager.load() would also look for napcat/config under the working directory.

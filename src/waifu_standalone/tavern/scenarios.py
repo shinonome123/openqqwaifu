@@ -10,8 +10,9 @@ Scenarios come from the package's ``templates/tavern/`` and from
 - ``.png``: a SillyTavern character card, its JSON base64-encoded in a ``ccv3`` or
   ``chara`` text chunk, as SillyTavern exports it.
 
-A SillyTavern card is a character to role-play rather than a story to run: the game
-master plays that character and narrates around it (``kind == "character"``).
+A SillyTavern card is played the way SillyTavern plays it (``Scenario.card``): its own
+prompts, greeting and lorebook, nothing of ours but the content rule. ``kind`` only tells
+the menu whether it is a person ("character") or a game that narrates ("story").
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import json
 import logging
 import re
 import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,10 +35,15 @@ _LOGGER = logging.getLogger(__name__)
 _SUFFIXES = (".yaml", ".yml", ".json", ".png")
 ADULT_PREFIX = "adult/"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Where a PNG keeps text, the card among it; a picture sent to QQ goes without them.
+_TEXT_CHUNKS = {b"tEXt", b"iTXt", b"zTXt"}
+_PICTURE_MAX_BYTES = 10 * 1024 * 1024
 _MACROS = (
-    (re.compile(r"\{\{\s*char\s*\}\}|<BOT>", re.IGNORECASE), "character"),
+    (re.compile(r"\{\{\s*(?:char|charIfNotGroup|group)\s*\}\}|<BOT>", re.IGNORECASE), "character"),
     (re.compile(r"\{\{\s*user\s*\}\}|<USER>", re.IGNORECASE), "user"),
 )
+# Macros that stand for nothing here: {{// a note to the card's reader}}, {{trim}}, {{noop}}.
+_EMPTY_MACROS = re.compile(r"\{\{//[\s\S]*?\}\}|\{\{\s*(?:trim|noop)\s*\}\}", re.IGNORECASE)
 _TAGS = re.compile(r"<[^>]{1,200}>")
 # Sentences cards open with that say nothing about the character ("原创角色卡", "人物均为成年人").
 _DISCLAIMER = re.compile(r"角色卡|原创|成年|创作|免责|仅供|NSFW|成人向|creator|\bcard\b", re.IGNORECASE)
@@ -45,7 +52,23 @@ _SYSTEM_CARD = re.compile(
     r"不是(?:一个)?特定的?角色|无法进行任何对话|交互式电影|叙述者|旁白系统|\bnarrator\b|game master", re.IGNORECASE
 )
 _CREDITS = re.compile(r"点击跳转|点击右箭头|分享于|请勿倒卖|许可证|Discord|教程", re.IGNORECASE)
-_FORMAT_SECTION = re.compile(r"^\s*[【\[]\s*(?:输出格式|回复格式|格式要求|output format)", re.MULTILINE | re.IGNORECASE)
+# "16岁", "十六岁": someone in the story is under 18 (not "8 岁那年", something in their past).
+_PAST = r"(?!那|时|時|的时候|起|开始|以前|之前|前)"
+_MINOR = re.compile(
+    rf"(?<![\d.])(?:1[0-7]|[1-9])\s*[岁歲]{_PAST}"
+    rf"|(?<![一二三四五六七八九十百千两])(?:十[一二三四五六七]?|[一二三四五六七八九])[岁歲]{_PAST}"
+    r"|小学生|初中生|幼女|幼童|女童|男童"
+)
+# "状态栏 · 共鸣": the regex script that draws a card's <状态> bar names its number.
+_STATUS_SCRIPT = re.compile(r"^状态栏\s*[·・:：]\s*(?P<label>\S{1,6})")
+# The sampling settings a card's preset may carry, with the values an API accepts.
+_SAMPLING = {
+    "temperature": (0.0, 2.0),
+    "top_p": (0.0, 1.0),
+    "max_tokens": (1, 32768),
+    "frequency_penalty": (-2.0, 2.0),
+    "presence_penalty": (-2.0, 2.0),
+}
 _INTRO_MAX_CHARS = 30
 # Cards from the internet can be long; the game master's prompt has a budget.
 _SETTING_MAX_CHARS = 6000
@@ -53,6 +76,10 @@ _NOTES_MAX_CHARS = 3000
 _OPENING_MAX_CHARS = 2500
 _EXAMPLES_MAX_CHARS = 2000
 _LORE_ENTRY_MAX_CHARS = 800
+# A card's own fields go to the model as they are, up to these sizes.
+_CARD_FIELD_MAX_CHARS = 20000
+_CARD_GREETING_MAX_CHARS = 8000
+_CARD_LORE_ENTRY_MAX_CHARS = 4000
 
 
 @dataclass(slots=True)
@@ -62,6 +89,47 @@ class LoreEntry:
     keys: list[str]
     content: str
     constant: bool = False
+    # Where SillyTavern puts it: secondary keys and how they combine with the keys (``logic``
+    # 0 and-any, 1 not-all, 2 not-any, 3 and-all), the position (0 before the character's
+    # description, 1 after it, 2 and 3 with the author's note, 4 at ``depth`` in the chat as
+    # ``role`` 0 system, 1 user or 2 assistant, 5 and 6 around the examples) and the order.
+    secondary: list[str] = field(default_factory=list)
+    logic: int = 0
+    position: int = 1
+    depth: int = 4
+    role: int = 0
+    order: int = 100
+
+    def matches(self, lowered_text: str) -> bool:
+        """Whether a key (and the secondary keys, by ``logic``) is in the already lowered text."""
+        if self.constant:
+            return True
+        if not any(_key_in(key, lowered_text) for key in self.keys):
+            return False
+        if not self.secondary:
+            return True
+        found = [_key_in(key, lowered_text) for key in self.secondary]
+        return {1: not all(found), 2: not any(found), 3: all(found)}.get(self.logic, any(found))
+
+
+@dataclass(slots=True)
+class Card:
+    """A SillyTavern card's own words, from which its prompt is built the way SillyTavern does."""
+
+    name: str
+    description: str = ""
+    personality: str = ""
+    scenario: str = ""
+    # Replaces SillyTavern's main prompt ("{{original}}" stands for it); comes after the chat.
+    system_prompt: str = ""
+    post_history_instructions: str = ""
+    # The example chats, one per <START>.
+    examples: list[str] = field(default_factory=list)
+    # From a preset the card carries (像素酒馆 cards do): extra system prompts and sampling.
+    prompts: list[str] = field(default_factory=list)
+    sampling: dict[str, float] = field(default_factory=dict)
+    # The name of the number in its <状态> bar ("共鸣"), from the script that draws the bar.
+    stat: str = ""
 
 
 @dataclass(slots=True)
@@ -70,6 +138,7 @@ class Scenario:
     title: str
     intro: str = ""
     # "story": a game master runs it; "character": the game master plays this character.
+    # A card plays from its own prompts either way; this only labels it on the menu.
     kind: str = "story"
     character: str = ""
     setting: str = ""
@@ -80,15 +149,17 @@ class Scenario:
     source: str = ""
     # From the adult folder: offered only where ``tavern.adult_user_ids`` allows it.
     adult: bool = False
-    # A SillyTavern card: its opening is written for a web page, so the model retells it.
-    from_card: bool = False
+    # Someone in it is under 18, so it is never played with adult content.
+    minors: bool = False
+    # A SillyTavern card, played from its own prompts; ``opening`` is its greeting.
+    card: Card | None = None
 
     def render(self, text: str, *, user: str) -> str:
-        """Fill in SillyTavern's {{char}} and {{user}}."""
+        """Fill in SillyTavern's {{char}}, {{user}} and {{newline}}; drop its notes."""
         values = {"character": self.character or self.title, "user": user}
         for pattern, name in _MACROS:
-            text = pattern.sub(values[name], text)
-        return text
+            text = pattern.sub(lambda _match, value=values[name]: value, text)
+        return re.sub(r"\{\{\s*newline\s*\}\}", "\n", _EMPTY_MACROS.sub("", text), flags=re.IGNORECASE)
 
     def lore_for(self, recent_text: str, *, limit_chars: int = 1500) -> list[str]:
         """The lore entries whose keys appear in ``recent_text``, constant ones first."""
@@ -184,16 +255,41 @@ def read_png_card(data: bytes) -> dict[str, Any]:
     return payload
 
 
-def _png_text_chunks(data: bytes) -> dict[str, str]:
+def card_picture(path: Path) -> str:
+    """A PNG card's picture to send to QQ ("base64://…"), without the card in its text chunks.
+
+    ``""`` when the scenario is not a PNG or cannot be read.
+    """
+    if path.suffix.lower() != ".png":
+        return ""
+    try:
+        data = path.read_bytes()
+        if len(data) > _PICTURE_MAX_BYTES:
+            return ""
+        chunks = [whole for kind, _body, whole in _png_chunks(data) if kind not in _TEXT_CHUNKS]
+    except (OSError, ValueError):
+        return ""
+    return "base64://" + base64.b64encode(_PNG_SIGNATURE + b"".join(chunks)).decode("ascii")
+
+
+def _png_chunks(data: bytes) -> Iterator[tuple[bytes, bytes, bytes]]:
+    """Each chunk of a PNG up to IEND: its type, its data, and the whole chunk as stored."""
     if not data.startswith(_PNG_SIGNATURE):
         raise ValueError("not a PNG file")
-    texts: dict[str, str] = {}
     offset = len(_PNG_SIGNATURE)
     while offset + 8 <= len(data):
         length = int.from_bytes(data[offset:offset + 4], "big")
         kind = data[offset + 4:offset + 8]
-        body = data[offset + 8:offset + 8 + length]
-        offset += length + 12  # length, type, data, CRC
+        end = offset + length + 12  # length, type, data, CRC
+        yield kind, data[offset + 8:offset + 8 + length], data[offset:end]
+        if kind == b"IEND":
+            return
+        offset = end
+
+
+def _png_text_chunks(data: bytes) -> dict[str, str]:
+    texts: dict[str, str] = {}
+    for kind, body, _whole in _png_chunks(data):
         try:
             if kind == b"tEXt":
                 keyword, _, text = body.partition(b"\x00")
@@ -207,8 +303,6 @@ def _png_text_chunks(data: bytes) -> dict[str, str]:
                 _language, _, rest = rest.partition(b"\x00")
                 _translated, _, text = rest.partition(b"\x00")
                 texts[keyword.decode("latin-1")] = (zlib.decompress(text) if compressed else text).decode("utf-8")
-            elif kind == b"IEND":
-                break
         except (zlib.error, UnicodeDecodeError):
             continue
     return texts
@@ -227,7 +321,7 @@ def _from_fields(payload: dict[str, Any], path: Path) -> Scenario:
     title = _text(payload.get("title")) or path.stem
     kind = "character" if _text(payload.get("kind")).lower() == "character" else "story"
     lore = [entry for entry in (_lore_entry(item) for item in _items(payload.get("lore"))) if entry is not None]
-    return Scenario(
+    scenario = Scenario(
         scenario_id=path.stem,
         title=title,
         intro=_intro(_text(payload.get("intro"))),
@@ -240,6 +334,9 @@ def _from_fields(payload: dict[str, Any], path: Path) -> Scenario:
         lore=lore,
         source=str(path),
     )
+    texts = (scenario.setting, scenario.notes, scenario.opening, *(entry.content for entry in lore))
+    scenario.minors = any(_MINOR.search(text) for text in texts)
+    return scenario
 
 
 def _from_tavern_card(card: dict[str, Any], path: Path) -> Scenario:
@@ -248,47 +345,80 @@ def _from_tavern_card(card: dict[str, Any], path: Path) -> Scenario:
     description = _text(data.get("description") or data.get("char_persona"))
     personality = _text(data.get("personality"))
     situation = _text(data.get("scenario") or data.get("world_scenario"))
-    setting = "\n".join(
-        part
-        for part in (
-            description,
-            f"性格：{personality}" if personality else "",
-            f"场景：{situation}" if situation else "",
-        )
-        if part
-    )
-    notes = "\n".join(
-        part
-        for part in (
-            _without_format_rules(_text(data.get("system_prompt")).replace("{{original}}", "")),
-            _without_format_rules(_text(data.get("post_history_instructions")).replace("{{original}}", "")),
-        )
-        if part
-    )
     book = data.get("character_book")
     entries = book.get("entries") if isinstance(book, dict) else None
-    lore = [entry for entry in (_lore_entry(item) for item in _items(entries)) if entry is not None]
+    lore = [
+        entry
+        for entry in (_lore_entry(item, limit=_CARD_LORE_ENTRY_MAX_CHARS) for item in _items(entries))
+        if entry is not None
+    ]
     intro_source = (
         _character_sentence(name, description, situation)
         or _text(data.get("creator_notes") or card.get("creatorcomment"))
         or description
         or situation
     )
-    examples = re.sub(r"<START>\s*", "", _text(data.get("mes_example") or data.get("example_dialogue")), flags=re.I)
+    extensions = data.get("extensions") if isinstance(data.get("extensions"), dict) else {}
+    presets = extensions.get("pixel_tavern_presets")
+    preset = presets[0] if isinstance(presets, list) and presets and isinstance(presets[0], dict) else {}
+    own = Card(
+        name=name,
+        description=_clip(description, _CARD_FIELD_MAX_CHARS),
+        personality=_clip(personality, _CARD_FIELD_MAX_CHARS),
+        scenario=_clip(situation, _CARD_FIELD_MAX_CHARS),
+        system_prompt=_clip(_text(data.get("system_prompt")), _CARD_FIELD_MAX_CHARS),
+        post_history_instructions=_clip(_text(data.get("post_history_instructions")), _CARD_FIELD_MAX_CHARS),
+        examples=_example_chats(_text(data.get("mes_example") or data.get("example_dialogue"))),
+        prompts=[
+            _clip(_text(item.get("content")), _CARD_FIELD_MAX_CHARS)
+            for item in _items(preset.get("prompts"))
+            if isinstance(item, dict) and item.get("enabled") is not False and _text(item.get("content"))
+        ],
+        sampling=_sampling(preset),
+        stat=_status_label(extensions),
+    )
+    opening = _clip(_story_greeting(data), _CARD_GREETING_MAX_CHARS)
+    texts = (description, personality, situation, own.system_prompt, opening, *(entry.content for entry in lore))
     return Scenario(
         scenario_id=path.stem,
         title=name,
         intro=_intro(intro_source),
         kind="story" if _plays_a_system(description, personality, situation) else "character",
         character=name,
-        setting=_clip(setting, _SETTING_MAX_CHARS),
-        notes=_clip(notes, _NOTES_MAX_CHARS),
-        opening=_clip(_story_greeting(data), _OPENING_MAX_CHARS),
-        examples=_clip(examples.strip(), _EXAMPLES_MAX_CHARS),
+        opening=opening,
         lore=lore,
         source=str(path),
-        from_card=True,
+        minors=any(_MINOR.search(text) for text in texts),
+        card=own,
     )
+
+
+def _example_chats(text: str) -> list[str]:
+    """``mes_example`` cut at its <START> lines, empty chats dropped."""
+    chats = [chat.strip() for chat in re.split(r"<START>", text, flags=re.IGNORECASE)]
+    return [_clip(chat, _CARD_FIELD_MAX_CHARS) for chat in chats if chat]
+
+
+def _sampling(preset: dict[str, Any]) -> dict[str, float]:
+    """The preset's temperature, top_p, max_tokens and penalties that an API would accept."""
+    picked: dict[str, float] = {}
+    for name, (low, high) in _SAMPLING.items():
+        value = preset.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high:
+            picked[name] = int(value) if name == "max_tokens" else float(value)
+    return picked
+
+
+def _status_label(extensions: dict[str, Any]) -> str:
+    style = extensions.get("pixel_tavern_style")
+    if isinstance(style, dict) and _text(style.get("stat")):
+        return _text(style.get("stat"))[:6]
+    for script in _items(extensions.get("regex_scripts")):
+        if isinstance(script, dict) and not script.get("disabled"):
+            match = _STATUS_SCRIPT.match(_text(script.get("scriptName")))
+            if match:
+                return match.group("label")
+    return ""
 
 
 def _plays_a_system(description: str, personality: str, situation: str) -> bool:
@@ -310,30 +440,55 @@ def _story_greeting(data: dict[str, Any]) -> str:
     return greetings[0]
 
 
-def _without_format_rules(text: str) -> str:
-    """A card's instructions without its output-format section ("【输出格式…】" to the end).
-
-    Those rules feed the web page's status bar and buttons; in QQ the character chats instead.
-    """
-    match = _FORMAT_SECTION.search(text)
-    return (text[: match.start()] if match else text).strip()
-
-
-def _lore_entry(item: object) -> LoreEntry | None:
+def _lore_entry(item: object, *, limit: int = _LORE_ENTRY_MAX_CHARS) -> LoreEntry | None:
     """A SillyTavern lorebook entry (``keys``/``enabled``) or world-info entry (``key``/``disable``)."""
     if not isinstance(item, dict):
         return None
     if item.get("enabled") is False or item.get("disable") is True:
         return None
-    content = _clip(_text(item.get("content")), _LORE_ENTRY_MAX_CHARS)
+    content = _clip(_text(item.get("content")), limit)
     if not content:
         return None
-    keys = item.get("keys", item.get("key"))
-    key_list = [str(key).strip() for key in keys if str(key).strip()] if isinstance(keys, list) else []
+    key_list = _key_list(item.get("keys", item.get("key")))
     constant = item.get("constant") is True
     if not key_list and not constant:
         return None
-    return LoreEntry(keys=key_list, content=content, constant=constant)
+    # A card keeps SillyTavern's own numbers in "extensions"; a world-info export has them at the top.
+    extensions = item.get("extensions") if isinstance(item.get("extensions"), dict) else {}
+
+    def number(name: str, default: int) -> int:
+        value = extensions.get(name, item.get(name))
+        return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+    position = number("position", {"before_char": 0}.get(_text(item.get("position")), 1))
+    role = number("role", 0)
+    order = item.get("insertion_order", item.get("order"))
+    return LoreEntry(
+        keys=key_list,
+        content=content,
+        constant=constant,
+        secondary=_key_list(item.get("secondary_keys", item.get("keysecondary"))) if item.get("selective") else [],
+        logic=number("selectiveLogic", 0),
+        position=position if 0 <= position <= 6 else 1,
+        depth=max(0, number("depth", 4)),
+        role=role if role in {0, 1, 2} else 0,
+        order=order if isinstance(order, int) and not isinstance(order, bool) else 100,
+    )
+
+
+def _key_list(keys: object) -> list[str]:
+    return [str(key).strip() for key in keys if str(key).strip()] if isinstance(keys, list) else []
+
+
+def _key_in(key: str, lowered_text: str) -> bool:
+    """A lorebook key in the text; "/…/i" keys are regular expressions, as in SillyTavern."""
+    match = re.fullmatch(r"/(?P<pattern>.+)/(?P<flags>[a-z]*)", key)
+    if match:
+        try:
+            return re.search(match.group("pattern"), lowered_text, re.IGNORECASE) is not None
+        except re.error:
+            pass
+    return key.lower() in lowered_text
 
 
 def _items(value: object) -> list[object]:
@@ -346,7 +501,8 @@ def _items(value: object) -> list[object]:
 
 
 def _text(value: object) -> str:
-    return str(value).strip() if value is not None else ""
+    # Cards written on Windows end their lines with "\r\n".
+    return str(value).replace("\r\n", "\n").replace("\r", "\n").strip() if value is not None else ""
 
 
 def _lines(value: object) -> str:
