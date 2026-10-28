@@ -26,7 +26,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..infra.llm_clients import OpenAILLMClient
 from ..models import InboundEvent, OutboundMessage
+from ..reply_flow.prompt_assembler import Generator
 from ..reply_flow.stickers import strip_sticker_tags
 from .dice import DiceError, parse_roll
 from .scenarios import Scenario, ScenarioLibrary
@@ -65,6 +67,7 @@ _RECAP_MAX_CHARS = 600
 _START_NOTE = "（游戏开始。请写开场：交代时间、地点和眼前的情况，让每位玩家知道自己能做什么。）"
 _RULES = (
     "玩家只决定自己角色的行动和台词。不要替玩家做决定、替他们说话，也不要替他们掷骰。",
+    "玩家消息前面【】里的是说话人的名字（群名片），不是台词，也别拿名字本身做文章。",
     "回应这一轮所有玩家的行动{each}。行动有风险或结果拿不准时，可以请某位玩家掷骰（例如「{example}，掷一个 d20」）；"
     "骰子由程序掷，结果会写在玩家消息里，不要自己编骰子结果。",
     "掷骰失败时，只写角色感知到的（可能是错的），不要接着点破真相。",
@@ -82,12 +85,19 @@ _CHARACTER_RULES = (
     "不写场景标题、状态栏、数值、选项列表，也不用「名字：「台词」」的剧本格式。角色卡里要是要求了那种格式，那是给别的界面用的，这里不用。",
     "{each}接着对方说的、做的往下演；不复述对方的话，不提选项、编号和规则（「不替你决定」「你可以拒绝」这类话都不要说）。",
     "只演你自己和需要出场的配角；玩家的动作、台词和决定由玩家自己说。要对方拿主意时，就像平时聊天那样问一句。",
+    "玩家消息前面【】里的是说话人的名字（群名片），不是台词，也别拿名字本身做文章。",
     "行动有风险或结果拿不准时，可以让玩家掷骰（例如「{example}，掷个 d20 看看」）；骰子由程序掷，结果会写在玩家消息里，不要自己编。",
     "掷骰失败时，只写角色感知到的，不要接着点破真相。",
     "玩家没说过自己的性别时，用名字称呼，不要用「他」「她」。",
     "默认用简体中文；{content}",
     "【角色要点】里的秘密按剧情节奏慢慢透露，不要一次说穿。",
 )
+# Words no fade-out contains; a game that is not an adult one never sends them.
+_EXPLICIT = re.compile(
+    r"肉棒|阴茎|鸡巴|阴道|阴蒂|阴唇|小穴|蜜穴|乳头|奶头|射精|精液|做爱|性交|口交|肛交|自慰|潮吹|内射|淫水|爱液"
+)
+_TOO_EXPLICIT = "（刚才那段写得太露骨了。这一局不写露骨内容：把这一段重写成一笔带过或转场的版本，只输出重写后的正文。）"
+_THINKING = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _SAFE_CONTENT = "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。"
 # Only for a game opened in a private chat with someone in tavern.adult_user_ids.
 _ADULT_CONTENT = (
@@ -119,6 +129,8 @@ class TavernMode:
         self._watchdogs: dict[tuple[str, str], asyncio.Task[None]] = {}
         # Chats already told that the game master is stuck, so a failing model is not announced twice.
         self._stalled: set[tuple[str, str]] = set()
+        # The tavern's own model (tavern.llm_*), built when first needed: (settings, client).
+        self._model: tuple[tuple[object, ...], OpenAILLMClient] | None = None
 
     # ------------------------------------------------------------------
     # Entry point
@@ -170,6 +182,30 @@ class TavernMode:
                     task.get_loop().call_soon_threadsafe(task.cancel)
                 except RuntimeError:
                     pass  # the loop is already closed
+        if self._model is not None:
+            self._model[1].close()
+
+    async def _complete(self, messages: list[dict[str, object]], *, user: str) -> str:
+        """One completion from the tavern's own model if ``tavern.llm_*`` is set, else the chat model."""
+        settings = self._service.config.tavern
+        if not (settings.llm_base_url and settings.llm_api_key and settings.llm_model):
+            return await self._service.generator.acomplete_chat(messages, user=user)
+        key = (settings.llm_base_url, settings.llm_api_key, settings.llm_model,
+               float(settings.llm_timeout_seconds), settings.llm_reasoning_effort)
+        if self._model is None or self._model[0] != key:
+            if self._model is not None:
+                self._model[1].close()
+            client = OpenAILLMClient(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key,
+                model=settings.llm_model,
+                timeout_seconds=float(settings.llm_timeout_seconds) or 120.0,
+                reasoning_effort=settings.llm_reasoning_effort,
+            )
+            self._model = (key, client)
+        response = await self._model[1].ainvoke_with_tools(messages, tools=[], user=user)
+        # Reasoning models may put their thoughts in the text; only the answer is wanted.
+        return Generator._clean_response(_THINKING.sub("", response.text))
 
     # ------------------------------------------------------------------
     # The menu
@@ -429,14 +465,15 @@ class TavernMode:
         round_text = "\n".join(action.text for action in batch)
         started = time.monotonic()
         try:
-            reply = _clean_narration(
-                await self._service.generator.acomplete_chat(
-                    self._messages(session, scenario, round_text), user=self._user_key(session)
-                )
-            )
-            if scenario.kind == "character":
-                # Stored as sent, so the story the model sees keeps the chat style.
-                reply = _as_chat(reply, scenario.character or scenario.title)
+            messages = self._messages(session, scenario, round_text)
+            reply = await self._write(session, scenario, messages)
+            if not session.adult and _EXPLICIT.search(reply):
+                # The prompt asks for a fade-out, but a model made for taverns may not keep to it.
+                _LOGGER.warning("tavern round too explicit for this game, rewriting chat=%s:%s", *session.key)
+                retry = [*messages, {"role": "assistant", "content": reply}, {"role": "user", "content": _TOO_EXPLICIT}]
+                reply = await self._write(session, scenario, retry)
+                if _EXPLICIT.search(reply):
+                    reply = "（这一段跳过。）"
             if not reply:
                 raise ValueError("the game master wrote nothing")
         except Exception as exc:  # the actions stay pending and go with the next round
@@ -462,6 +499,13 @@ class TavernMode:
         await self._send(*session.key, reply if scenario.kind == "character" else render_markup(reply))
         await self._fold_story(session, scenario)
         return True
+
+    async def _write(self, session: TavernSession, scenario: Scenario, messages: list[dict[str, object]]) -> str:
+        reply = _clean_narration(await self._complete(messages, user=self._user_key(session)))
+        if scenario.kind == "character":
+            # Stored as sent, so the story the model sees keeps the chat style.
+            reply = _as_chat(reply, scenario.character or scenario.title)
+        return reply
 
     def _messages(self, session: TavernSession, scenario: Scenario, round_text: str) -> list[dict[str, object]]:
         recent = "\n".join([session.turns[-1]["content"] if session.turns else "", round_text])
@@ -560,7 +604,7 @@ class TavernMode:
             "把它们合成一段新的前情提要，300 字以内，按时间顺序写，保留人物、关系、线索、物品、伤势和还没解决的事。只输出提要本身。"
         )
         try:
-            recap = await self._service.generator.acomplete_chat(
+            recap = await self._complete(
                 [{"role": "system", "content": "你在帮跑团主持人整理笔记。"}, {"role": "user", "content": prompt}],
                 user=self._user_key(session),
             )

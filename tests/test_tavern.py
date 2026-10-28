@@ -459,6 +459,50 @@ class TavernTests(unittest.TestCase):
         self.assertIn("仙境\n仙门大开，山风扑面。", reference)
         self.assertNotIn("<", reference.split("如下")[1].split("现在用你")[0])
 
+    def test_the_tavern_can_use_a_model_of_its_own(self) -> None:
+        calls: list[tuple[dict[str, object], list[dict[str, object]]]] = []
+
+        class TavernModel:
+            def __init__(self, **settings):  # type: ignore[no-untyped-def]
+                self.settings = settings
+
+            async def ainvoke_with_tools(self, messages, *, tools, user=""):  # type: ignore[no-untyped-def]
+                calls.append((self.settings, list(messages)))
+                return LLMToolResponse(text="<think>先想想雾港的局势</think>雾里亮起一盏灯。", assistant_message={})
+
+            def close(self) -> None:
+                pass
+
+        tavern = self.config.tavern
+        tavern.llm_base_url, tavern.llm_api_key, tavern.llm_model = "https://example.com/v1", "sk-test", "deepseek-tavern-v2-pro"
+        with patch("waifu_standalone.tavern.mode.OpenAILLMClient", TavernModel):
+            self._start()
+            self._send(_group("我推开门"))
+
+        (settings, messages), = calls
+        self.assertEqual(settings["model"], "deepseek-tavern-v2-pro")
+        self.assertEqual(messages[-1]["content"], "【资本狗】我推开门")
+        self.assertEqual(self._texts()[-1], "雾里亮起一盏灯。")  # its thinking is not sent
+        self.assertEqual(self.gm.game_requests(), [])  # the chat model was not asked
+
+    def test_a_round_too_explicit_for_the_game_is_rewritten_or_skipped(self) -> None:
+        replies = iter(["他们开始做爱。", "灯灭了，第二天清晨……", "做爱。", "还是做爱。"])
+        self.gm.narrate = lambda messages: next(replies)
+        self._start()
+
+        self._send(_group("我关上灯"))
+        self.assertEqual(self._texts()[-1], "灯灭了，第二天清晨……")
+        self.assertIn("刚才那段写得太露骨了", self.gm.game_requests()[-1][-1]["content"])
+        self._send(_group("再来"))
+        self.assertEqual(self._texts()[-1], "（这一段跳过。）")
+
+        # An adult game in an allowed private chat is not held back.
+        self.service.handle_event(_group("退出酒馆模式"))
+        self.config.tavern.adult_user_ids = [HOST]
+        self.gm.narrate = lambda messages: "他们开始做爱。"
+        self._send(_private("启动酒馆"), _private("选 1"), _private("我关上灯"))
+        self.assertEqual(self._texts()[-1], "他们开始做爱。")
+
     def test_the_config_file_sets_the_tavern(self) -> None:
         # ConfigManager.load() would also look for napcat/config under the working directory.
         tavern = _load_dataclass(TavernConfig, {"enabled": False, "batch_seconds": 5, "admin_user_ids": ["1", " 2 "]})
