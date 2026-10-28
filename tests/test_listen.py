@@ -163,7 +163,11 @@ class ListenTests(unittest.TestCase):
         self.assertEqual(len(self._chat_requests()), 2)  # nothing in 苦力怕's line is her business
 
     def test_calling_her_by_name_counts_as_addressing_her(self) -> None:
+        meta = Path(self.config.data_root) / "cards" / "aurora.meta.json"
+        meta.write_text(json.dumps({"call_names": ["奴隶"]}, ensure_ascii=False), encoding="utf-8")
+
         self.assertIsNotNone(self.service.handle_event(self._group("极光你觉得呢", sender=FRIEND)))
+        self.assertIsNotNone(self.service.handle_event(self._group("奴隶出来干活", sender=HOST)))
 
     def test_she_joins_talk_about_her_interests_and_may_keep_quiet(self) -> None:
         self.model.reply = lambda messages: SILENCE
@@ -187,6 +191,21 @@ class ListenTests(unittest.TestCase):
         self.service.listener.drain()
         self.assertEqual(len(self._chat_requests()), 2)
         self.assertIsNotNone(self.service.handle_event(self._group("它没事", sender=FRIEND)))
+
+    def test_a_card_can_be_chattier_than_the_defaults(self) -> None:
+        meta = Path(self.config.data_root) / "cards" / "aurora.meta.json"
+        meta.write_text(
+            json.dumps({"interests": ["猫"], "chime_in": {"min_gap_seconds": 0, "burst": 5}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.model.reply = lambda messages: "笨猫！"
+        for sender, text in ((FRIEND, "我家的猫今天把杯子打碎了"), (HOST, "我家猫也天天捣乱")):
+            self.service.handle_event(self._group(text, sender=sender))
+            self.service.listener.drain()
+
+        self.assertEqual([part.text for part in self.outbound.sent], ["笨猫！", "笨猫！"])
+        self.assertEqual(self.service.listener.limits().burst, 5)
+        self.assertEqual(self.service.listener.limits().threshold, self.config.listen.chime_in_threshold)
 
     def test_commands_bots_and_bare_laughter_never_make_her_join_in(self) -> None:
         self.config.ignore_user_ids = [OTHER_BOT]
