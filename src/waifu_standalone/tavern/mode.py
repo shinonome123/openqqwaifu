@@ -43,6 +43,9 @@ _START = re.compile(r"^(?:启动|开启|打开|进入|开)酒馆(?:模式)?$|^�
 _START_INTENT = re.compile(r"(?:启动|开启|打开|进入|开|玩|来)(?:一下|一个|一局|个|下|局)?(?:酒馆|跑团)")
 _START_REFUSED = re.compile(r"(?:不|别|没|甭)(?:要|想|用|能|会)?(?:启动|开启|打开|进入|开|玩|来)(?:一下|一个|个|下)?(?:酒馆|跑团)")
 _MENTIONS_TAVERN = re.compile(r"酒馆|跑团")
+# Tags SillyTavern cards ask for, which their web page draws as a status bar and buttons.
+_MARKUP = re.compile(r"<(?P<tag>[^<>/\s]{1,8})>(?P<body>[^<>]*)</(?P=tag)>")
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
 _END = re.compile(r"^(?:退出|关闭|结束)酒馆(?:模式)?$|^打烊$")
 _JOIN = re.compile(r"^我?也?要?(?:加入|参加)(?:酒馆|游戏|冒险|队伍)?$|^(?:带我一个|加我一个|算我一个|我也玩|我也要玩)$")
 _LEAVE = re.compile(r"^我?要?(?:离开|退出)(?:游戏|冒险|队伍)?$|^我不玩了$")
@@ -242,7 +245,7 @@ class TavernMode:
             rules = f"《{scenario.title}》开始！直接说话就是行动，括号（…）里是场外话；掷骰用 .r d20；说「退出酒馆模式」结束。"
         message = await self._reply(event, rules)
         if opening:
-            await self._send(session.launcher_type, session.launcher_id, opening)
+            await self._send(session.launcher_type, session.launcher_id, render_markup(opening))
         else:
             self._queue(session, PendingAction("", _START_NOTE))
         return message
@@ -411,7 +414,7 @@ class TavernMode:
             "tavern round chat=%s:%s round=%s actions=%s chars=%s seconds=%.1f",
             *session.key, session.rounds, len(batch), len(reply), time.monotonic() - started,
         )
-        await self._send(*session.key, reply)
+        await self._send(*session.key, render_markup(reply))
         await self._fold_story(session, scenario)
         return True
 
@@ -660,6 +663,29 @@ def _wants_start(compact: str) -> bool:
     if _START.match(compact):
         return True
     return bool(_START_INTENT.search(compact)) and not _START_REFUSED.search(compact)
+
+
+def render_markup(text: str) -> str:
+    """A card's <场景>, <状态> and <选项> lines as plain text for QQ.
+
+    The story keeps the tags, so the model goes on writing them (and the numbers in
+    <状态> carry over from round to round); only what is sent is rewritten.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        tag = match.group("tag")
+        parts = [part.strip() for part in match.group("body").split("|") if part.strip()]
+        if not parts:
+            return ""
+        if tag == "场景":
+            return "【" + " · ".join(parts) + "】"
+        if tag == "状态":
+            return "（" + "｜".join(parts) + "）"
+        if tag == "选项":
+            return "可以选：" + "　".join(f"{_CIRCLED[index]} {part}" for index, part in enumerate(parts[:10]))
+        return " · ".join(parts)
+
+    return re.sub(r"\n{3,}", "\n\n", _MARKUP.sub(one, str(text or ""))).strip()
 
 
 def _clean_narration(text: str) -> str:

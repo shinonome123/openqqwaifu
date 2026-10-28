@@ -37,6 +37,9 @@ _MACROS = (
     (re.compile(r"\{\{\s*user\s*\}\}|<USER>", re.IGNORECASE), "user"),
 )
 _TAGS = re.compile(r"<[^>]{1,200}>")
+# Sentences cards open with that say nothing about the character ("原创角色卡", "人物均为成年人").
+_DISCLAIMER = re.compile(r"角色卡|原创|成年|创作|免责|仅供|NSFW|成人向|creator|\bcard\b", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[。！？!?\n]")
 _INTRO_MAX_CHARS = 30
 # Cards from the internet can be long; the game master's prompt has a budget.
 _SETTING_MAX_CHARS = 6000
@@ -245,7 +248,12 @@ def _from_tavern_card(card: dict[str, Any], path: Path) -> Scenario:
     book = data.get("character_book")
     entries = book.get("entries") if isinstance(book, dict) else None
     lore = [entry for entry in (_lore_entry(item) for item in _items(entries)) if entry is not None]
-    intro_source = _text(data.get("creator_notes") or card.get("creatorcomment")) or description or situation
+    intro_source = (
+        _character_sentence(name, description, situation)
+        or _text(data.get("creator_notes") or card.get("creatorcomment"))
+        or description
+        or situation
+    )
     examples = re.sub(r"<START>\s*", "", _text(data.get("mes_example") or data.get("example_dialogue")), flags=re.I)
     return Scenario(
         scenario_id=path.stem,
@@ -301,6 +309,22 @@ def _lines(value: object) -> str:
 def _clip(text: str, limit: int) -> str:
     text = str(text or "").strip()
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _character_sentence(name: str, *texts: str) -> str:
+    """The first sentence that is about the character, without its name in front ("27岁，主唱…")."""
+    for text in texts:
+        plain = _TAGS.sub("", re.sub(r"\{\{\s*char\s*\}\}", name, str(text or ""), flags=re.I))
+        plain = re.sub(r"\{\{\s*user\s*\}\}", "你", plain, flags=re.I)
+        for sentence in _SENTENCE_END.split(plain):
+            sentence = sentence.strip(" #*>-_，,；;：:")
+            if not sentence or _DISCLAIMER.search(sentence):
+                continue
+            if name and sentence.startswith(name):
+                sentence = re.sub(r"^[，,：:是]+", "", sentence[len(name):]).strip()
+            if sentence:
+                return sentence
+    return ""
 
 
 def _intro(text: str) -> str:
