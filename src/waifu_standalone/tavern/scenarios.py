@@ -41,6 +41,10 @@ _TAGS = re.compile(r"<[^>]{1,200}>")
 # Sentences cards open with that say nothing about the character ("原创角色卡", "人物均为成年人").
 _DISCLAIMER = re.compile(r"角色卡|原创|成年|创作|免责|仅供|NSFW|成人向|creator|\bcard\b", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[。！？!?\n]")
+_SYSTEM_CARD = re.compile(
+    r"不是(?:一个)?特定的?角色|无法进行任何对话|交互式电影|叙述者|旁白系统|\bnarrator\b|game master", re.IGNORECASE
+)
+_CREDITS = re.compile(r"点击跳转|点击右箭头|分享于|请勿倒卖|许可证|Discord|教程", re.IGNORECASE)
 _FORMAT_SECTION = re.compile(r"^\s*[【\[]\s*(?:输出格式|回复格式|格式要求|output format)", re.MULTILINE | re.IGNORECASE)
 _INTRO_MAX_CHARS = 30
 # Cards from the internet can be long; the game master's prompt has a budget.
@@ -76,6 +80,8 @@ class Scenario:
     source: str = ""
     # From the adult folder: offered only where ``tavern.adult_user_ids`` allows it.
     adult: bool = False
+    # A SillyTavern card: its opening is written for a web page, so the model retells it.
+    from_card: bool = False
 
     def render(self, text: str, *, user: str) -> str:
         """Fill in SillyTavern's {{char}} and {{user}}."""
@@ -273,15 +279,35 @@ def _from_tavern_card(card: dict[str, Any], path: Path) -> Scenario:
         scenario_id=path.stem,
         title=name,
         intro=_intro(intro_source),
-        kind="character",
+        kind="story" if _plays_a_system(description, personality, situation) else "character",
         character=name,
         setting=_clip(setting, _SETTING_MAX_CHARS),
         notes=_clip(notes, _NOTES_MAX_CHARS),
-        opening=_clip(_text(data.get("first_mes") or data.get("char_greeting")), _OPENING_MAX_CHARS),
+        opening=_clip(_story_greeting(data), _OPENING_MAX_CHARS),
         examples=_clip(examples.strip(), _EXAMPLES_MAX_CHARS),
         lore=lore,
         source=str(path),
+        from_card=True,
     )
+
+
+def _plays_a_system(description: str, personality: str, situation: str) -> bool:
+    """A card that is a game or a narrator rather than a person ("仙女界不是一个特定的角色，而是一个RPG系统")."""
+    text = "\n".join((description, personality, situation))
+    return bool(_SYSTEM_CARD.search(text) or re.search(r"RPG", description[:200], re.IGNORECASE))
+
+
+def _story_greeting(data: dict[str, Any]) -> str:
+    """The first greeting that tells a story; some cards open with a credits page ("点击右箭头开始正文内容→")."""
+    greetings = [_text(data.get("first_mes") or data.get("char_greeting"))]
+    alternates = data.get("alternate_greetings")
+    if isinstance(alternates, list):
+        greetings.extend(_text(item) for item in alternates)
+    for greeting in greetings:
+        plain = re.sub(r"\s+", "", _TAGS.sub("", greeting))
+        if len(plain) >= 40 and not _CREDITS.search(plain):
+            return greeting
+    return greetings[0]
 
 
 def _without_format_rules(text: str) -> str:

@@ -456,7 +456,7 @@ class TavernTests(unittest.TestCase):
         self._send(_group("启动酒馆", mention=True), _group("选仙境"))
 
         reference = str(self.gm.game_requests()[-1][-1]["content"])
-        self.assertIn("仙境\n仙门大开，山风扑面。", reference)
+        self.assertIn("仙境\n\n仙门大开，山风扑面。", reference)
         self.assertNotIn("<", reference.split("如下")[1].split("现在用你")[0])
 
     def test_the_tavern_can_use_a_model_of_its_own(self) -> None:
@@ -502,6 +502,36 @@ class TavernTests(unittest.TestCase):
         self.gm.narrate = lambda messages: "他们开始做爱。"
         self._send(_private("启动酒馆"), _private("选 1"), _private("我关上灯"))
         self.assertEqual(self._texts()[-1], "他们开始做爱。")
+
+    def test_a_card_that_is_a_game_is_narrated_not_played_as_a_person(self) -> None:
+        scenarios = self.root / "tavern" / "scenarios"
+        scenarios.mkdir(parents=True)
+        card = {
+            "spec": "chara_card_v2",
+            "data": {
+                "name": "逆天修仙",
+                "description": "这是一个修仙RPG游戏，仙女界不是一个特定的角色，而是一个RPG系统。",
+                "first_mes": "<div>本角色卡分享于以下：Discord 社区 点击跳转。请勿倒卖。点击右箭头开始正文内容→</div>",
+                "alternate_greetings": ["*天空裂开一道缝，一个少年从云里坠了下来，砸进仙女界的山门前。*\n守门的仙子愣住了：「男人？」"],
+            },
+        }
+        (scenarios / "xianxia.json").write_text(json.dumps(card, ensure_ascii=False), encoding="utf-8")
+        self.gm.narrate = lambda messages: "<div>*山门前一片寂静。*</div>\n守门仙子：「报上名来。」"
+
+        menu = self.service.handle_event(_group("启动酒馆", mention=True)).text
+        self.assertIn("5. 逆天修仙：", menu)
+        self.assertNotIn("逆天修仙（角色卡）", menu)
+        self._send(_group("选逆天修仙"))
+
+        request = self.gm.game_requests()[-1]
+        system = str(request[0]["content"])
+        self.assertTrue(system.startswith("你在 QQ 群里当跑团主持人，正在主持《逆天修仙》"))
+        self.assertIn("篇幅 150 到 400 字", system)
+        opening = str(request[-1]["content"])
+        self.assertIn("以主持人的身份写开场", opening)
+        self.assertIn("天空裂开一道缝", opening)  # the greeting that tells the story,
+        self.assertNotIn("点击跳转", opening)  # not the credits page
+        self.assertEqual(self._texts()[-1], "山门前一片寂静。\n\n守门仙子：「报上名来。」")  # no HTML, no asterisks
 
     def test_the_config_file_sets_the_tavern(self) -> None:
         # ConfigManager.load() would also look for napcat/config under the working directory.
