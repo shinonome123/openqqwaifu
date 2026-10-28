@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，792 个，约 125 秒，目前全过；测试在临时工作目录里跑（见第 3.1.1 节）。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，794 个，约 126 秒，目前全过；测试在临时工作目录里跑（见第 3.1.1 节）。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -51,12 +51,13 @@
   - SillyTavern 卡常要求每轮写 `<场景>地点|时间|氛围</场景>`、`<状态>数值|心情|心声</状态>`、`<选项>行动一|行动二</选项>`（网页上画成状态栏和按钮）。发到 QQ 前由 `render_markup` 转成「【地点 · 时间 · 氛围】」「（数值｜心情｜心声）」「可以选：① 行动一　② 行动二」；剧情记录里保留原样，模型接着按格式写，状态数值接着算。卡在菜单里的简介取描述里第一句讲人物的话（跳过含「原创」「成年」「角色卡」「NSFW」这类声明的句子，去掉开头的名字），找不到才用作者备注。
   - 角色卡用聊天风演（2026-10-28，owner 看了真实输出觉得「不像人说的话」）：`kind=character` 的局，system 换成「你就是X，正在 QQ 群里跟大家对戏」和 `_CHARACTER_RULES`：第一人称、动作写在（）里、一次一到四句，不写场景标题、状态栏、选项、「名字：「台词」」剧本格式，不复述对方、不提规则和编号。导入时去掉卡里「【输出格式…】」开头的整段（`scenarios._without_format_rules`），这类卡（同一作者批量生成）要求每轮写 `<场景>/<状态>/<选项>`，台词里还会冒出「不替你编」这种规则原话。卡的开场白不再原样发：去掉标记和 HTML 后作为参考交给模型（`_CHARACTER_OPENING`），由她用聊天口吻说第一句，顺便去掉「成人向边界」这类字眼；回复发出前用 `_as_chat` 再清一遍标记和剧本格式，剧情记录里存的也是清过的，模型看到的历史保持聊天风。自带的跑团本仍用主持人旁白，规则里加了一条「别在旁白和台词里提规则、选项和编号」。
   - 成人模式（2026-10-28）：`tavern.adult_user_ids`（默认空）里的人**在私聊里**开局时，菜单里多出 `data/tavern/adult/` 的卡（标「（成人）」，id 以 `adult/` 开头），这一局（`TavernSession.adult`）的内容规则换成 `_ADULT_CONTENT`：亲密情节按卡的设定写、不一笔带过，角色都是成年人、双方自愿、对方犹豫/拒绝/说停就停，不写未成年人、非自愿、真实人物。**群里永远不开**：群菜单不列成人区，群里的局永远用 `_SAFE_CONTENT`（一笔带过），成人区的卡在群里选不了也开不了。owner 要过群里也开，没有做：群成员没有都同意、年龄无法确认，群里传播色情内容在国内有法律风险，QQ 也会封号。
+  - 酒馆单独用模型（2026-10-28，owner：「现在的grok不对劲，这个ai就专门接酒馆」）：`tavern.llm_base_url`、`llm_api_key`、`llm_model` 都填了，主持、角色卡和前情提要都走这个 OpenAI 兼容接口（`TavernMode._complete`，`OpenAILLMClient`），否则沿用 `llm`。回复里的 `<think>…</think>` 整段去掉。线上接的是 deepseektavern.com（new-api 网关，`https://deepseektavern.com/v1`）的 `deepseek-tavern-v2-pro`；它还列了 `-low`、`-xhigh` 和 `tavern-abliterated-low` 等专做酒馆、限制更少的模型，所以加了输出检查：不是成人局（`TavernSession.adult` 为假，群里永远为假）时，回复里出现 `_EXPLICIT` 里的词就带着「刚才那段写得太露骨了…重写成一笔带过」再要一次，还是有就发「（这一段跳过。）」。dry_run：七濑莉央用聊天风开场「喂，别站那么远嘛，线索又不会长腿跑了……」，每轮 5.6–10.7 秒（grok 是 8–20 秒）；玩家消息里的「【资本狗】」被她当成骂人的话接了，规则里补了一条「【】里是说话人的名字」。
   - 存储（`tavern/session.py`）：进行中的局在 `data/tavern/sessions/<group|person>_<id>.json`，每次变动原子写入；重启后这个聊天来第一条消息时读回并继续（有没答的行动就接着开一轮）。读回时已经超时的局直接归档，不在群里补发通知。结束后移到 `data/tavern/archive/<聊天>-<开局时间>.json`（只开了菜单没开本的不留）。剧情不写进角色的会话历史、知识和好感度。
   - 超时：菜单 `menu_timeout_seconds`（300 秒），开局后 `idle_timeout_seconds`（1800 秒）没人说话就自动结束并说一句；正在写的一轮写完才结束。设成 0 不自动结束。
   - 配置 `tavern`（`config.py::TavernConfig`）：`enabled`（默认开）、上面几个时间、`max_players`（6）、`history_chars`、`starter_user_ids`（空表示谁都能开）、`admin_user_ids`。`settings_admin/config_manager.py::_load_dataclass` 现在也读字符串列表。
   - 主持人规则：不替玩家做决定、说话或掷骰；点到每个人；可以要求掷骰但不编结果；掷骰失败只写角色感知到的；玩家没说过性别就用名字称呼；80–250 字；结尾问接下来做什么；不写露骨性内容和血腥细节；主持要点里的秘密不直接说。
   - `reply_flow/service.py` 里酒馆这一步出异常时记 ERROR 日志，照常交给角色回复，不会让整个聊天没回应。
-  - 测试 `tests/test_tavern.py`（19 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
+  - 测试 `tests/test_tavern.py`（21 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
   - 没做：存档和读档命令、主持人自己用工具（掷 NPC 的骰子、给场景生图）、控制台页面；开局期间局外人在群里得不到角色的回复（只能私聊）；`max_players` 满了只拒绝，不排队。
 - 听完再说（`feat/listen-first`，`reply_flow/listener.py`，配置 `listen`，默认开；`listen.enabled=false` 回到原来的做法）：
   - 等人说完：每条消息在拿会话锁之前由 `Listener.note_inbound` 记下到达时间（`/` 开头、`ignore_user_ids` 的不记）。要回的消息在存进历史、处理完换卡命令之后，由 `await_turn` 等这个人安静 `quiet_seconds`（2 秒），从第一条没回的算起最多等 `max_wait_seconds`（8 秒）。这期间这个人又发了消息，这条就不单独回：它那句已经在历史里，图片交给新的那条（`with_earlier_images`，最多 4 张），由最新那条一起回。`/skill`、`生图`、换卡命令不等。群回复额度（`acquire_group_reply_slot`）挪到等完之后，被合并的消息不占额度。
@@ -234,6 +235,7 @@
 - 人物卡的插话设置（2026-10-28，「听完再说」上线时）：三张卡的 meta 加了 `interests`、`call_names`（`["奴隶", "奴隶哥"]`，群友按 QQ 昵称这么叫她）和 `chime_in`。按人设拟的兴趣：极光 39 个（霓虹、夜景、像素小游戏、穿搭拍照、被夸、生病熬夜、受委屈、难过、斗嘴输赢…），门槛 0.40、间隔 120 秒、桶 2、每小时 8 次；小葵 38 个（甜食奶茶、游戏上分抽卡、输赢打赌、起哄八卦吃瓜、作业考试摸鱼、没人理…），0.36、60 秒、3、12 次；晚晴 39 个（热茶读书黄昏下雨、累、失眠、生病、难过、失恋、想家、没吃饭、面试升职、吵架…），0.38、90 秒、3、10 次。owner 要求「尽量多接上话而不是少接，根据每个人的性格来」。用 text-embedding-v4 量的 16 句样例：小葵过门槛 14 句，晚晴 13 句（心情类 0.55–0.70），极光 9 句，猫、球赛、调 bug 只有小葵会接。改之前的 meta 备份在 `data/backups/before-card-interests-20261028-044041/`。
 - 酒馆角色卡（2026-10-28）：`data/tavern/scenarios/` 放了 owner 上传的两张 SillyTavern V3 卡（作者「磊哥哥」，原创系列）。七濑莉央：「星雾偶像事务所」，27 岁主唱，城市靠演出供电、低人气街区停电的冒险剧情，17 条世界书。顾绮：「午夜绒幕」，35 岁剧院投资人，作者标了成人向，暧昧恋爱剧情，10 条世界书。两张都标了 NSFW，正文没扫到露骨内容；dry_run 各玩一轮正常（莉央推进剧情，顾绮是雨夜后台谈判，都没有露骨描写）。owner 当时不在电脑旁，卡经私有仓库 `shinonome123/tavern-cards` 中转：手机浏览器打开 `https://github.com/shinonome123/tavern-cards/upload/main` 上传，再用 `gh api -H "Accept: application/vnd.github.raw" repos/shinonome123/tavern-cards/contents/<文件名>` 拉下来（文件名要 URL 编码；zsh 里 `?` 会被当通配符，带查询参数的地址要加引号）。聊天里贴的图片只有画面，读不到卡里的数据。
 - 人物卡插话设置第二版（2026-10-28 晚，owner 嫌插嘴太勤）：极光门槛 0.46、间隔 600 秒、桶 1、每小时 3 次；小葵 0.42、300 秒、2、6 次；晚晴 0.44、420 秒、1、4 次。兴趣和 `call_names` 没动。改之前的 meta 备份在 `data/backups/before-calmer-chime-in-*/`。
+- 酒馆模型（2026-10-28）：线上配置的 `tavern` 段加了 `llm_base_url`（deepseektavern.com）、`llm_api_key`（owner 在聊天里给的，只在这个文件里）、`llm_model=deepseek-tavern-v2-pro`。改之前的配置备份在 `data/backups/before-tavern-model-*/`。
 - 线上 `summarization_mode` 是 `true`、`memory_summary_batch_size` 是 12：现在每多出 12 行才调一次摘要。`knowledge_entries` 里如果还有旧的 `memory_type="summary"` 条目，召回会跳过，不会自动删除。
 
 ### 3.6 看图的实测（2026-10-27）
