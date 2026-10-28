@@ -193,6 +193,33 @@ class TavernTests(unittest.TestCase):
         self.assertEqual(second[-1]["content"], "【资本狗】我把信使扶到桌边\n【苦力怕】我去门口看看外面")
         self.assertEqual(self._texts()[-2:], ["第1段剧情。", "第2段剧情。"])
 
+    def test_the_bundled_stories_have_acts_and_endings(self) -> None:
+        for scenario in BUNDLED.scenarios():
+            self.assertGreater(scenario.rounds, 0, scenario.title)
+            self.assertEqual(len(scenario.twists.splitlines()), 3, scenario.title)  # three acts
+            self.assertGreaterEqual(len(scenario.endings.splitlines()), 4, scenario.title)
+            self.assertFalse(scenario.minors, scenario.title)
+
+    def test_a_story_is_paced_and_ends_on_its_finale(self) -> None:
+        self._start()
+        self._send(_group("我把信使扶到桌边"))
+        system = str(self.gm.game_requests()[-1][0]["content"])
+        self.assertIn("[剧情转折]\n第一幕（前三分之一）：黑潮打手追进酒馆", system)
+        self.assertIn("[可能的结局]\n好结局「雾散」", system)
+        self.assertIn("这个本计划大约 30 轮，现在是第 1 轮", system)
+        self.assertNotIn("已经超过计划的轮数", system)
+
+        self.service.tavern._sessions[("group", GROUP_ID)].rounds = 30
+        self.gm.narrate = lambda messages: "灯塔重新亮了起来，雾散了。\n\n（全剧终）"
+        self._send(_group("我们把海月石放回灯里"))
+        self.assertIn("已经超过计划的轮数", str(self.gm.game_requests()[-1][0]["content"]))
+        self.assertEqual(self._texts()[-2:], [
+            "灯塔重新亮了起来，雾散了。\n\n（全剧终）",
+            "《雾港酒馆》完结，一共玩了 31 轮，谢谢大家！（酒馆模式已关闭）",
+        ])
+        self.assertFalse(self._session_file().exists())
+        self.assertTrue(next((self.root / "tavern" / "archive").glob("group_*.json")).exists())
+
     def test_table_talk_and_outsiders_stay_out_of_the_story(self) -> None:
         self._start()
         self._send(_group("（我去倒杯水）"), _group("// 等我一下"), _group("这是在干嘛", sender=OUTSIDER))
@@ -314,7 +341,7 @@ class TavernTests(unittest.TestCase):
             self._send(_group(line))
 
         recap_requests = [request for request in self.gm.requests if "整理笔记" in str(request[0]["content"])]
-        self.assertEqual(len(recap_requests), 1)
+        self.assertGreaterEqual(len(recap_requests), 1)  # how many depends on how long the opening is
         self.assertIn("【资本狗】我扶起信使", str(recap_requests[0][1]["content"]))
         self._send(_group("我上船"))
         system = str(self.gm.game_requests()[-1][0]["content"])
