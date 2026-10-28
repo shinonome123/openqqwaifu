@@ -31,6 +31,7 @@ from ..character.cards import parse_card_file
 _LOGGER = logging.getLogger(__name__)
 
 _SUFFIXES = (".yaml", ".yml", ".json", ".png")
+ADULT_PREFIX = "adult/"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _MACROS = (
     (re.compile(r"\{\{\s*char\s*\}\}|<BOT>", re.IGNORECASE), "character"),
@@ -40,6 +41,7 @@ _TAGS = re.compile(r"<[^>]{1,200}>")
 # Sentences cards open with that say nothing about the character ("原创角色卡", "人物均为成年人").
 _DISCLAIMER = re.compile(r"角色卡|原创|成年|创作|免责|仅供|NSFW|成人向|creator|\bcard\b", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[。！？!?\n]")
+_FORMAT_SECTION = re.compile(r"^\s*[【\[]\s*(?:输出格式|回复格式|格式要求|output format)", re.MULTILINE | re.IGNORECASE)
 _INTRO_MAX_CHARS = 30
 # Cards from the internet can be long; the game master's prompt has a budget.
 _SETTING_MAX_CHARS = 6000
@@ -72,6 +74,8 @@ class Scenario:
     examples: str = ""
     lore: list[LoreEntry] = field(default_factory=list)
     source: str = ""
+    # From the adult folder: offered only where ``tavern.adult_user_ids`` allows it.
+    adult: bool = False
 
     def render(self, text: str, *, user: str) -> str:
         """Fill in SillyTavern's {{char}} and {{user}}."""
@@ -96,14 +100,16 @@ class Scenario:
 
 
 class ScenarioLibrary:
-    def __init__(self, workspace_dir: Path, builtin_dir: Path) -> None:
+    def __init__(self, workspace_dir: Path, builtin_dir: Path, adult_dir: Path | None = None) -> None:
         self.workspace_dir = workspace_dir
         self.builtin_dir = builtin_dir
+        self.adult_dir = adult_dir
         # path -> (mtime, scenario): a PNG card is read again only when it changes.
         self._cache: dict[Path, tuple[float, Scenario | None]] = {}
 
-    def scenarios(self) -> list[Scenario]:
-        """Bundled scenarios first, then the workspace's, each in file-name order."""
+    def scenarios(self, *, adult: bool = False) -> list[Scenario]:
+        """Bundled scenarios first, then the workspace's, each in file-name order; with
+        ``adult``, the adult folder's after them (their ids start with "adult/")."""
         files: dict[str, Path] = {}
         for root in (self.builtin_dir, self.workspace_dir):
             if not root.is_dir():
@@ -113,12 +119,17 @@ class ScenarioLibrary:
                     files.pop(path.stem, None)  # a workspace file replaces the bundled one
                     files[path.stem] = path
         scenarios = [self._load(path) for path in files.values()]
+        if adult and self.adult_dir is not None and self.adult_dir.is_dir():
+            for path in sorted(self.adult_dir.iterdir()):
+                if path.is_file() and path.suffix.lower() in _SUFFIXES:
+                    scenarios.append(self._load(path, adult=True))
         return [scenario for scenario in scenarios if scenario is not None]
 
     def get(self, scenario_id: str) -> Scenario | None:
-        return next((item for item in self.scenarios() if item.scenario_id == scenario_id), None)
+        adult = scenario_id.startswith(ADULT_PREFIX)
+        return next((item for item in self.scenarios(adult=adult) if item.scenario_id == scenario_id), None)
 
-    def _load(self, path: Path) -> Scenario | None:
+    def _load(self, path: Path, *, adult: bool = False) -> Scenario | None:
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -131,6 +142,9 @@ class ScenarioLibrary:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             _LOGGER.warning("tavern scenario %s skipped: %s", path.name, exc)
             scenario = None
+        if scenario is not None and adult:
+            scenario.adult = True
+            scenario.scenario_id = ADULT_PREFIX + scenario.scenario_id
         self._cache[path] = (mtime, scenario)
         return scenario
 
@@ -240,8 +254,8 @@ def _from_tavern_card(card: dict[str, Any], path: Path) -> Scenario:
     notes = "\n".join(
         part
         for part in (
-            _text(data.get("system_prompt")).replace("{{original}}", "").strip(),
-            _text(data.get("post_history_instructions")).replace("{{original}}", "").strip(),
+            _without_format_rules(_text(data.get("system_prompt")).replace("{{original}}", "")),
+            _without_format_rules(_text(data.get("post_history_instructions")).replace("{{original}}", "")),
         )
         if part
     )
@@ -268,6 +282,15 @@ def _from_tavern_card(card: dict[str, Any], path: Path) -> Scenario:
         lore=lore,
         source=str(path),
     )
+
+
+def _without_format_rules(text: str) -> str:
+    """A card's instructions without its output-format section ("【输出格式…】" to the end).
+
+    Those rules feed the web page's status bar and buttons; in QQ the character chats instead.
+    """
+    match = _FORMAT_SECTION.search(text)
+    return (text[: match.start()] if match else text).strip()
 
 
 def _lore_entry(item: object) -> LoreEntry | None:
