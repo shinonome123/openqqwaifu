@@ -208,6 +208,17 @@ class ReplyFlowService:
                 0,
                 f"{address}管你叫「{assistant_alias}」，这是对方给你起的称呼；你本人仍是{assistant_name}。",
             )
+        # How close she is to this person sets her tone with them.
+        bond = await asyncio.to_thread(
+            svc.state_store.get_member,
+            group_id=event.launcher_id if event.launcher_type == "group" else "",
+            user_id=event.sender_id,
+            character_id=current_character,
+        )
+        tones = svc.cards.character_meta(current_character).get("tone_by_stage")
+        relationship = svc.value_game.relationship_note(bond, address=address, tones=tones)
+        if relationship:
+            speaker_notes.insert(0, relationship)
         analysis_hint = await svc.thoughts.aanalyze(
             event,
             session,
@@ -285,7 +296,6 @@ class ReplyFlowService:
             # The emitter only uses this to label the rolling summary.
             assistant_name=dialogue_assistant_name,
             emotion=emotion,
-            search_used=bool(search_context.active),
             behavior_reason="chime_in" if spontaneous else "reply",
             character_id=current_character,
         )
