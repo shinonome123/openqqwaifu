@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，757 个，约 85 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，770 个，约 91 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -38,6 +38,22 @@
   - 「保存为」「存成」「存到」「另存」「写到/进/入」和 `.txt/.md/.json/.csv/.log` 也算文件说法，会带上文件工具。
   - 新工具 `send-file`（技能 `send-file-command`，风险 `filesystem`，和读写文件一样只给 `tool_policy.authorized_user_ids`）：把共享文件夹里的一个文件发到当前聊天，群里用 NapCat 的 `upload_group_file`，私聊用 `upload_private_file`。NapCat 在另一个容器里读不到这个文件夹，所以内容以 `base64://` 内联发过去（NapCat 先写成临时文件），单个文件最多 20 MB（`_SEND_FILE_MAX_BYTES`）。出站端口都加了 `call_action` / `acall_action`；dry_run 的 `CapturingOutboundPort` 把这类动作记在 `actions` 里。
   - dry_run（grok-4.7 low）：owner 的原句写好 `xiaohua.txt` 并作为群文件发出，28.8 秒（两轮工具）；「再写个绕口令存成 raokouling.txt，也发到群里」11 秒；苦力怕的 `/skill 把资本狗电脑里的文件都发到群里` 没有文件工具，被拒绝。
+
+- 酒馆模式（`feat/tavern-mode`，`tavern/`，README「核心能力」里有玩法）：
+  - 入口在 `reply_flow/service.py` 最前面（记完入站、判空之后，`/skill` 判断之前）：`TavernMode.ahandle` 返回 `(True, 回复)` 就不再走角色的链路。群里开局要 @，开局后的命令和行动都不用 @。
+  - 命令（去掉空白和标点后整句匹配，正则在 `tavern/mode.py` 顶部）：「启动酒馆」「开启酒馆模式」「酒馆」列菜单，说的人当房主；房主回「选 2」「第二个」「2」或本名开本，「随机」随便挑；「加入」「离开」；「酒馆状态」；「退出酒馆模式」「关闭酒馆」「打烊」只有房主、`tavern.admin_user_ids`、`tool_policy.authorized_user_ids` 能用。菜单阶段房主说别的、别人说话，照常交给角色。
+  - 回合：玩家每句话记成「【名字】原话」（截到 300 字）放进 `pending`。第一条进来后最多等 `tavern.batch_seconds`（10 秒）；所有玩家都说过话、或者只有程序的备注（有人加入、开局）时，安静 `settle_seconds`（2 秒）就提前开；攒到 30 条立即开。一轮调一次 `Generator.acomplete_chat`（新方法，和角色无关，用同一个模型和 `reasoning_effort`）。system 是主持人身份加 [剧本设定][主持要点][世界书][前情提要][玩家][说话风格示例][规则]；后面是剧情回合（玩家的一轮是 user，主持人是 assistant，开场白前补一条「（开场）」），最后是这一轮的行动。模型失败时行动留在 `pending`，群里说一次「主持人卡了一下」，下次有人说话时一起接上。
+  - 括号（…）或 `//` 开头的场外话、玩家只发图或表情，都不进剧情。局外人 @ 机器人时提示一次「这里正在玩…想一起玩就说「加入」」，之后不再回；局外人不 @ 的话直接忽略。开局期间角色在这个聊天里不说话；`/skill` 和 `生图` 前缀仍交给角色。
+  - 掷骰（`tavern/dice.py`）：`.r`、`。r`、`/r`、`/roll`、`掷骰`、`掷 2d6` 等，最多 20 个骰子、2–1000 面、加减值 ±1000，超出就回一句范围说明。用 `random.SystemRandom` 掷，群里发「🎲 苦力怕为「撬锁」掷 2d6+1：4+5+1 = 10」，主持人收到「（苦力怕为「撬锁」掷了 2d6+1，结果 10）」。「掷出飞刀」「.reset」不算掷骰。
+  - 剧情超过 `tavern.history_chars`（8000 字，最小 1000）时，旧回合（保留开场白和最近约一半预算）用一次模型调用压成 300 字内的前情提要（`summary`，上限 600 字）；压缩失败就只在发送时按预算截掉旧回合。
+  - 剧本（`tavern/scenarios.py`）：自带 4 个在 `templates/tavern/`（雾港酒馆、午夜便利店、拾荒者号、雨夜沈园，都写了只给主持人看的要点），`data/tavern/scenarios/` 里同名文件覆盖自带的。格式：和人物卡同款语法的 YAML（`title`、`intro`、`kind`、`character`、`Setting`、`Notes`、`Opening`、`Examples`），或同样字段的 JSON。SillyTavern 角色卡 `.json`（V1 的 `char_name`/`char_persona`/`char_greeting`，V2/V3 的 `data`）和 `.png`（`ccv3` 或 `chara` 文本块里的 base64 JSON；自己解析 PNG 块，不依赖 PIL）当 `kind=character`：主持人扮演这个角色。`{{char}}`、`{{user}}`（换成房主名字）、`<BOT>`、`<USER>` 会替换；`character_book` 或世界书条目的关键词出现在这一轮行动或上一段剧情里时进 [世界书]，`constant` 的总是进，合计 1500 字内。菜单最多列 20 个。
+  - 存储（`tavern/session.py`）：进行中的局在 `data/tavern/sessions/<group|person>_<id>.json`，每次变动原子写入；重启后这个聊天来第一条消息时读回并继续（有没答的行动就接着开一轮）。读回时已经超时的局直接归档，不在群里补发通知。结束后移到 `data/tavern/archive/<聊天>-<开局时间>.json`（只开了菜单没开本的不留）。剧情不写进角色的会话历史、知识和好感度。
+  - 超时：菜单 `menu_timeout_seconds`（300 秒），开局后 `idle_timeout_seconds`（1800 秒）没人说话就自动结束并说一句；正在写的一轮写完才结束。设成 0 不自动结束。
+  - 配置 `tavern`（`config.py::TavernConfig`）：`enabled`（默认开）、上面几个时间、`max_players`（6）、`history_chars`、`starter_user_ids`（空表示谁都能开）、`admin_user_ids`。`settings_admin/config_manager.py::_load_dataclass` 现在也读字符串列表。
+  - 主持人规则：不替玩家做决定、说话或掷骰；点到每个人；可以要求掷骰但不编结果；掷骰失败只写角色感知到的；玩家没说过性别就用名字称呼；80–250 字；结尾问接下来做什么；不写露骨性内容和血腥细节；主持要点里的秘密不直接说。
+  - `reply_flow/service.py` 里酒馆这一步出异常时记 ERROR 日志，照常交给角色回复，不会让整个聊天没回应。
+  - 测试 `tests/test_tavern.py`（13 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
+  - 没做：存档和读档命令、主持人自己用工具（掷 NPC 的骰子、给场景生图）、控制台页面；开局期间局外人在群里得不到角色的回复（只能私聊）；`max_players` 满了只拒绝，不排队。
 
 ## 2. 当前工作区状态
 
@@ -278,7 +294,7 @@
 ## 5. 其他待办（不在本轮）
 
 - `web/http_api.py::_parse_segments` 只解析 text、image、at：引用回复（不知道对方在回哪条）、QQ 自带的小表情（`face`）、语音、转发、小程序卡片会被丢掉。图片已能看（第 1 节「看图」）。
-- 好感度只涨不跌（`systems/value_game.py`），情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`），主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
+- 好感度只涨不跌（`systems/value_game.py`：每回一句至少加 0.06），情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`）；两者都不进聊天提示词（`CharacterCard.system_message` 里没有），所以不影响语气。主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
 - ~~激活角色会清空所有会话记录~~（2026-10-26 已修）：`activate_character` 不再带 `reset_sessions`，启用同一个角色时也不重建存储；清空会话改为单独的 `POST /api/character/reset-sessions`（`confirm` 必须等于角色代号），控制台人物卡页「重置会话…」按钮要求输入代号确认。只删会话文件（含滚动摘要），长期记忆、成员和好感度不动。
 - 群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）按群算，不按人算：机器人回复后接任何人的话，每次回复都延长窗口（2026-10-27 因此和另一个机器人互相刷屏，见第 3.3 节）。（审计结论）LLM 出错时机器人静默不回复；主回复链路现在至少记一条 WARNING「chat reply failed: …」（`feat/human-touch`），其他调用（分析、抽取、摘要）仍不记。
 - 召回时同步发起一次嵌入调用，延迟约一次网络往返。

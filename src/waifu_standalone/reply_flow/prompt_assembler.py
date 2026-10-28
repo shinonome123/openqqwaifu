@@ -163,6 +163,20 @@ class Generator:
         ]
         return ":".join(part.replace(":", "_") for part in parts)
 
+    async def acomplete_chat(self, messages: list[dict[str, object]], *, user: str) -> str:
+        """One completion of messages the caller built itself (the tavern's game master).
+
+        Raises ``LLMClientError`` when no model is set up or the call fails.
+        """
+        if not self.llm_ready:
+            raise LLMClientError("the chat model is not configured")
+        if self._chat_messages_ready():
+            response = await self._llm_client.ainvoke_with_tools(messages, tools=[], user=user)
+            return self._clean_response(response.text)
+        # A backend that takes one prompt (Dify) gets the conversation as text.
+        prompt = "\n\n".join(f"[{message['role']}]\n{message['content']}" for message in messages)
+        return self._clean_response(await self._ainvoke_client(prompt, user=user))
+
     async def _ainvoke_client(self, query: str, *, user: str) -> str:
         client_state = getattr(self._dify_client, "__dict__", {})
         if "invoke" in client_state and "ainvoke" not in client_state:

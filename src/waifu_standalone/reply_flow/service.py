@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 from ..memory import KnowledgeService
@@ -9,6 +10,8 @@ from ..systems.searching import SearchContext
 
 if TYPE_CHECKING:
     from ..app import WaifuService
+
+_LOGGER = logging.getLogger(__name__)
 
 class ReplyFlowService:
     def __init__(self, service: WaifuService) -> None:
@@ -29,6 +32,15 @@ class ReplyFlowService:
         svc._record_inbound(event, text)
         if not text and event.image_count == 0:
             return None
+        # A tavern game in this chat takes its players' messages and its own commands.
+        # It sits in front of every message, so a fault in it must not silence the character.
+        try:
+            handled, tavern_reply = await svc.tavern.ahandle(event, text)
+        except Exception:
+            _LOGGER.exception("tavern mode failed; the character answers instead")
+            handled, tavern_reply = False, None
+        if handled:
+            return tavern_reply
         # "/skill <name> ..." is a command even though "/" is an ignored prefix.
         explicit_skill = svc.dispatcher.resolve_explicit_skill_request(text)
         # "/skill 在我的电脑上写个笑话" names no skill: the model takes the request, with

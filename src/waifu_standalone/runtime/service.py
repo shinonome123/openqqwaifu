@@ -66,6 +66,7 @@ from ..systems.emotions import EmotionSensor
 from ..systems.events import BehaviorEventEngine
 from ..systems.searching import SearchContext, SearchDecider
 from ..systems.value_game import ValueGameEngine
+from ..tavern import TavernMode
 from ..web.console_panels import ConsolePanels
 from .container import (
     _build_embedding_client,
@@ -178,6 +179,7 @@ class WaifuService:
     console: ConsolePanels = field(init=False, repr=False)
     character_service: CharacterService = field(init=False, repr=False)
     character_switcher: CharacterSwitcher = field(init=False, repr=False)
+    tavern: TavernMode = field(init=False, repr=False)
     member_service: MemberService = field(init=False, repr=False)
     memory_admin_service: MemoryAdminService = field(init=False, repr=False)
     skills_admin_service: SkillsAdminService = field(init=False, repr=False)
@@ -211,6 +213,7 @@ class WaifuService:
         self.session_repository = SessionRepository(self.memory.store)
         self.character_service = CharacterService(self)
         self.character_switcher = CharacterSwitcher(self)
+        self.tavern = TavernMode(self)
         self.member_service = MemberService(self)
         self.memory_admin_service = MemoryAdminService(self)
         self.skills_admin_service = SkillsAdminService(self)
@@ -453,6 +456,7 @@ class WaifuService:
 
     def close(self, *, timeout: float | None = None) -> None:
         self.begin_shutdown()
+        self.tavern.close()
         if self.private_runtime is not None:
             self.private_runtime.close(timeout=60.0 if timeout is None else timeout)
         with self._runtime_guard:

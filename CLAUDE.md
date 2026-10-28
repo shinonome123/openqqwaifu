@@ -82,6 +82,7 @@ docker compose -f compose.napcat.yml up -d
 - **`organs/`** - Higher-level cognition: `memories.py` (memory recall/summary), `thoughts.py` (thinking mode), `memory_graph.py` (graph-based memory), `proactive.py` (proactive messaging)
 - **`systems/`** - Functional subsystems: `emotions.py`, `searching.py`, `events.py` (event buffering), `narrator.py` (narrator mode), `value_game.py` (affinity scoring)
 - **`gateways/`** - External protocol adapters: `onebot_http.py`, `onebot_actions.py` (OneBot action client), `onebot_ws.py` (reverse-WS inbound/event + outbound/action bridge), `napcat_login.py` (NapCat WebUI bridge for QQ login)
+- **`tavern/`** - Tavern (tabletop story game) mode: `mode.py` (chat commands, gathering players' actions into one game-master round, idle timeout), `scenarios.py` (bundled `templates/tavern/*.yaml`, `data/tavern/scenarios/`, SillyTavern `.json`/`.png` cards), `session.py` (running games in `data/tavern/sessions/`, finished ones in `archive/`), `dice.py` (program-rolled dice). Hooked in at the top of `reply_flow/service.py`
 - **`web/`** - Static frontend: `dashboard.html` + JS/CSS assets with pages for overview, AI config, character editing, events, members, memory, sidecar status, skills, QQ login, abilities, advanced settings
 - **`templates/`** - YAML character templates (`default_group.yaml`, `default_person.yaml`)
 - **`builtin_skills/`** - Markdown skill definitions (concise-answer, image-command, search-command, etc.)
