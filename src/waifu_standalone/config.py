@@ -162,6 +162,27 @@ class StickerConfig:
 
 
 @dataclass(slots=True)
+class TavernConfig:
+    # 酒馆模式：@机器人说「启动酒馆」列出剧本，说的人当房主，「选 N」开本，机器人改当主持人带大家玩。
+    # 剧本在 data_root 下 tavern/scenarios/（自己写的 YAML，或 SillyTavern 角色卡 .json/.png），另有几个自带的。
+    enabled: bool = True
+    # 有人行动后最多等这么久，把这段时间所有玩家的行动合在一起，主持人一次写完。
+    batch_seconds: float = 10.0
+    # 每个玩家都说过话、之后又安静了这么久，就不再等满 batch_seconds（只有一个玩家时总是这样）。
+    settle_seconds: float = 2.0
+    # 这么久没人说话就自动结束；菜单等房主选本最多等这么久。
+    idle_timeout_seconds: float = 1800.0
+    menu_timeout_seconds: float = 300.0
+    max_players: int = 6
+    # 发给主持人的剧情最多多少字，超出的旧剧情压成前情提要。
+    history_chars: int = 8000
+    # 能开酒馆的 QQ 号；空表示谁都可以。
+    starter_user_ids: list[str] = field(default_factory=list)
+    # 除了房主，还能强制结束的 QQ 号；tool_policy.authorized_user_ids 里的人也能。
+    admin_user_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class RateLimitConfig:
     # 付费和外部工具的令牌桶：每个用户一个、每个群一个，两个都有余量才放行。
     # image 管生图；network 管搜索、网页抓取、summarize（三者共用一个桶）。
@@ -291,6 +312,7 @@ class AppConfig:
     rate_limits: RateLimitConfig = field(default_factory=RateLimitConfig)
     segmented_reply: SegmentedReplyConfig = field(default_factory=SegmentedReplyConfig)
     stickers: StickerConfig = field(default_factory=StickerConfig)
+    tavern: TavernConfig = field(default_factory=TavernConfig)
     # 群里回复时，如果那条消息之后又有人说过话，就引用它（QQ 里显示为「回复 xx」），
     # 看得出在回谁；紧接着回的不引用，跟真人一样。
     group_reply_quote: bool = True

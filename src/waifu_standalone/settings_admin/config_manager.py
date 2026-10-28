@@ -21,6 +21,7 @@ from ..config import (
     RateLimitConfig,
     SegmentedReplyConfig,
     StickerConfig,
+    TavernConfig,
     RuntimeV2Config,
     ToolPolicyConfig,
 )
@@ -55,6 +56,7 @@ class ConfigManager:
         rate_limits = _load_rate_limits(raw.get("rate_limits"))
         segmented_reply = _load_dataclass(SegmentedReplyConfig, raw.get("segmented_reply"))
         stickers = _load_dataclass(StickerConfig, raw.get("stickers"))
+        tavern = _load_dataclass(TavernConfig, raw.get("tavern"))
         claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
         runtime_v2 = RuntimeV2Config(**raw.get("runtime_v2", {}))
@@ -118,6 +120,7 @@ class ConfigManager:
             rate_limits=rate_limits,
             segmented_reply=segmented_reply,
             stickers=stickers,
+            tavern=tavern,
             group_reply_quote=bool(raw.get("group_reply_quote", True)),
             claw_runtime=claw_runtime,
             plugins=plugins,
@@ -266,6 +269,8 @@ def _load_dataclass(cls: type, raw_value: object):  # type: ignore[no-untyped-de
                 values[name] = max(type(default)(0), type(default)(raw))
             except (TypeError, ValueError):
                 values[name] = default
+        elif isinstance(default, list):
+            values[name] = _load_str_list(raw, default)
         else:
             values[name] = str(raw)
     return cls(**values)

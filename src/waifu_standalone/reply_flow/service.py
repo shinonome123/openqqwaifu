@@ -29,6 +29,10 @@ class ReplyFlowService:
         svc._record_inbound(event, text)
         if not text and event.image_count == 0:
             return None
+        # A tavern game in this chat takes its players' messages and its own commands.
+        handled, tavern_reply = await svc.tavern.ahandle(event, text)
+        if handled:
+            return tavern_reply
         # "/skill <name> ..." is a command even though "/" is an ignored prefix.
         explicit_skill = svc.dispatcher.resolve_explicit_skill_request(text)
         # "/skill 在我的电脑上写个笑话" names no skill: the model takes the request, with
