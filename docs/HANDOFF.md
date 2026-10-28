@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，769 个，约 92 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，770 个，约 91 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -51,7 +51,8 @@
   - 超时：菜单 `menu_timeout_seconds`（300 秒），开局后 `idle_timeout_seconds`（1800 秒）没人说话就自动结束并说一句；正在写的一轮写完才结束。设成 0 不自动结束。
   - 配置 `tavern`（`config.py::TavernConfig`）：`enabled`（默认开）、上面几个时间、`max_players`（6）、`history_chars`、`starter_user_ids`（空表示谁都能开）、`admin_user_ids`。`settings_admin/config_manager.py::_load_dataclass` 现在也读字符串列表。
   - 主持人规则：不替玩家做决定、说话或掷骰；点到每个人；可以要求掷骰但不编结果；掷骰失败只写角色感知到的；玩家没说过性别就用名字称呼；80–250 字；结尾问接下来做什么；不写露骨性内容和血腥细节；主持要点里的秘密不直接说。
-  - 测试 `tests/test_tavern.py`（12 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
+  - `reply_flow/service.py` 里酒馆这一步出异常时记 ERROR 日志，照常交给角色回复，不会让整个聊天没回应。
+  - 测试 `tests/test_tavern.py`（13 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
   - 没做：存档和读档命令、主持人自己用工具（掷 NPC 的骰子、给场景生图）、控制台页面；开局期间局外人在群里得不到角色的回复（只能私聊）；`max_players` 满了只拒绝，不排队。
 
 ## 2. 当前工作区状态

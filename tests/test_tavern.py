@@ -330,6 +330,17 @@ class TavernTests(unittest.TestCase):
         self.assertIn("[世界书]\n- 猫薄荷会让小咪犯迷糊。", system)
         self.assertIn("[说话风格示例]\n小咪: 喵~", system)
 
+    def test_a_fault_in_tavern_mode_does_not_silence_the_character(self) -> None:
+        async def broken(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("disk full")
+
+        with patch.object(self.service.tavern, "ahandle", broken), self.assertLogs(
+            "waifu_standalone.reply_flow.service", "ERROR"
+        ):
+            reply = self.service.handle_event(_group("你好", mention=True))
+        self.assertIsNotNone(reply)
+        self.assertTrue(str(self.gm.requests[-1][0]["content"]).startswith("你是"))
+
     def test_the_config_file_sets_the_tavern(self) -> None:
         # ConfigManager.load() would also look for napcat/config under the working directory.
         tavern = _load_dataclass(TavernConfig, {"enabled": False, "batch_seconds": 5, "admin_user_ids": ["1", " 2 "]})

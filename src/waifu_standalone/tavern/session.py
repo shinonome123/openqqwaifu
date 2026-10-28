@@ -98,7 +98,10 @@ class SessionFiles:
             return None
         except (OSError, ValueError, TypeError, AttributeError):
             # A damaged file must not keep the chat in a game nobody can end.
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
             return None
 
     def save(self, session: TavernSession) -> None:
