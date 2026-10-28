@@ -183,10 +183,18 @@ def _migration_003_skill_telemetry(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004_halve_affinity(conn: sqlite3.Connection) -> None:
+    # Bonds grew with every line until 2026-10-28, so a day of chat filled them up; they now
+    # grow per conversation (systems/value_game.py), and the old scores count for half.
+    conn.execute("UPDATE members SET affinity_score = affinity_score * 0.5")
+    conn.execute("UPDATE member_persona_state SET affinity_score = affinity_score * 0.5")
+
+
 MIGRATIONS: list[Migration] = [
     Migration(version=1, description="baseline schema", apply=_migration_001_baseline),
     Migration(version=2, description="assistant alias state", apply=_migration_002_assistant_aliases),
     Migration(version=3, description="skill telemetry events", apply=_migration_003_skill_telemetry),
+    Migration(version=4, description="halve affinity for per-conversation bonds", apply=_migration_004_halve_affinity),
 ]
 
 

@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from waifu_standalone.schema_migrations import Migration, current_version, run_migrations
+from waifu_standalone.schema_migrations import MIGRATIONS, Migration, current_version, run_migrations
 
 
 class SchemaMigrationTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class SchemaMigrationTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     ).fetchall()
                 }
-                self.assertEqual(version, 3)
+                self.assertEqual(version, 4)
                 self.assertIn("schema_version", tables)
                 self.assertIn("members", tables)
                 self.assertIn("member_persona_state", tables)
@@ -39,8 +39,8 @@ class SchemaMigrationTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(row)
                 assert row is not None
-                self.assertEqual(row[0], 3)
-                self.assertEqual(row[1], "skill telemetry events")
+                self.assertEqual(row[0], 4)
+                self.assertEqual(row[1], "halve affinity for per-conversation bonds")
             finally:
                 conn.close()
 
@@ -52,11 +52,29 @@ class SchemaMigrationTests(unittest.TestCase):
                 first = run_migrations(conn)
                 second = run_migrations(conn)
                 version_rows = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()
-                self.assertEqual(first, 3)
-                self.assertEqual(second, 3)
+                self.assertEqual(first, 4)
+                self.assertEqual(second, 4)
                 self.assertIsNotNone(version_rows)
                 assert version_rows is not None
-                self.assertEqual(version_rows[0], 3)
+                self.assertEqual(version_rows[0], 4)
+            finally:
+                conn.close()
+
+    def test_affinity_counts_for_half_once_bonds_grow_per_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = sqlite3.connect(Path(tmpdir) / "runtime.sqlite3")
+            try:
+                run_migrations(conn, migrations=MIGRATIONS[:3])
+                conn.execute("INSERT INTO members (group_id, user_id, affinity_score) VALUES ('1', '2', 1.0)")
+                conn.execute(
+                    "INSERT INTO member_persona_state (character_id, group_id, user_id, affinity_score) "
+                    "VALUES ('aurora', '1', '2', 0.6)"
+                )
+                conn.commit()
+                run_migrations(conn)
+                run_migrations(conn)  # once only
+                self.assertEqual(conn.execute("SELECT affinity_score FROM members").fetchone()[0], 0.5)
+                self.assertEqual(conn.execute("SELECT affinity_score FROM member_persona_state").fetchone()[0], 0.3)
             finally:
                 conn.close()
 
@@ -143,8 +161,8 @@ class SchemaMigrationTests(unittest.TestCase):
 
                 version = run_migrations(conn)
 
-                self.assertEqual(version, 3)
-                self.assertEqual(current_version(conn), 3)
+                self.assertEqual(version, 4)
+                self.assertEqual(current_version(conn), 4)
                 member_columns = {
                     row[1]
                     for row in conn.execute("PRAGMA table_info(members)").fetchall()

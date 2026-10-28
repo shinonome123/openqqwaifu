@@ -72,6 +72,14 @@
   - 代价：每次回复至少多等 2 秒；群里有人 @ 她时，同群其他消息要等这 2 秒加生成。全量测试从约 91 秒变成约 115 秒（带消息 id 的 @ 消息都会等）。
   - 测试 `tests/test_listen.py`（14 个）；测跟进窗口的旧测试（`test_group_reply_guard.py`、`test_reply_latency.py` 的 BacklogTests、`test_app.py` 的 3 个）显式用 `listen.enabled=false`。
   - 没做：生成时对方又补了一句就作废重写；QQ 引用回复（`web/http_api.py::_parse_segments` 不解析 `reply` 段：引用她的消息又不 @ 的人，只在她刚回过对方时才算在跟她说话）；每张卡话多话少不同（小葵的人设写着爱起哄）；插话的分数和原因还没进控制台。
+- 好感度影响语气（`feat/bond-tone`，`systems/value_game.py`，2026-10-28）：
+  - 以前每回一句至少加 0.08（`value_game_reply_bonus`），一两天就涨满 1.0：线上 owner、苦力怕、连大肥鱼跟极光和小葵都是 1.0；它也不进提示词，对谁都一个口气。
+  - 现在按「一次对话」涨：回复时离上次回这个人（同一角色、同一聊天，`member_persona_state.last_addressed_at`）超过半小时算新对话，涨 `value_game_reply_bonus`（默认 0.04，私聊再加 0.01，@ 再加 0.005，对方开心、难过时再加 0.005，生气减 0.01）；间隔更短按比例少涨，最少五十分之一；涨幅再乘 (1 − 当前分)。三天没回过这个人以后，每天回落 3%，回落后的分数在下次回复时存回去。骂她（`_INSULT`：傻逼、sb、滚开、闭嘴、去死、你个废物/白痴/智障…）直接 −0.05，可以掉到 0 以下。所以 `ValueGameEngine.apply` 要在 `mark_member_addressed` 之前调（`emitter.py` 两条路径都改了顺序），`search_used`、回复长度不再影响好感，参数删了。
+  - 模拟：每晚 30 句、一分钟一句，第 1 天「刚认识」，第 7 天「熟人」，第 14 天「亲近」，一个月左右「最亲近」（`tests/test_value_game.py`）。
+  - 阶段（`bond_stage`）：< 0 `cold`「关系很僵」，< 0.12 `new`「刚认识」，< 0.3 `warming`「渐渐熟起来」，< 0.55 `familiar`「熟人」，< 0.8 `close`「亲近」，其余 `devoted`「最亲近的人」；控制台成员页的 `bondStage` 同步加了 `cold`。
+  - 进提示词：`reply_flow/service.py` 每次回复取这个人的好感（回落后），`ValueGameEngine.relationship_note` 生成一行放在「关于对方」最前面：「你和X：亲近。<语气>（这只影响你的语气，别把好感、关系阶段这些说出口。）」。语气取卡 meta 的 `tone_by_stage`（按阶段写，没写的阶段用 `DEFAULT_TONES`）。线上三张卡都写了（备份在 `data/backups/before-card-tones-*`）：极光按傲娇（陌生时摆公主架子，亲近后嘴硬行动偏袒，最亲近时很容易破功），小葵按雌小鬼（熟了「只有我能欺负你」，亲近后黏人求关注），晚晴按大姐姐（亲近后唠叨心疼，最亲近时会说想念）。
+  - 旧分数：schema 迁移 4（`repositories/schema_migrations.py`）把 `members` 和 `member_persona_state` 的好感一次性减半，满分的人从「熟人」上沿（0.5）重新开始。线上配置里 `value_game_reply_bonus` 写死了 0.08，要改成 0.04，否则涨得快一倍。
+  - 没做：情绪（`systems/emotions.py`）还是关键词判断对方的情绪，不是她自己的心情；主动问候（`organs/proactive.py`）还只在控制台出草稿。
 
 ## 2. 当前工作区状态
 
@@ -322,7 +330,7 @@
 ## 5. 其他待办（不在本轮）
 
 - `web/http_api.py::_parse_segments` 只解析 text、image、at：引用回复（不知道对方在回哪条）、QQ 自带的小表情（`face`）、语音、转发、小程序卡片会被丢掉。图片已能看（第 1 节「看图」）。
-- 好感度只涨不跌（`systems/value_game.py`：每回一句至少加 0.06），情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`）；两者都不进聊天提示词（`CharacterCard.system_message` 里没有），所以不影响语气。主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
+- ~~好感度只涨不跌、不进提示词~~（2026-10-28 改：按对话涨、会回落、骂她会掉，阶段决定语气，见上面「好感度影响语气」）。情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`），不进提示词。主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
 - ~~激活角色会清空所有会话记录~~（2026-10-26 已修）：`activate_character` 不再带 `reset_sessions`，启用同一个角色时也不重建存储；清空会话改为单独的 `POST /api/character/reset-sessions`（`confirm` 必须等于角色代号），控制台人物卡页「重置会话…」按钮要求输入代号确认。只删会话文件（含滚动摘要），长期记忆、成员和好感度不动。
 - `listen.enabled=false` 时，群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）按群算，不按人算（开着「听完再说」时改成按人算，见第 1 节）：机器人回复后接任何人的话，每次回复都延长窗口（2026-10-27 因此和另一个机器人互相刷屏，见第 3.3 节）。（审计结论）LLM 出错时机器人静默不回复；主回复链路现在至少记一条 WARNING「chat reply failed: …」（`feat/human-touch`），其他调用（分析、抽取、摘要）仍不记。
 - 召回时同步发起一次嵌入调用，延迟约一次网络往返。

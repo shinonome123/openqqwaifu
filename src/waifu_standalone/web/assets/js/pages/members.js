@@ -456,6 +456,7 @@ function memberKey(member) {
 
 function bondStage(score) {
   const value = Number(score || 0);
+  if (value < 0) return "cold";
   if (value < 0.12) return "new";
   if (value < 0.3) return "warming";
   if (value < 0.55) return "familiar";

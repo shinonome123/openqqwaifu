@@ -308,8 +308,11 @@ class AppConfig:
     story_mode: bool = False
     story_style: str = "intimate"
     story_detail_level: int = 2
+    # 好感度：每次回复后按「这是不是一次新的对话」涨一点（越接近 1 涨得越慢），三天不聊开始慢慢回落，
+    # 骂她会掉；所处阶段决定她对这个人的语气（角色卡 meta 的 tone_by_stage 可以按阶段写语气）。
     value_game_mode: bool = True
-    value_game_reply_bonus: float = 0.08
+    # 一次新对话（距上次回这个人超过半小时）涨多少；间隔更短的按比例少涨，最少是它的五十分之一。
+    value_game_reply_bonus: float = 0.04
     memory_graph_mode: bool = True
     memory_graph_limit: int = 8
     proactive_mode: bool = False

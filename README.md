@@ -61,6 +61,7 @@ WaifuService (app.py)
   - 通过 NapCat / OneBot 接收和发送消息
   - 支持群聊、私聊、follow-up window、重复触发等行为控制
   - 听完再说（`listen`）：连着发的几句等说完再一起回；群里她刚回过的人接着说不用 @；没人叫她时，等群里安静下来，按话题和她的兴趣（人物卡 meta 的 `interests`）判断要不要插话，模型也可以选择不说；每张卡可以在 meta 的 `chime_in` 里调插话的门槛和频率，`call_names` 写群友对她的其他叫法
+  - 好感度影响语气：跟每个人的好感按对话慢慢涨，几天不聊会回落，骂她会掉；关系阶段（刚认识、熟人、亲近、最亲近…）决定她对这个人的语气，每张卡可以在 meta 的 `tone_by_stage` 里按阶段写
 - 角色系统
   - 支持多角色卡
   - 切换角色时会切换对应的 memory store 与 runtime state

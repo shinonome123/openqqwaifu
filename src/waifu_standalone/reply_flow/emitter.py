@@ -103,7 +103,6 @@ class OutboundEmitter:
         *,
         assistant_name: str,
         emotion: EmotionState | None = None,
-        search_used: bool = False,
         behavior_reason: str = "",
         character_id: str = "",
     ) -> OutboundMessage:
@@ -112,7 +111,7 @@ class OutboundEmitter:
         if delay > 0:
             self._service._submit_background_coro("delayed_outbound_send", self._deliver_after_delay(
                 event, message, delay_seconds=delay, assistant_name=assistant_name,
-                emotion=emotion, search_used=search_used, behavior_reason=behavior_reason,
+                emotion=emotion, behavior_reason=behavior_reason,
                 character_id=resolved_character_id,
             ))
             return message
@@ -124,6 +123,13 @@ class OutboundEmitter:
             event.launcher_id,
             event.launcher_type,
             message.text,
+            character_id=resolved_character_id,
+        )
+        # Before the member is marked as answered: the bond counts the time since the last reply.
+        self._service.value_game.apply(
+            state_store=self._service.state_store,
+            event=event,
+            emotion=emotion or EmotionState(),
             character_id=resolved_character_id,
         )
         self._service.member_repository.mark_member_addressed(
@@ -145,14 +151,6 @@ class OutboundEmitter:
                 character_id=resolved_character_id,
             )
         )
-        self._service.value_game.apply(
-            state_store=self._service.state_store,
-            event=event,
-            emotion=emotion or EmotionState(),
-            reply_text=message.text,
-            search_used=search_used,
-            character_id=resolved_character_id,
-        )
         self._service.gate.refresh_follow_up_window(event)
         self._service.listener.mark_answered(event, message, reason=behavior_reason)
         return message
@@ -164,7 +162,6 @@ class OutboundEmitter:
         *,
         assistant_name: str,
         emotion: EmotionState | None = None,
-        search_used: bool = False,
         behavior_reason: str = "",
         character_id: str = "",
         _skip_delay: bool = False,
@@ -174,7 +171,7 @@ class OutboundEmitter:
         if delay > 0:
             task = asyncio.create_task(self._deliver_after_delay(
                 event, message, delay_seconds=delay, assistant_name=assistant_name,
-                emotion=emotion, search_used=search_used, behavior_reason=behavior_reason,
+                emotion=emotion, behavior_reason=behavior_reason,
                 character_id=resolved_character_id,
             ))
             self._service._track_async_task("delayed_outbound_send", task)
@@ -187,6 +184,14 @@ class OutboundEmitter:
             event.launcher_id,
             event.launcher_type,
             message.text,
+            character_id=resolved_character_id,
+        )
+        # Before the member is marked as answered: the bond counts the time since the last reply.
+        await asyncio.to_thread(
+            self._service.value_game.apply,
+            state_store=self._service.state_store,
+            event=event,
+            emotion=emotion or EmotionState(),
             character_id=resolved_character_id,
         )
         await asyncio.to_thread(
@@ -208,15 +213,6 @@ class OutboundEmitter:
                 reason=behavior_reason or "reply",
                 character_id=resolved_character_id,
             )
-        )
-        await asyncio.to_thread(
-            self._service.value_game.apply,
-            state_store=self._service.state_store,
-            event=event,
-            emotion=emotion or EmotionState(),
-            reply_text=message.text,
-            search_used=search_used,
-            character_id=resolved_character_id,
         )
         self._service.gate.refresh_follow_up_window(event)
         self._service.listener.mark_answered(event, message, reason=behavior_reason)
