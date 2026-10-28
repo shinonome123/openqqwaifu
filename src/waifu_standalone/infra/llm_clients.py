@@ -633,14 +633,14 @@ class OpenAILLMClient(_BaseHTTPClient):
         *,
         tools: list[dict[str, object]],
         user: str = "waifu-standalone",
+        sampling: dict[str, float] | None = None,
     ) -> LLMToolResponse:
+        """``sampling`` (temperature, top_p, max_tokens, penalties) goes into the request as it is."""
         if not self.supports_tool_calling:
             raise LLMClientError("openai-compatible client is not configured")
-        raw = await self._apost_json(
-            self._endpoint("chat/completions"),
-            self._tool_payload(messages, tools=tools, user=user),
-            headers=self._headers(),
-        )
+        payload = self._tool_payload(messages, tools=tools, user=user)
+        payload.update(sampling or {})
+        raw = await self._apost_json(self._endpoint("chat/completions"), payload, headers=self._headers())
         return self._parse_tool_response(raw)
 
     def _parse_tool_response(self, raw: str) -> LLMToolResponse:
