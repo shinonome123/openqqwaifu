@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，780 个，约 116 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，783 个，约 118 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -42,6 +42,7 @@
 - 酒馆模式（`feat/tavern-mode`，`tavern/`，README「核心能力」里有玩法）：
   - 入口在 `reply_flow/service.py` 最前面（记完入站、判空之后，`/skill` 判断之前）：`TavernMode.ahandle` 返回 `(True, 回复)` 就不再走角色的链路。群里开局要 @，开局后的命令和行动都不用 @。
   - 命令（去掉空白和标点后整句匹配，正则在 `tavern/mode.py` 顶部）：「启动酒馆」「开启酒馆模式」「酒馆」列菜单，说的人当房主；房主回「选 2」「第二个」「2」或本名开本，「随机」随便挑；「加入」「离开」；「酒馆状态」；「退出酒馆模式」「关闭酒馆」「打烊」只有房主、`tavern.admin_user_ids`、`tool_policy.authorized_user_ids` 能用。菜单阶段房主说别的、别人说话，照常交给角色。
+  - 口语也能开局（2026-10-28 补）：对她说的话里有「开/启动/打开/进入/玩/来 + (一下/个/局) + 酒馆/跑团」就列菜单（`_START_INTENT`），「不开/别开酒馆」不算（`_START_REFUSED`）；开着「听完再说」时，不 @ 但叫她名字、`call_names`，或她刚回过的人说，也算在对她说（`_addressed` 用 `listener.addresses_bot`）。开局后只认整句命令，免得「我要在镇上开酒馆」这类行动被当成命令。没开局时消息提到酒馆或跑团，回复的 system 里多一段 `[酒馆模式]` 告诉她怎么开（`TavernMode.prompt_hint`）。起因：线上苦力怕说「我让他开酒馆模式」「命令出来他就得开」，原来只认 @ 加整句「启动酒馆」，没认出来，小葵不知道自己有这个功能，按人设一直拒绝。
   - 回合：玩家每句话记成「【名字】原话」（截到 300 字）放进 `pending`。第一条进来后最多等 `tavern.batch_seconds`（10 秒）；所有玩家都说过话、或者只有程序的备注（有人加入、开局）时，安静 `settle_seconds`（2 秒）就提前开；攒到 30 条立即开。一轮调一次 `Generator.acomplete_chat`（新方法，和角色无关，用同一个模型和 `reasoning_effort`）。system 是主持人身份加 [剧本设定][主持要点][世界书][前情提要][玩家][说话风格示例][规则]；后面是剧情回合（玩家的一轮是 user，主持人是 assistant，开场白前补一条「（开场）」），最后是这一轮的行动。模型失败时行动留在 `pending`，群里说一次「主持人卡了一下」，下次有人说话时一起接上。
   - 括号（…）或 `//` 开头的场外话、玩家只发图或表情，都不进剧情。局外人 @ 机器人时提示一次「这里正在玩…想一起玩就说「加入」」，之后不再回；局外人不 @ 的话直接忽略。开局期间角色在这个聊天里不说话；`/skill` 和 `生图` 前缀仍交给角色。
   - 掷骰（`tavern/dice.py`）：`.r`、`。r`、`/r`、`/roll`、`掷骰`、`掷 2d6` 等，最多 20 个骰子、2–1000 面、加减值 ±1000，超出就回一句范围说明。用 `random.SystemRandom` 掷，群里发「🎲 苦力怕为「撬锁」掷 2d6+1：4+5+1 = 10」，主持人收到「（苦力怕为「撬锁」掷了 2d6+1，结果 10）」。「掷出飞刀」「.reset」不算掷骰。
@@ -52,16 +53,17 @@
   - 配置 `tavern`（`config.py::TavernConfig`）：`enabled`（默认开）、上面几个时间、`max_players`（6）、`history_chars`、`starter_user_ids`（空表示谁都能开）、`admin_user_ids`。`settings_admin/config_manager.py::_load_dataclass` 现在也读字符串列表。
   - 主持人规则：不替玩家做决定、说话或掷骰；点到每个人；可以要求掷骰但不编结果；掷骰失败只写角色感知到的；玩家没说过性别就用名字称呼；80–250 字；结尾问接下来做什么；不写露骨性内容和血腥细节；主持要点里的秘密不直接说。
   - `reply_flow/service.py` 里酒馆这一步出异常时记 ERROR 日志，照常交给角色回复，不会让整个聊天没回应。
-  - 测试 `tests/test_tavern.py`（13 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
+  - 测试 `tests/test_tavern.py`（15 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
   - 没做：存档和读档命令、主持人自己用工具（掷 NPC 的骰子、给场景生图）、控制台页面；开局期间局外人在群里得不到角色的回复（只能私聊）；`max_players` 满了只拒绝，不排队。
 - 听完再说（`feat/listen-first`，`reply_flow/listener.py`，配置 `listen`，默认开；`listen.enabled=false` 回到原来的做法）：
   - 等人说完：每条消息在拿会话锁之前由 `Listener.note_inbound` 记下到达时间（`/` 开头、`ignore_user_ids` 的不记）。要回的消息在存进历史、处理完换卡命令之后，由 `await_turn` 等这个人安静 `quiet_seconds`（2 秒），从第一条没回的算起最多等 `max_wait_seconds`（8 秒）。这期间这个人又发了消息，这条就不单独回：它那句已经在历史里，图片交给新的那条（`with_earlier_images`，最多 4 张），由最新那条一起回。`/skill`、`生图`、换卡命令不等。群回复额度（`acquire_group_reply_slot`）挪到等完之后，被合并的消息不占额度。
   - 群里谁算在跟她说话：@ 她；不 @ 但说了卡上的名字（`assistant_name`）或卡 meta 的 `call_names`（不用别名，「姐姐」「小鬼」太常见）；她刚回过的人在 `continuation_seconds`（60 秒）内说的话；前一条被合并、正在连发的人。原来按群算、谁都能接的跟进窗口（`group_follow_up_window_seconds`）只在 `listen.enabled=false` 时用；待确认搜索的接话照旧。
   - 主动插话：群里没人叫她的消息（不含 `ignore_user_ids`、命令、只有图的）交给 `consider_chiming_in`。群里安静 `group_quiet_seconds`（4 秒）后，看她上次说话以来的环境缓冲（最多 6 行，去掉「名字: 」）：不同的字少于 4 个（笑声、「666」）直接跳过；打分取最大值——卡 meta `interests` 里 8 个字以内的词原样出现算 0.6，和每条兴趣的嵌入相似度（没有 `interests` 就用人设和擅长的句子），和她 10 分钟内说过的上一句的相似度。到了 `chime_in_threshold`（0.40），群的插话桶有余量（`chime_in_burst` 2、`chime_in_per_hour` 6），离她上次在这个群说话超过 `chime_in_min_gap_seconds`（180 秒），没有回复正在写、没开酒馆，才走一次回复链路（`WaifuService._process_chime_in` → `handle_event_async_locked(spontaneous=True)`）。门槛、间隔和桶可以按卡在 meta 的 `chime_in` 里改（`threshold`、`min_gap_seconds`、`burst`、`per_hour`，`Listener.limits()`），桶按角色和群分开。这次 system 末尾多一段 `[这次是你自己想插话]`（`CHIME_IN_HINT`），模型可以只回「[不说话]」（`is_silence` 认几种写法），那样什么都不发；不追加新成员的称呼追问，不执行命令。分数写在 INFO 日志里（`chime-in …` / `no chime-in …`），方便按真实聊天调门槛。
-  - 嵌入按 `embedding` 配置单独建一个客户端，兴趣和她说过的话的向量缓存在内存里；没配嵌入时只看关键词。
+  - 嵌入按 `embedding` 配置单独建一个客户端，兴趣和她说过的话的向量缓存在内存里；没配嵌入时只看关键词。没缓存的兴趣 8 个一起算（`_embed_all`；上线后第一次判断一个个算 39 个，用了约 12 秒）。
+  - 正在跟她聊的人（`addresses_bot`：叫她名字、`call_names`、她刚回过的人）和 @ 一样用每人一个的桶（`mention_reply_*`），不占群的共用桶（2026-10-28 补：线上苦力怕跟她聊得热闹时被群桶连着挡掉 5 条）。主动插话仍走群桶。
   - 实测（text-embedding-v4，三张线上卡，都没有 `interests`，用的是人设句子）：「加班到十点好累」0.48–0.49、「被领导骂了」0.47–0.50、「谁来陪我聊聊天」0.57、「群里好安静啊」0.61、接着她上一句说的 0.51–0.54；猫、球赛、天气、吃什么、调 bug 0.30–0.37；「我失恋了……」0.42–0.43。dry_run（grok-4.7 low，极光，把间隔和桶放开、5 个人各说一句）：好累、群里安静、失恋她都插了话且接得上前文，球赛没调模型；私聊「我跟你说个事」「今天面试过了！」只回了一次（「哈？居然过了？」）。这几次模型都没有选「[不说话]」，所以加了「不同的字少于 4 个不判断」。dry_run 期间连 api.x.ai 有两次 ConnectError，和本改动无关。
   - 代价：每次回复至少多等 2 秒；群里有人 @ 她时，同群其他消息要等这 2 秒加生成。全量测试从约 91 秒变成约 115 秒（带消息 id 的 @ 消息都会等）。
-  - 测试 `tests/test_listen.py`（10 个）；测跟进窗口的旧测试（`test_group_reply_guard.py`、`test_reply_latency.py` 的 BacklogTests、`test_app.py` 的 3 个）显式用 `listen.enabled=false`。
+  - 测试 `tests/test_listen.py`（11 个）；测跟进窗口的旧测试（`test_group_reply_guard.py`、`test_reply_latency.py` 的 BacklogTests、`test_app.py` 的 3 个）显式用 `listen.enabled=false`。
   - 没做：生成时对方又补了一句就作废重写；QQ 引用回复（`web/http_api.py::_parse_segments` 不解析 `reply` 段：引用她的消息又不 @ 的人，只在她刚回过对方时才算在跟她说话）；每张卡话多话少不同（小葵的人设写着爱起哄）；插话的分数和原因还没进控制台。
 
 ## 2. 当前工作区状态
@@ -316,6 +318,7 @@
 2. 不碰真实数据的实机冒烟。它会调用付费的模型和嵌入接口，每条消息约 3–4k 提示词 token、3–7 次调用：
    - 把 `data/docker-compose-config.json` 复制到一个临时目录，把 `data_root` 改成该目录下的 `data`，`qq_sidecar.dry_run` 设为 `true`（或设环境变量 `OPENQQWAIFU_QQ_SIDECAR_DRY_RUN=true`）；同时拷贝 `data/cards` 和 `data/state` 过去。
    - 以这个临时目录作为工作目录运行。`ConfigManager.load()` 会按配置路径和当前目录去找 `napcat/config`，可能改写其中的 OneBot 配置，所以不要在仓库根目录跑。
+   - 在 openqqwaifu 容器里也一样：宿主机的 `napcat/config` 挂在容器的 `/app/napcat-sidecar/config`，是 `_napcat_config_dirs` 的候选之一。容器里只用线上配置 `/app/data/docker-compose-config.json` 调 `ConfigManager.load()`；用镜像里的 `examples/config.napcat.compose.json`（没有令牌、默认 http 模式）去 load，会按它改写 NapCat 的 OneBot 配置（2026-10-28 检查时这样跑过一次，随后用线上配置 load 又写回了正确的令牌和反向 WS，NapCat 没有断开）。
    - `dry_run` 现在真的生效（2026-10-26 修）：`build_runtime_service` 在 `dry_run` 为真时出站一律用 `CapturingOutboundPort`，配了 `outbound_base_url` 也不发；`reverse_ws` 模式仍保留网关，NapCat 照常连进来推事件，只是回复不发出去。其余按线上走：`_requires_live_llm()` 为真，模型没配好会回「AI 工具编排模型还没连上」，知识抽取不走正则回退。之前的说法「dry_run 已不改变行为」作废。
    - 也可以直接 `serve`：`dry_run` 为真时启动日志里是 `outbound=capture(dry-run)`，控制台概览的出站模式显示 `dry-run (capture)`。
    - 不想接 NapCat、只想喂几条消息时，用下面的脚本。`build_file_service` 本来就只捕获，但它按离线处理（允许回退）；要和线上一致就用 `build_runtime_service` 加 `dry_run`。

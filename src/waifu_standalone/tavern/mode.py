@@ -39,6 +39,10 @@ _LOGGER = logging.getLogger(__name__)
 
 _IGNORED_CHARS = re.compile(r"[\s，,。.！!？?~～「」『』“”\"'：:、]")
 _START = re.compile(r"^(?:启动|开启|打开|进入|开)酒馆(?:模式)?$|^酒馆(?:模式|菜单)?$")
+# Said in passing to the character: "我让他开酒馆模式", "来跑团吧", "开一下酒馆".
+_START_INTENT = re.compile(r"(?:启动|开启|打开|进入|开|玩|来)(?:一下|一个|一局|个|下|局)?(?:酒馆|跑团)")
+_START_REFUSED = re.compile(r"(?:不|别|没|甭)(?:要|想|用|能|会)?(?:启动|开启|打开|进入|开|玩|来)(?:一下|一个|个|下)?(?:酒馆|跑团)")
+_MENTIONS_TAVERN = re.compile(r"酒馆|跑团")
 _END = re.compile(r"^(?:退出|关闭|结束)酒馆(?:模式)?$|^打烊$")
 _JOIN = re.compile(r"^我?也?要?(?:加入|参加)(?:酒馆|游戏|冒险|队伍)?$|^(?:带我一个|加我一个|算我一个|我也玩|我也要玩)$")
 _LEAVE = re.compile(r"^我?要?(?:离开|退出)(?:游戏|冒险|队伍)?$|^我不玩了$")
@@ -104,7 +108,7 @@ class TavernMode:
         compact = _IGNORED_CHARS.sub("", stripped)
         session = self._session(event)
         if session is None:
-            if self._addressed(event) and _START.match(compact):
+            if self._addressed(event) and _wants_start(compact):
                 return True, await self._open_menu(event)
             return False, None
         if session.state == "menu":
@@ -179,7 +183,7 @@ class TavernMode:
             if not self._can_end(session, sender):
                 return True, await self._reply(event, f"只有房主「{session.host_name}」能关酒馆。")
             return True, await self._end(session, reason="cancelled", notice="酒馆先关了，想玩再叫我。", event=event)
-        if self._addressed(event) and _START.match(compact):
+        if self._addressed(event) and _wants_start(compact):
             return True, await self._reply(event, f"酒馆在等「{session.host_name}」选本。")
         if sender != session.host_id:
             return False, None
@@ -597,8 +601,27 @@ class TavernMode:
         _LOGGER.info("tavern resumed chat=%s:%s state=%s rounds=%s", *key, session.state, session.rounds)
         return session
 
+    def prompt_hint(self, event: InboundEvent, text: str) -> str:
+        """A note for the character when someone mentions the tavern and no game is open in the chat.
+
+        Without it the character does not know it can run games, and turns such requests down.
+        """
+        if not self._service.config.tavern.enabled or not _MENTIONS_TAVERN.search(str(text or "")):
+            return ""
+        if self.running(event.launcher_type, event.launcher_id):
+            return ""
+        how = "@你说「启动酒馆」" if event.launcher_type == "group" else "说「启动酒馆」"
+        return (
+            "[酒馆模式]\n你可以开酒馆模式：有人" + how + "，就会列出剧本让他选，选好后你来当主持人带大家玩。"
+            "有人想玩或者问起来，就告诉他这么开，别说你不会、不肯开。"
+        )
+
     def _addressed(self, event: InboundEvent) -> bool:
-        return event.launcher_type != "group" or event.has_bot_mention(str(self._service.config.bot_account_id or ""))
+        """A private chat, an @, or (with listen on) her name or the person she is talking to."""
+        svc = self._service
+        if event.launcher_type != "group" or event.has_bot_mention(str(svc.config.bot_account_id or "")):
+            return True
+        return bool(svc.config.listen.enabled and svc.listener.addresses_bot(event))
 
     def _can_end(self, session: TavernSession, user_id: str) -> bool:
         config = self._service.config
@@ -630,6 +653,13 @@ class TavernMode:
             svc._mark_inbound_delivered(event)
         svc._record_outbound(message)
         return message
+
+
+def _wants_start(compact: str) -> bool:
+    """"启动酒馆", or a start said in passing ("我让他开酒馆模式"), but not "不开酒馆"."""
+    if _START.match(compact):
+        return True
+    return bool(_START_INTENT.search(compact)) and not _START_REFUSED.search(compact)
 
 
 def _clean_narration(text: str) -> str:

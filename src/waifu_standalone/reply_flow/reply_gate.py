@@ -106,7 +106,11 @@ class ReplyGate:
         if str(event.sender_id or "").strip() in exempt:
             return True
         bot_account_id = str(self._service.config.bot_account_id or "").strip()
-        if limits.mention_reply_burst > 0 and bot_account_id and event.has_bot_mention(bot_account_id):
+        mentioned = bool(bot_account_id and event.has_bot_mention(bot_account_id))
+        # With listen on, the person she is talking to (or who calls her by name) is addressing
+        # her as much as an @ is: a lively talk with one person must not use up the group's share.
+        talking = mentioned or bool(self._service.config.listen.enabled and self._service.listener.addresses_bot(event))
+        if limits.mention_reply_burst > 0 and talking:
             bucket = (
                 f"group-mention:{event.launcher_id}:{event.sender_id}",
                 limits.mention_reply_burst,
