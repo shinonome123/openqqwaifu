@@ -170,18 +170,21 @@ class ListenConfig:
     quiet_seconds: float = 2.0
     # 最早一条还没回的消息已经等了这么久，就不再等，直接回。
     max_wait_seconds: float = 8.0
-    # 群里她刚回过的人，这么久之内接着说的话都算在跟她说（不用 @）。
-    continuation_seconds: float = 60.0
+    # 群里 @ 她或叫她名字的人，她回过之后这么久之内接着说的话也算在跟她说（不用 @）。
+    # 她回这些接着说的话不会延长这段时间；对方这时 @ 别人的话不算。
+    continuation_seconds: float = 30.0
+    # 群里有人叫她「别说话」「闭嘴」时，她在这个群安静这么久：不主动插话、不接没 @ 她的话。
+    quiet_minutes: float = 30.0
     # 群里没人叫她时，大家安静这么久，她才判断要不要插话。
     group_quiet_seconds: float = 4.0
     # 插话的门槛（0 到 1）：最近的聊天和她的兴趣（人物卡 meta 的 interests，没有就用人设）、
     # 和她刚说过的话有多相关。过了门槛才调模型，模型也可以决定不说。
     # text-embedding-v4 上相关的话约 0.42–0.64，无关的约 0.19–0.37。
-    chime_in_threshold: float = 0.40
+    chime_in_threshold: float = 0.45
     # 每个群主动插话的次数：连着最多几次、每小时回填几次；和她上一次在这个群说话至少隔多久。
-    chime_in_burst: int = 2
-    chime_in_per_hour: float = 6.0
-    chime_in_min_gap_seconds: float = 180.0
+    chime_in_burst: int = 1
+    chime_in_per_hour: float = 3.0
+    chime_in_min_gap_seconds: float = 600.0
 
 
 @dataclass(slots=True)

@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，789 个，约 119 秒，目前全过；测试在临时工作目录里跑（见第 3.1.1 节）。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，792 个，约 125 秒，目前全过；测试在临时工作目录里跑（见第 3.1.1 节）。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -61,12 +61,13 @@
 - 听完再说（`feat/listen-first`，`reply_flow/listener.py`，配置 `listen`，默认开；`listen.enabled=false` 回到原来的做法）：
   - 等人说完：每条消息在拿会话锁之前由 `Listener.note_inbound` 记下到达时间（`/` 开头、`ignore_user_ids` 的不记）。要回的消息在存进历史、处理完换卡命令之后，由 `await_turn` 等这个人安静 `quiet_seconds`（2 秒），从第一条没回的算起最多等 `max_wait_seconds`（8 秒）。这期间这个人又发了消息，这条就不单独回：它那句已经在历史里，图片交给新的那条（`with_earlier_images`，最多 4 张），由最新那条一起回。`/skill`、`生图`、换卡命令不等。群回复额度（`acquire_group_reply_slot`）挪到等完之后，被合并的消息不占额度。
   - 群里谁算在跟她说话：@ 她；不 @ 但说了卡上的名字（`assistant_name`）或卡 meta 的 `call_names`（不用别名，「姐姐」「小鬼」太常见）；她刚回过的人在 `continuation_seconds`（60 秒）内说的话；前一条被合并、正在连发的人。原来按群算、谁都能接的跟进窗口（`group_follow_up_window_seconds`）只在 `listen.enabled=false` 时用；待确认搜索的接话照旧。
+  - 收敛（2026-10-28，owner：「插嘴插得太勤了，而且一次就是三四句」）：线上看到 owner 说「你别说话了」她照样回了一段；她回过谁，那人之后每句都接，且每次回复都续期；插话两三句被拆成两三条加表情包。改为：只有 @、名字或 `call_names` 开始一段对话，持续 `continuation_seconds`（30 秒，原 60），回这段对话里的话**不续期**（`mark_answered(reason=...)`），插话后对方接话只算 20 秒；对方这时 @ 别人的话不算。「别说话」「闭嘴」「安静点」「别插嘴」等（`_QUIET`）对她说时不回，并在这个群安静 `quiet_minutes`（30 分钟）：不插话、不接没 @ 的话，@ 和名字照常。没 @ 的接话带 `[接着刚才的话]`（`TALK_ON_HINT`，也可以只回「[不说话]」）；接话和插话都截成一句（`one_sentence`：第一句，40 字封顶，去掉开头的「名字，」），不带表情包、不追加称呼追问。插话默认值改为门槛 0.45、桶 1、每小时 3 次、间隔 600 秒。
   - 主动插话：群里没人叫她的消息（不含 `ignore_user_ids`、命令、只有图的）交给 `consider_chiming_in`。群里安静 `group_quiet_seconds`（4 秒）后，看她上次说话以来的环境缓冲（最多 6 行，去掉「名字: 」）：不同的字少于 4 个（笑声、「666」）直接跳过；打分取最大值——卡 meta `interests` 里 8 个字以内的词原样出现算 0.6，和每条兴趣的嵌入相似度（没有 `interests` 就用人设和擅长的句子），和她 10 分钟内说过的上一句的相似度。到了 `chime_in_threshold`（0.40），群的插话桶有余量（`chime_in_burst` 2、`chime_in_per_hour` 6），离她上次在这个群说话超过 `chime_in_min_gap_seconds`（180 秒），没有回复正在写、没开酒馆，才走一次回复链路（`WaifuService._process_chime_in` → `handle_event_async_locked(spontaneous=True)`）。门槛、间隔和桶可以按卡在 meta 的 `chime_in` 里改（`threshold`、`min_gap_seconds`、`burst`、`per_hour`，`Listener.limits()`），桶按角色和群分开。这次 system 末尾多一段 `[这次是你自己想插话]`（`CHIME_IN_HINT`），模型可以只回「[不说话]」（`is_silence` 认几种写法），那样什么都不发；不追加新成员的称呼追问，不执行命令。分数写在 INFO 日志里（`chime-in …` / `no chime-in …`），方便按真实聊天调门槛。
   - 嵌入按 `embedding` 配置单独建一个客户端，兴趣和她说过的话的向量缓存在内存里；没配嵌入时只看关键词。没缓存的兴趣 8 个一起算（`_embed_all`；上线后第一次判断一个个算 39 个，用了约 12 秒）。
   - 正在跟她聊的人（`addresses_bot`：叫她名字、`call_names`、她刚回过的人）和 @ 一样用每人一个的桶（`mention_reply_*`），不占群的共用桶（2026-10-28 补：线上苦力怕跟她聊得热闹时被群桶连着挡掉 5 条）。主动插话仍走群桶。
   - 实测（text-embedding-v4，三张线上卡，都没有 `interests`，用的是人设句子）：「加班到十点好累」0.48–0.49、「被领导骂了」0.47–0.50、「谁来陪我聊聊天」0.57、「群里好安静啊」0.61、接着她上一句说的 0.51–0.54；猫、球赛、天气、吃什么、调 bug 0.30–0.37；「我失恋了……」0.42–0.43。dry_run（grok-4.7 low，极光，把间隔和桶放开、5 个人各说一句）：好累、群里安静、失恋她都插了话且接得上前文，球赛没调模型；私聊「我跟你说个事」「今天面试过了！」只回了一次（「哈？居然过了？」）。这几次模型都没有选「[不说话]」，所以加了「不同的字少于 4 个不判断」。dry_run 期间连 api.x.ai 有两次 ConnectError，和本改动无关。
   - 代价：每次回复至少多等 2 秒；群里有人 @ 她时，同群其他消息要等这 2 秒加生成。全量测试从约 91 秒变成约 115 秒（带消息 id 的 @ 消息都会等）。
-  - 测试 `tests/test_listen.py`（11 个）；测跟进窗口的旧测试（`test_group_reply_guard.py`、`test_reply_latency.py` 的 BacklogTests、`test_app.py` 的 3 个）显式用 `listen.enabled=false`。
+  - 测试 `tests/test_listen.py`（14 个）；测跟进窗口的旧测试（`test_group_reply_guard.py`、`test_reply_latency.py` 的 BacklogTests、`test_app.py` 的 3 个）显式用 `listen.enabled=false`。
   - 没做：生成时对方又补了一句就作废重写；QQ 引用回复（`web/http_api.py::_parse_segments` 不解析 `reply` 段：引用她的消息又不 @ 的人，只在她刚回过对方时才算在跟她说话）；每张卡话多话少不同（小葵的人设写着爱起哄）；插话的分数和原因还没进控制台。
 
 ## 2. 当前工作区状态
@@ -232,6 +233,7 @@
 - 表情包库 `data/stickers/`（2026-10-27 导入，约 1.1 GB）：AstrBot Meme Manager「表情包广场」索引（`anka-afk/astrbot-meme-pack-index`）的 14 个条目，其中 `ddzs987-semantic-001` 和官方表情包1号是同一批图，实际 13 个包，共 2,359 张不重复的图。各包原来的 50 种英文分类合并成 42 个中文分类（开心、生气、害羞、贴贴、宕机、要钱、早安…），对照表、每个包的来源、维护者、许可和收录张数在 `data/stickers/README.md`。文件名以包 ID 开头，去掉某个包就删这个前缀的文件。超过 2 MB 的 424 张已缩小（动图 240 像素、静图 512 像素）后收录。许可大多是「仅限非商业使用」或 CC BY-NC-SA 4.0，几个包写的是「原素材许可未指定」，owner 决定全部用于本机器人的非商业聊天。下载用的是各包仓库按索引 `ref` 的浅克隆（只取 `memes/`），整理脚本没有进仓库。线上容器扫描一次目录约 35 毫秒（第一次 191 毫秒）。
 - 人物卡的插话设置（2026-10-28，「听完再说」上线时）：三张卡的 meta 加了 `interests`、`call_names`（`["奴隶", "奴隶哥"]`，群友按 QQ 昵称这么叫她）和 `chime_in`。按人设拟的兴趣：极光 39 个（霓虹、夜景、像素小游戏、穿搭拍照、被夸、生病熬夜、受委屈、难过、斗嘴输赢…），门槛 0.40、间隔 120 秒、桶 2、每小时 8 次；小葵 38 个（甜食奶茶、游戏上分抽卡、输赢打赌、起哄八卦吃瓜、作业考试摸鱼、没人理…），0.36、60 秒、3、12 次；晚晴 39 个（热茶读书黄昏下雨、累、失眠、生病、难过、失恋、想家、没吃饭、面试升职、吵架…），0.38、90 秒、3、10 次。owner 要求「尽量多接上话而不是少接，根据每个人的性格来」。用 text-embedding-v4 量的 16 句样例：小葵过门槛 14 句，晚晴 13 句（心情类 0.55–0.70），极光 9 句，猫、球赛、调 bug 只有小葵会接。改之前的 meta 备份在 `data/backups/before-card-interests-20261028-044041/`。
 - 酒馆角色卡（2026-10-28）：`data/tavern/scenarios/` 放了 owner 上传的两张 SillyTavern V3 卡（作者「磊哥哥」，原创系列）。七濑莉央：「星雾偶像事务所」，27 岁主唱，城市靠演出供电、低人气街区停电的冒险剧情，17 条世界书。顾绮：「午夜绒幕」，35 岁剧院投资人，作者标了成人向，暧昧恋爱剧情，10 条世界书。两张都标了 NSFW，正文没扫到露骨内容；dry_run 各玩一轮正常（莉央推进剧情，顾绮是雨夜后台谈判，都没有露骨描写）。owner 当时不在电脑旁，卡经私有仓库 `shinonome123/tavern-cards` 中转：手机浏览器打开 `https://github.com/shinonome123/tavern-cards/upload/main` 上传，再用 `gh api -H "Accept: application/vnd.github.raw" repos/shinonome123/tavern-cards/contents/<文件名>` 拉下来（文件名要 URL 编码；zsh 里 `?` 会被当通配符，带查询参数的地址要加引号）。聊天里贴的图片只有画面，读不到卡里的数据。
+- 人物卡插话设置第二版（2026-10-28 晚，owner 嫌插嘴太勤）：极光门槛 0.46、间隔 600 秒、桶 1、每小时 3 次；小葵 0.42、300 秒、2、6 次；晚晴 0.44、420 秒、1、4 次。兴趣和 `call_names` 没动。改之前的 meta 备份在 `data/backups/before-calmer-chime-in-*/`。
 - 线上 `summarization_mode` 是 `true`、`memory_summary_batch_size` 是 12：现在每多出 12 行才调一次摘要。`knowledge_entries` 里如果还有旧的 `memory_type="summary"` 条目，召回会跳过，不会自动删除。
 
 ### 3.6 看图的实测（2026-10-27）
