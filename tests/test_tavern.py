@@ -339,7 +339,7 @@ class TavernTests(unittest.TestCase):
 
         menu = self.service.handle_event(_group("开启酒馆模式", mention=True)).text
         self.assertIn("5. 老板（角色卡）：酒馆老板", menu)
-        self.assertIn("6. 小咪（角色卡）：一只会说话的猫娘", menu)
+        self.assertIn("6. 小咪（角色卡）：猫咖里的猫娘店员，管你叫主人", menu)  # a sentence about her, not the notes
 
         self._send(_group("我想玩小咪"))
         self.assertEqual(self._texts()[-1], "欢迎光临，资本狗主人~")
@@ -360,6 +360,26 @@ class TavernTests(unittest.TestCase):
             reply = self.service.handle_event(_group("你好", mention=True))
         self.assertIsNotNone(reply)
         self.assertTrue(str(self.gm.requests[-1][0]["content"]).startswith("你是"))
+
+    def test_a_cards_status_and_options_tags_reach_qq_as_plain_text(self) -> None:
+        scenarios = self.root / "tavern" / "scenarios"
+        scenarios.mkdir(parents=True)
+        opening = "<场景>舞台边|黄昏|霓虹半熄</场景>\n莉央：「最后一首歌。」\n<状态>30|蓄势待发|别让他们失望</状态>\n<选项>看线索|问来历</选项>"
+        (scenarios / "rio.json").write_text(
+            json.dumps({"spec": "chara_card_v2", "data": {"name": "莉央", "first_mes": opening}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self.gm.narrate = lambda messages: "莉央：「好。」\n<状态>33|安心|有人在听</状态>\n<选项>上台|等等</选项>"
+
+        self._send(_group("启动酒馆", mention=True), _group("选莉央"))
+        self.assertEqual(
+            self._texts()[-1],
+            "【舞台边 · 黄昏 · 霓虹半熄】\n莉央：「最后一首歌。」\n（30｜蓄势待发｜别让他们失望）\n可以选：① 看线索　② 问来历",
+        )
+        self._send(_group("1"))
+        self.assertEqual(self._texts()[-1], "莉央：「好。」\n（33｜安心｜有人在听）\n可以选：① 上台　② 等等")
+        # The model keeps seeing its own tags, so it goes on writing them.
+        self.assertEqual(self.gm.game_requests()[-1][2]["content"], opening)
 
     def test_the_config_file_sets_the_tavern(self) -> None:
         # ConfigManager.load() would also look for napcat/config under the working directory.
