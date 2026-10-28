@@ -13,7 +13,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from waifu_standalone.app import build_default_service
-from waifu_standalone.config import AppConfig, LLMConfig, ToolPolicyConfig
+from waifu_standalone.config import AppConfig, ListenConfig, LLMConfig, ToolPolicyConfig
 from waifu_standalone.infra.http_transport import HttpResponse, TransportError, _request_failure
 from waifu_standalone.infra.llm_clients import LLMClientError, OpenAILLMClient, build_llm_client
 from waifu_standalone.models import InboundEvent, MessageSegment, SessionMemory
@@ -102,7 +102,13 @@ class BacklogTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.service, self.outbound = build_default_service(
-            AppConfig(data_root=temp.name, bot_account_id=BOT_ID, group_follow_up_window_seconds=60.0)
+            # The group-wide follow-up window and its backlog: the behaviour with listen off.
+            AppConfig(
+                data_root=temp.name,
+                bot_account_id=BOT_ID,
+                group_follow_up_window_seconds=60.0,
+                listen=ListenConfig(enabled=False),
+            )
         )
         self.addCleanup(self.service.close)
         self.service.handle_event(_group("在吗", message_id="1", mention=True))  # opens the follow-up window

@@ -111,6 +111,10 @@ class TavernMode:
             return await self._handle_menu(event, session, compact)
         return await self._handle_play(event, session, stripped, compact)
 
+    def running(self, launcher_type: str, launcher_id: str) -> bool:
+        """Whether a game (or its menu) is open in this chat."""
+        return (launcher_type, launcher_id) in self._sessions
+
     def drain(self, timeout: float = 10.0) -> None:
         """Wait until no round is gathering or being written (tests, scripts)."""
         deadline = time.monotonic() + timeout

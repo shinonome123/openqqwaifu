@@ -406,7 +406,9 @@ class Generator:
         tool_context: ToolExposureContext | None = None,
         sticker_hint: str = "",
         allow_fallback: bool = True,
+        turn_hint: str = "",
     ) -> GeneratedReply:
+        """``turn_hint`` is one more system section about this turn (the listener's chime-in note)."""
         if (
             "generate_reply" in getattr(self, "__dict__", {})
             and "agenerate_reply_message" not in getattr(self, "__dict__", {})
@@ -459,6 +461,7 @@ class Generator:
                         active_skills=active_skills,
                         tool_context=tool_context,
                         sticker_hint=sticker_hint,
+                        turn_hint=turn_hint,
                         user=self._llm_user_key(event, session, purpose="chat"),
                     )
                 else:
@@ -478,6 +481,7 @@ class Generator:
                         latest_message=latest_message,
                         active_skills=active_skills,
                         sticker_hint=sticker_hint,
+                        turn_hint=turn_hint,
                     )
                     reply = await self._agenerate_model_reply_message(
                         prompt,
@@ -550,6 +554,7 @@ class Generator:
         sticker_hint: str = "",
         images: list[str] | None = None,
         explicit_tools: bool = False,
+        turn_hint: str = "",
     ) -> list[dict[str, object]]:
         """Persona and context as the system message, the conversation as chat turns.
 
@@ -580,6 +585,8 @@ class Generator:
             extra_sections.append(skill_block)
         if sticker_hint:
             extra_sections.append(sticker_hint)
+        if turn_hint:
+            extra_sections.append(turn_hint)
         if include_tool_rules:
             explicit = "\n" + _EXPLICIT_TOOL_RULE if explicit_tools else ""
             extra_sections.append("[工具]\n" + _TOOL_CALLING_SYSTEM_PROMPT + explicit)
@@ -729,6 +736,7 @@ class Generator:
         tool_context: ToolExposureContext | None,
         sticker_hint: str,
         user: str,
+        turn_hint: str = "",
     ) -> GeneratedReply:
         images = await asyncio.to_thread(self._readable_images, event) if event.image_count else []
         tools = self._tools.model_schemas(tool_context) if self._tools is not None else []
@@ -750,6 +758,7 @@ class Generator:
             include_tool_rules=bool(tools),
             images=images,
             explicit_tools=bool(tool_context is not None and tool_context.explicit),
+            turn_hint=turn_hint,
         )
         options = dict(
             tools=tools,
@@ -1832,6 +1841,7 @@ class Generator:
         latest_message: str,
         active_skills: list[SkillSpec],
         sticker_hint: str = "",
+        turn_hint: str = "",
     ) -> str:
         if event.image_count:
             # A single text prompt carries no pictures; say so rather than pretend.
@@ -1872,6 +1882,8 @@ class Generator:
             prompt_parts.append(skill_block)
         if sticker_hint:
             prompt_parts.append(sticker_hint)
+        if turn_hint:
+            prompt_parts.append(turn_hint)
         return "\n\n".join(part for part in prompt_parts if part.strip())
 
     def _build_onboarding_query(

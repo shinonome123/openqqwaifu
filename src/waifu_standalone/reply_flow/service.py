@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from ..memory import KnowledgeService
 from ..models import InboundEvent, OutboundMessage
 from ..systems.searching import SearchContext
+from .listener import CHIME_IN_HINT, is_silence
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -22,20 +23,25 @@ class ReplyFlowService:
         event: InboundEvent,
         *,
         background_image_delivery: bool,
+        spontaneous: bool = False,
     ) -> OutboundMessage | None:
+        """Answer one message. ``spontaneous``: nobody addressed the character and the
+        listener decided it may join the group's talk (``reply_flow/listener.py``); the
+        message was already recorded and kept as group context when it arrived."""
         svc = self.service
         svc._ensure_character_scope_bound()
         current_character = svc._active_character_id()
         text = event.command_text(svc.config.bot_account_id)
         live_runtime = svc._requires_live_llm()
         latest_message = svc._latest_message_text(event, text)
-        svc._record_inbound(event, text)
+        if not spontaneous:
+            svc._record_inbound(event, text)
         if not text and event.image_count == 0:
             return None
         # A tavern game in this chat takes its players' messages and its own commands.
         # It sits in front of every message, so a fault in it must not silence the character.
         try:
-            handled, tavern_reply = await svc.tavern.ahandle(event, text)
+            handled, tavern_reply = (False, None) if spontaneous else await svc.tavern.ahandle(event, text)
         except Exception:
             _LOGGER.exception("tavern mode failed; the character answers instead")
             handled, tavern_reply = False, None
@@ -46,6 +52,11 @@ class ReplyFlowService:
         # "/skill 在我的电脑上写个笑话" names no skill: the model takes the request, with
         # every tool this person may use, instead of the "/" message being dropped.
         free_request = "" if explicit_skill is not None else svc.dispatcher.free_skill_request(text)
+        image_command = svc.dispatcher.resolve_image_command(text)
+        if spontaneous and (explicit_skill is not None or free_request or image_command is not None):
+            return None  # commands nobody addressed to the character are not run on its own initiative
+        if spontaneous and svc.listener.spoke_recently(event.launcher_id):
+            return None  # it answered someone while waiting for the chat's lock
         if (
             explicit_skill is None
             and not free_request
@@ -53,14 +64,14 @@ class ReplyFlowService:
             and any(text.startswith(prefix) for prefix in svc.config.ignore_prefixes)
         ):
             return None
-        # Keep ambient group chatter until the bot is addressed, so the next reply
-        # has the surrounding conversation instead of only the @ message.
-        svc._remember_ambient_event(event, character_id=current_character)
-        if not svc.gate.should_reply(event):
-            return None
-        # Card commands cost no model call; the reply budget does not hold them back.
-        if not svc.character_switcher.is_command(event, text) and not svc.gate.acquire_group_reply_slot(event):
-            return None
+        if not spontaneous:
+            # Keep ambient group chatter until the bot is addressed, so the next reply
+            # has the surrounding conversation instead of only the @ message.
+            svc._remember_ambient_event(event, character_id=current_character)
+            if not svc.gate.should_reply(event):
+                # Not for the character; it may still join in once the group goes quiet.
+                svc.listener.consider_chiming_in(event)
+                return None
 
         await svc.onboarding.aremember_directory_member(event)
         ambient_context = svc._peek_ambient_history(event, character_id=current_character)
@@ -75,6 +86,15 @@ class ReplyFlowService:
         handled, switch_reply = await svc.character_switcher.ahandle(event, text)
         if handled:
             return switch_reply
+        # Someone still typing is answered once, after their last message (its line is in
+        # the history already); commands are not held back.
+        if not spontaneous and explicit_skill is None and not free_request and image_command is None:
+            if not await svc.listener.await_turn(event):
+                return None
+            event = svc.listener.with_earlier_images(event)
+        # After the wait, so messages folded into a later one cost no reply budget.
+        if not svc.gate.acquire_group_reply_slot(event):
+            return None
         # The bot is always the character on the card. What this person calls it (their
         # alias for it) goes into a speaker note; it must not replace the bot's own name.
         assistant_alias = svc._assistant_alias_for_user(event.sender_id, character_id=current_character)
@@ -106,7 +126,7 @@ class ReplyFlowService:
         await svc._store_active_skills_async(session, active_skills)
         if explicit_skill is None:
             # "生图 一只猫" generates the image directly instead of asking the model first.
-            explicit_skill = svc.dispatcher.resolve_image_command(text)
+            explicit_skill = image_command
         if explicit_skill is not None:
             skill, raw_args = explicit_skill
             return await svc.dispatcher.adispatch_explicit_skill(
@@ -128,6 +148,8 @@ class ReplyFlowService:
             all_tools=bool(free_request),
         )
         if live_runtime and not svc.generator.llm_ready:
+            if spontaneous:
+                return None
             unavailable = OutboundMessage(
                 launcher_id=event.launcher_id,
                 launcher_type=event.launcher_type,
@@ -203,21 +225,28 @@ class ReplyFlowService:
             active_skills=active_skills,
             tool_context=tool_context,
             sticker_hint=sticker_hint,
-            allow_fallback=not live_runtime,
+            # Joining in uninvited, the character may also decide to say nothing.
+            allow_fallback=not live_runtime and not spontaneous,
+            turn_hint=CHIME_IN_HINT if spontaneous else "",
         )
         reply_text = generated_reply.text
         if "last_tool_calls" in session.metadata:
             await asyncio.to_thread(svc.memory.store.save, session)
+        if spontaneous and is_silence(reply_text) and not generated_reply.images:
+            _LOGGER.info("chime-in: the character kept quiet group=%s", event.launcher_id)
+            return None
         if live_runtime and not str(reply_text or "").strip() and not generated_reply.images:
             return None
-        reply_text = await svc.onboarding.amaybe_append_soft_ask(
-            event,
-            session,
-            latest_message=latest_message,
-            assistant_name=assistant_name,
-            reply_text=reply_text,
-            character_id=current_character,
-        )
+        if not spontaneous:
+            # Joining in unasked is no moment to ask a stranger what to call them.
+            reply_text = await svc.onboarding.amaybe_append_soft_ask(
+                event,
+                session,
+                latest_message=latest_message,
+                assistant_name=assistant_name,
+                reply_text=reply_text,
+                character_id=current_character,
+            )
         reply_text, sticker = await asyncio.to_thread(svc.stickers.take, reply_text, event)
         if not reply_text and not generated_reply.images:
             return None

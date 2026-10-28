@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from waifu_standalone.app import build_default_service
-from waifu_standalone.config import AppConfig, RateLimitConfig
+from waifu_standalone.config import AppConfig, ListenConfig, RateLimitConfig
 from waifu_standalone.models import InboundEvent, MessageSegment
 from waifu_standalone.settings_admin.config_manager import ConfigManager
 
@@ -43,6 +43,8 @@ def _private_event(sender_id: str, text: str = "在吗") -> InboundEvent:
 
 class GroupReplyGuardTests(unittest.TestCase):
     def _service(self, tmpdir: str, **overrides: object):  # type: ignore[no-untyped-def]
+        # These tests are about the group-wide follow-up window: the behaviour with listen off.
+        overrides.setdefault("listen", ListenConfig(enabled=False))
         service, outbound = build_default_service(AppConfig(data_root=tmpdir, bot_account_id=BOT_ID, **overrides))
         self.addCleanup(service.close)
         return service, outbound
