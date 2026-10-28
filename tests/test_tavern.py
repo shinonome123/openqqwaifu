@@ -144,6 +144,26 @@ class TavernTests(unittest.TestCase):
         self.assertEqual(opening, BUNDLED.get("02-midnight-store").opening)
         self.assertEqual(self.gm.requests, [])  # the opening is written in the scenario
 
+    def test_a_start_said_in_passing_opens_the_menu(self) -> None:
+        reply = self.service.handle_event(_group("我让他开酒馆模式", mention=True))
+        self.assertTrue(reply.text.startswith("酒馆开张啦！"))
+        self.service.handle_event(_group("退出酒馆模式"))
+
+        # Not @-ed, but the person she just answered: still talking to her.
+        self.service.handle_event(_group("你好", sender=PLAYER, mention=True))
+        reply = self.service.handle_event(_group("那来跑团吧", sender=PLAYER))
+        self.assertTrue(reply.text.startswith("酒馆开张啦！"))
+        self.assertIn("房主是「苦力怕」", reply.text)
+
+    def test_a_refusal_or_a_question_reaches_the_character_who_knows_the_tavern(self) -> None:
+        self.service.handle_event(_group("不开酒馆，聊点别的", mention=True))
+        self.service.handle_event(_group("酒馆模式是什么", mention=True))
+
+        self.assertFalse(any(text.startswith("酒馆开张啦") for text in self._texts()))
+        system = str(self.gm.requests[-1][0]["content"])
+        self.assertIn("[酒馆模式]", system)
+        self.assertIn("@你说「启动酒馆」", system)
+
     def test_one_narration_answers_every_players_actions(self) -> None:
         self._start()
         self._send(_group("加入", sender=PLAYER))

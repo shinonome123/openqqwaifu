@@ -62,6 +62,7 @@ _STASHED_IMAGES_MAX = 4
 _LAST_SAID_SECONDS = 600.0
 _ARRIVALS_MAX = 4096
 _NAME_CACHE_SECONDS = 60.0
+_EMBED_CONCURRENCY = 8
 
 
 @dataclass(slots=True)
@@ -332,6 +333,7 @@ class Listener:
             return best
         try:
             talk_vector = await embedder.aembed(talk)
+            await self._embed_all(embedder, interests)
             for item in interests:
                 similarity = _cosine(talk_vector, await self._vector(embedder, item))
                 if similarity > best[0]:
@@ -344,6 +346,22 @@ class Listener:
         except Exception as exc:  # scoring falls back to keywords; it must not stop the chat
             _LOGGER.warning("chime-in scoring without embeddings: %s", exc)
         return best
+
+    async def _embed_all(self, embedder, texts: list[str]) -> None:  # type: ignore[no-untyped-def]
+        """Embed the texts not cached yet a few at a time: one by one, 40 interests took 12 s."""
+        missing = [text for text in dict.fromkeys(texts) if text not in self._vectors]
+        if not missing:
+            return
+        if len(self._vectors) + len(missing) > 256:
+            self._vectors.clear()
+        gate = asyncio.Semaphore(_EMBED_CONCURRENCY)
+
+        async def one(text: str) -> tuple[str, list[float]]:
+            async with gate:
+                return text, await embedder.aembed(text)
+
+        for text, vector in await asyncio.gather(*(one(text) for text in missing)):
+            self._vectors[text] = vector
 
     async def _vector(self, embedder, text: str) -> list[float]:  # type: ignore[no-untyped-def]
         vector = self._vectors.get(text)

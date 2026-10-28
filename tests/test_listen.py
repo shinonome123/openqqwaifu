@@ -162,6 +162,13 @@ class ListenTests(unittest.TestCase):
 
         self.assertEqual(len(self._chat_requests()), 2)  # nothing in 苦力怕's line is her business
 
+    def test_talking_with_her_uses_the_persons_budget_not_the_groups(self) -> None:
+        self.config.rate_limits.group_reply_burst = 1
+        self.config.rate_limits.group_reply_per_hour = 0.0
+        self.assertIsNotNone(self.service.handle_event(self._group("在吗", mention=True)))
+        for text in ("今天吃什么", "要不吃火锅", "就这么定了"):
+            self.assertIsNotNone(self.service.handle_event(self._group(text)), text)
+
     def test_calling_her_by_name_counts_as_addressing_her(self) -> None:
         meta = Path(self.config.data_root) / "cards" / "aurora.meta.json"
         meta.write_text(json.dumps({"call_names": ["奴隶"]}, ensure_ascii=False), encoding="utf-8")

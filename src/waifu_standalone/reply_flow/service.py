@@ -227,7 +227,9 @@ class ReplyFlowService:
             sticker_hint=sticker_hint,
             # Joining in uninvited, the character may also decide to say nothing.
             allow_fallback=not live_runtime and not spontaneous,
-            turn_hint=CHIME_IN_HINT if spontaneous else "",
+            turn_hint="\n\n".join(
+                hint for hint in (CHIME_IN_HINT if spontaneous else "", svc.tavern.prompt_hint(event, latest_message)) if hint
+            ),
         )
         reply_text = generated_reply.text
         if "last_tool_calls" in session.metadata:
