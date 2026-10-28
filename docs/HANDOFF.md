@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，783 个，约 118 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，789 个，约 119 秒，目前全过；测试在临时工作目录里跑（见第 3.1.1 节）。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -49,12 +49,14 @@
   - 剧情超过 `tavern.history_chars`（8000 字，最小 1000）时，旧回合（保留开场白和最近约一半预算）用一次模型调用压成 300 字内的前情提要（`summary`，上限 600 字）；压缩失败就只在发送时按预算截掉旧回合。
   - 剧本（`tavern/scenarios.py`）：自带 4 个在 `templates/tavern/`（雾港酒馆、午夜便利店、拾荒者号、雨夜沈园，都写了只给主持人看的要点），`data/tavern/scenarios/` 里同名文件覆盖自带的。格式：和人物卡同款语法的 YAML（`title`、`intro`、`kind`、`character`、`Setting`、`Notes`、`Opening`、`Examples`），或同样字段的 JSON。SillyTavern 角色卡 `.json`（V1 的 `char_name`/`char_persona`/`char_greeting`，V2/V3 的 `data`）和 `.png`（`ccv3` 或 `chara` 文本块里的 base64 JSON；自己解析 PNG 块，不依赖 PIL）当 `kind=character`：主持人扮演这个角色。`{{char}}`、`{{user}}`（换成房主名字）、`<BOT>`、`<USER>` 会替换；`character_book` 或世界书条目的关键词出现在这一轮行动或上一段剧情里时进 [世界书]，`constant` 的总是进，合计 1500 字内。菜单最多列 20 个。
   - SillyTavern 卡常要求每轮写 `<场景>地点|时间|氛围</场景>`、`<状态>数值|心情|心声</状态>`、`<选项>行动一|行动二</选项>`（网页上画成状态栏和按钮）。发到 QQ 前由 `render_markup` 转成「【地点 · 时间 · 氛围】」「（数值｜心情｜心声）」「可以选：① 行动一　② 行动二」；剧情记录里保留原样，模型接着按格式写，状态数值接着算。卡在菜单里的简介取描述里第一句讲人物的话（跳过含「原创」「成年」「角色卡」「NSFW」这类声明的句子，去掉开头的名字），找不到才用作者备注。
+  - 角色卡用聊天风演（2026-10-28，owner 看了真实输出觉得「不像人说的话」）：`kind=character` 的局，system 换成「你就是X，正在 QQ 群里跟大家对戏」和 `_CHARACTER_RULES`：第一人称、动作写在（）里、一次一到四句，不写场景标题、状态栏、选项、「名字：「台词」」剧本格式，不复述对方、不提规则和编号。导入时去掉卡里「【输出格式…】」开头的整段（`scenarios._without_format_rules`），这类卡（同一作者批量生成）要求每轮写 `<场景>/<状态>/<选项>`，台词里还会冒出「不替你编」这种规则原话。卡的开场白不再原样发：去掉标记和 HTML 后作为参考交给模型（`_CHARACTER_OPENING`），由她用聊天口吻说第一句，顺便去掉「成人向边界」这类字眼；回复发出前用 `_as_chat` 再清一遍标记和剧本格式，剧情记录里存的也是清过的，模型看到的历史保持聊天风。自带的跑团本仍用主持人旁白，规则里加了一条「别在旁白和台词里提规则、选项和编号」。
+  - 成人模式（2026-10-28）：`tavern.adult_user_ids`（默认空）里的人**在私聊里**开局时，菜单里多出 `data/tavern/adult/` 的卡（标「（成人）」，id 以 `adult/` 开头），这一局（`TavernSession.adult`）的内容规则换成 `_ADULT_CONTENT`：亲密情节按卡的设定写、不一笔带过，角色都是成年人、双方自愿、对方犹豫/拒绝/说停就停，不写未成年人、非自愿、真实人物。**群里永远不开**：群菜单不列成人区，群里的局永远用 `_SAFE_CONTENT`（一笔带过），成人区的卡在群里选不了也开不了。owner 要过群里也开，没有做：群成员没有都同意、年龄无法确认，群里传播色情内容在国内有法律风险，QQ 也会封号。
   - 存储（`tavern/session.py`）：进行中的局在 `data/tavern/sessions/<group|person>_<id>.json`，每次变动原子写入；重启后这个聊天来第一条消息时读回并继续（有没答的行动就接着开一轮）。读回时已经超时的局直接归档，不在群里补发通知。结束后移到 `data/tavern/archive/<聊天>-<开局时间>.json`（只开了菜单没开本的不留）。剧情不写进角色的会话历史、知识和好感度。
   - 超时：菜单 `menu_timeout_seconds`（300 秒），开局后 `idle_timeout_seconds`（1800 秒）没人说话就自动结束并说一句；正在写的一轮写完才结束。设成 0 不自动结束。
   - 配置 `tavern`（`config.py::TavernConfig`）：`enabled`（默认开）、上面几个时间、`max_players`（6）、`history_chars`、`starter_user_ids`（空表示谁都能开）、`admin_user_ids`。`settings_admin/config_manager.py::_load_dataclass` 现在也读字符串列表。
   - 主持人规则：不替玩家做决定、说话或掷骰；点到每个人；可以要求掷骰但不编结果；掷骰失败只写角色感知到的；玩家没说过性别就用名字称呼；80–250 字；结尾问接下来做什么；不写露骨性内容和血腥细节；主持要点里的秘密不直接说。
   - `reply_flow/service.py` 里酒馆这一步出异常时记 ERROR 日志，照常交给角色回复，不会让整个聊天没回应。
-  - 测试 `tests/test_tavern.py`（15 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
+  - 测试 `tests/test_tavern.py`（19 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
   - 没做：存档和读档命令、主持人自己用工具（掷 NPC 的骰子、给场景生图）、控制台页面；开局期间局外人在群里得不到角色的回复（只能私聊）；`max_players` 满了只拒绝，不排队。
 - 听完再说（`feat/listen-first`，`reply_flow/listener.py`，配置 `listen`，默认开；`listen.enabled=false` 回到原来的做法）：
   - 等人说完：每条消息在拿会话锁之前由 `Listener.note_inbound` 记下到达时间（`/` 开头、`ignore_user_ids` 的不记）。要回的消息在存进历史、处理完换卡命令之后，由 `await_turn` 等这个人安静 `quiet_seconds`（2 秒），从第一条没回的算起最多等 `max_wait_seconds`（8 秒）。这期间这个人又发了消息，这条就不单独回：它那句已经在历史里，图片交给新的那条（`with_earlier_images`，最多 4 张），由最新那条一起回。`/skill`、`生图`、换卡命令不等。群回复额度（`acquire_group_reply_slot`）挪到等完之后，被合并的消息不占额度。
@@ -187,6 +189,11 @@
 - 只重建 openqqwaifu：`docker compose -f compose.napcat.yml up -d --build --no-deps waifu`。一定要加 `--no-deps`：不加时 compose 会顺带检查 `depends_on` 里的 napcat，它的配置和正在跑的容器对不上就重建它。2026-10-28 部署酒馆模式时用了不带 `--no-deps` 的写法，NapCat 被重建，快速登录报「你的用户身份已失效」，只能重新扫码。改了 `napcat` 服务的定义（例如镜像标签）再 `up`，NapCat 同样会被重建。
 - NapCat 要扫码时：`docker cp napcat:/app/napcat/cache/qrcode.png .` 取出二维码，用机器人账号的手机 QQ 扫；二维码约 2 分钟刷新一次，日志里每次都有「二维码已保存」，过期时会先报 `Login Error ... ErrCode: 3`。登录成功的标志是「协议适配器初始化完成」。
 - compose 给可选设置传 `${VAR:-}`，没设置时是空字符串。以前 `_env_str` 会用这个空串覆盖配置文件里的令牌；现在空串按未设置处理（`fix/deploy-hardening`）。
+
+### 3.1.1 测试改写线上数据（2026-10-28 发现并修复）
+
+- 一直以来，从仓库根目录跑测试时，凡是加载或保存配置文件的测试（`test_config_manager`、`test_runtime_v2*` 等）都会经 `_napcat_config_dirs` 的「当前目录/napcat/config」候选，用测试配置（http 模式、空令牌）改写**线上** NapCat 的 OneBot 配置：反向 WS 被删，3000 端口令牌变空，多一条 127.0.0.1 的 http 回调。NapCat 不热加载这个文件，而每次部署重启 openqqwaifu 时会按线上配置整理回来，所以一直没出事；如果 NapCat 恰好在两者之间重启，机器人会收不到消息、3000 端口无令牌暴露在宿主机上。2026-10-28 05:34 发现时，NapCat 仍在用正确的内存配置，随即在容器里用线上配置 load 一次写回（令牌、反向 WS 都核对过）。修复：有配置文件路径时 `_napcat_config_dirs` 不再看当前目录，相对的 `data_root` 按配置文件所在目录解析（`test_a_config_elsewhere_leaves_the_working_directorys_napcat_alone`，在旧代码上会失败）。
+- 同一次全量测试里，用默认 `AppConfig()`（`data_root="data"`）的测试读到了 owner 正在私聊里玩的酒馆局（`data/tavern/sessions/person_783190298.json`），把测试消息当成行动写了进去（测试只捕获出站，没有发到 QQ）。已从备份恢复到第 1 轮之后。修复：`tests/test__isolated_working_directory.py` 让测试在空的临时工作目录里跑（`discover` 时它的名字排第一、最先导入；单独跑模块时由 `tests/__init__.py` 导入），相对的 `data` 不再指向线上数据。
 
 ### 3.2 NapCat 登录
 

@@ -79,6 +79,8 @@ WaifuService (app.py)
   - `.r 2d6+1 撬锁` 由程序掷骰，结果交给主持人；「酒馆状态」看谁在玩；只有房主（和 `tavern.admin_user_ids`、`tool_policy.authorized_user_ids`）能「退出酒馆模式」，30 分钟没人说话自动结束
   - 自带 4 个本；自己的本放进 `data/tavern/scenarios/`：YAML（格式见 `src/waifu_standalone/templates/tavern/`），或直接放 SillyTavern 角色卡（`.json` / `.png`）
   - 剧情存在 `data/tavern/`，不进角色的聊天记录和记忆
+  - SillyTavern 角色卡按 QQ 聊天的口吻演（第一人称、动作写在括号里），不发网页版的状态栏和选项
+  - 成人模式只在私聊里、只对 `tavern.adult_user_ids` 里的人生效，成人卡放 `data/tavern/adult/`；群里永远不开
 - OpenClaw 兼容层
   - `SKILL.md` / bundle 导入
   - native plugin / bundle capability 诊断
