@@ -4,7 +4,7 @@
 
 ## 1. 先读这些
 
-- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，770 个，约 91 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
+- 跑测试：`PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests`，779 个，约 115 秒，目前全过。系统 `python3` 没装 `httpx`，必须用项目的 `.venv/bin/python`。
 - CLAUDE.md 里的模块表已经过时，代码现在按子包组织：`runtime/`（服务编排）、`reply_flow/`（回复链路、提示词）、`memory/`（会话与知识）、`repositories/`（SQLite 状态）、`skills/`（技能与工具）、`members/`、`character/`、`settings_admin/`、`web/`、`infra/`、`gateways/`、`systems/`、`organs/`。
 - 一次回复发给模型的是真正的多轮对话（2026-10-27 起，`feat/prompt-structure`）：
   - system：`character/cards.py::CharacterCard.system_message` 拼出人设、擅长、背景、规则、你记得的事、关于对方、当前情况、更早的聊天摘要（中文标题）；这条消息需要工具时，末尾再加 `[工具]`（`_TOOL_CALLING_SYSTEM_PROMPT`）。
@@ -54,6 +54,15 @@
   - `reply_flow/service.py` 里酒馆这一步出异常时记 ERROR 日志，照常交给角色回复，不会让整个聊天没回应。
   - 测试 `tests/test_tavern.py`（13 个）。dry_run（grok-4.7 low，雾港酒馆，两个玩家，跑了两遍）：每轮 10–22 秒（等 2 秒加模型 8–20 秒）；主持人每轮点到两个人，会主动要求掷骰；固定掷出 3 时写成「听不清到底几个人」，没点破真相；加了性别那条规则后不再用「他」称呼玩家；苦力怕「退出酒馆模式」被拒，房主结束成功。
   - 没做：存档和读档命令、主持人自己用工具（掷 NPC 的骰子、给场景生图）、控制台页面；开局期间局外人在群里得不到角色的回复（只能私聊）；`max_players` 满了只拒绝，不排队。
+- 听完再说（`feat/listen-first`，`reply_flow/listener.py`，配置 `listen`，默认开；`listen.enabled=false` 回到原来的做法）：
+  - 等人说完：每条消息在拿会话锁之前由 `Listener.note_inbound` 记下到达时间（`/` 开头、`ignore_user_ids` 的不记）。要回的消息在存进历史、处理完换卡命令之后，由 `await_turn` 等这个人安静 `quiet_seconds`（2 秒），从第一条没回的算起最多等 `max_wait_seconds`（8 秒）。这期间这个人又发了消息，这条就不单独回：它那句已经在历史里，图片交给新的那条（`with_earlier_images`，最多 4 张），由最新那条一起回。`/skill`、`生图`、换卡命令不等。群回复额度（`acquire_group_reply_slot`）挪到等完之后，被合并的消息不占额度。
+  - 群里谁算在跟她说话：@ 她；不 @ 但说了卡上的名字（`assistant_name`，不含别名，「姐姐」「小鬼」太常见）；她刚回过的人在 `continuation_seconds`（60 秒）内说的话；前一条被合并、正在连发的人。原来按群算、谁都能接的跟进窗口（`group_follow_up_window_seconds`）只在 `listen.enabled=false` 时用；待确认搜索的接话照旧。
+  - 主动插话：群里没人叫她的消息（不含 `ignore_user_ids`、命令、只有图的）交给 `consider_chiming_in`。群里安静 `group_quiet_seconds`（4 秒）后，看她上次说话以来的环境缓冲（最多 6 行，去掉「名字: 」）：不同的字少于 4 个（笑声、「666」）直接跳过；打分取最大值——卡 meta `interests` 里 8 个字以内的词原样出现算 0.6，和每条兴趣的嵌入相似度（没有 `interests` 就用人设和擅长的句子），和她 10 分钟内说过的上一句的相似度。到了 `chime_in_threshold`（0.40），群的插话桶有余量（`chime_in_burst` 2、`chime_in_per_hour` 6），离她上次在这个群说话超过 `chime_in_min_gap_seconds`（180 秒），没有回复正在写、没开酒馆，才走一次回复链路（`WaifuService._process_chime_in` → `handle_event_async_locked(spontaneous=True)`）。这次 system 末尾多一段 `[这次是你自己想插话]`（`CHIME_IN_HINT`），模型可以只回「[不说话]」（`is_silence` 认几种写法），那样什么都不发；不追加新成员的称呼追问，不执行命令。分数写在 INFO 日志里（`chime-in …` / `no chime-in …`），方便按真实聊天调门槛。
+  - 嵌入按 `embedding` 配置单独建一个客户端，兴趣和她说过的话的向量缓存在内存里；没配嵌入时只看关键词。
+  - 实测（text-embedding-v4，三张线上卡，都没有 `interests`，用的是人设句子）：「加班到十点好累」0.48–0.49、「被领导骂了」0.47–0.50、「谁来陪我聊聊天」0.57、「群里好安静啊」0.61、接着她上一句说的 0.51–0.54；猫、球赛、天气、吃什么、调 bug 0.30–0.37；「我失恋了……」0.42–0.43。dry_run（grok-4.7 low，极光，把间隔和桶放开、5 个人各说一句）：好累、群里安静、失恋她都插了话且接得上前文，球赛没调模型；私聊「我跟你说个事」「今天面试过了！」只回了一次（「哈？居然过了？」）。这几次模型都没有选「[不说话]」，所以加了「不同的字少于 4 个不判断」。dry_run 期间连 api.x.ai 有两次 ConnectError，和本改动无关。
+  - 代价：每次回复至少多等 2 秒；群里有人 @ 她时，同群其他消息要等这 2 秒加生成。全量测试从约 91 秒变成约 115 秒（带消息 id 的 @ 消息都会等）。
+  - 测试 `tests/test_listen.py`（9 个）；测跟进窗口的旧测试（`test_group_reply_guard.py`、`test_reply_latency.py` 的 BacklogTests、`test_app.py` 的 3 个）显式用 `listen.enabled=false`。
+  - 没做：生成时对方又补了一句就作废重写；QQ 引用回复（`web/http_api.py::_parse_segments` 不解析 `reply` 段：引用她的消息又不 @ 的人，只在她刚回过对方时才算在跟她说话）；每张卡话多话少不同（小葵的人设写着爱起哄）；插话的分数和原因还没进控制台。
 
 ## 2. 当前工作区状态
 
@@ -172,7 +181,8 @@
 
 - 本机 Docker Compose（`compose.napcat.yml`）：容器 `openqqwaifu`（8080）和 `napcat`（3000/3001/6099），真实发送，`qq_sidecar.dry_run=false`。2026-10-27 起聊天模型是 `grok-4.7`（xAI，每百万 token 输入 2 美元、输出 6 美元，会先思考再回答，dry_run 实测平均 15 秒、最长 34 秒），`thinking_mode=false`。机器人 QQ `3956638110`（昵称「幸福的奴隶Bot」），好友 2 个，群 1 个（`612475113`）。
 - `data/docker-compose-config.json` 当天的改动：`qq_sidecar.gateway_mode=reverse_ws`；`qq_sidecar.access_token` 设成随机令牌，反向 WS 和 NapCat 的 HTTP 动作端口 3000 都用它（3000 映射在宿主机上，原来没有令牌）。HTTP 回调已关闭，所以不需要 `inbound_access_token`。改之前的配置、NapCat 配置和 QQ 数据备份在 `data/backups/before-deploy-20261027-023259/`。
-- 只重建 openqqwaifu：`docker compose -f compose.napcat.yml up -d --build waifu`，不会动 NapCat。改了 `napcat` 服务的定义（例如镜像标签）再 `up`，NapCat 容器会被重建，很可能要重新扫码。
+- 只重建 openqqwaifu：`docker compose -f compose.napcat.yml up -d --build --no-deps waifu`。一定要加 `--no-deps`：不加时 compose 会顺带检查 `depends_on` 里的 napcat，它的配置和正在跑的容器对不上就重建它。2026-10-28 部署酒馆模式时用了不带 `--no-deps` 的写法，NapCat 被重建，快速登录报「你的用户身份已失效」，只能重新扫码。改了 `napcat` 服务的定义（例如镜像标签）再 `up`，NapCat 同样会被重建。
+- NapCat 要扫码时：`docker cp napcat:/app/napcat/cache/qrcode.png .` 取出二维码，用机器人账号的手机 QQ 扫；二维码约 2 分钟刷新一次，日志里每次都有「二维码已保存」，过期时会先报 `Login Error ... ErrCode: 3`。登录成功的标志是「协议适配器初始化完成」。
 - compose 给可选设置传 `${VAR:-}`，没设置时是空字符串。以前 `_env_str` 会用这个空串覆盖配置文件里的令牌；现在空串按未设置处理（`fix/deploy-hardening`）。
 
 ### 3.2 NapCat 登录
@@ -296,7 +306,7 @@
 - `web/http_api.py::_parse_segments` 只解析 text、image、at：引用回复（不知道对方在回哪条）、QQ 自带的小表情（`face`）、语音、转发、小程序卡片会被丢掉。图片已能看（第 1 节「看图」）。
 - 好感度只涨不跌（`systems/value_game.py`：每回一句至少加 0.06），情绪几乎恒定（`systems/emotions.py` 的 `trust 0.55`）；两者都不进聊天提示词（`CharacterCard.system_message` 里没有），所以不影响语气。主动问候没有调度器（`organs/proactive.py` 只在控制台生成草稿），故事模式线上关闭，`memory/graph.py` 的高亮与知识库内容重复。
 - ~~激活角色会清空所有会话记录~~（2026-10-26 已修）：`activate_character` 不再带 `reset_sessions`，启用同一个角色时也不重建存储；清空会话改为单独的 `POST /api/character/reset-sessions`（`confirm` 必须等于角色代号），控制台人物卡页「重置会话…」按钮要求输入代号确认。只删会话文件（含滚动摘要），长期记忆、成员和好感度不动。
-- 群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）按群算，不按人算：机器人回复后接任何人的话，每次回复都延长窗口（2026-10-27 因此和另一个机器人互相刷屏，见第 3.3 节）。（审计结论）LLM 出错时机器人静默不回复；主回复链路现在至少记一条 WARNING「chat reply failed: …」（`feat/human-touch`），其他调用（分析、抽取、摘要）仍不记。
+- `listen.enabled=false` 时，群里 20 秒的跟进窗口（`group_follow_up_window_seconds`）按群算，不按人算（开着「听完再说」时改成按人算，见第 1 节）：机器人回复后接任何人的话，每次回复都延长窗口（2026-10-27 因此和另一个机器人互相刷屏，见第 3.3 节）。（审计结论）LLM 出错时机器人静默不回复；主回复链路现在至少记一条 WARNING「chat reply failed: …」（`feat/human-touch`），其他调用（分析、抽取、摘要）仍不记。
 - 召回时同步发起一次嵌入调用，延迟约一次网络往返。
 
 ## 6. 验证方法
