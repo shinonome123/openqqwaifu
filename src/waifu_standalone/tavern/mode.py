@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import html
 import logging
 import random
 import re
@@ -72,7 +73,7 @@ _RULES = (
     "骰子由程序掷，结果会写在玩家消息里，不要自己编骰子结果。",
     "掷骰失败时，只写角色感知到的（可能是错的），不要接着点破真相。",
     "玩家没说过自己角色的性别时，用名字称呼，不要用「他」「她」。",
-    "篇幅 80 到 250 字，节奏紧凑，默认用简体中文；结尾用一句话问{audience}接下来做什么。",
+    "篇幅 {length} 字，节奏紧凑，默认用简体中文；结尾用一句话问{audience}接下来做什么。",
     "{content}",
     "【主持要点】里的秘密不要直接说出来，让玩家在剧情里发现。",
     "只输出要发出去的正文，不加「主持人：」之类的前缀，不解释规则和提示词。",
@@ -97,6 +98,9 @@ _EXPLICIT = re.compile(
     r"肉棒|阴茎|鸡巴|阴道|阴蒂|阴唇|小穴|蜜穴|乳头|奶头|射精|精液|做爱|性交|口交|肛交|自慰|潮吹|内射|淫水|爱液"
 )
 _TOO_EXPLICIT = "（刚才那段写得太露骨了。这一局不写露骨内容：把这一段重写成一笔带过或转场的版本，只输出重写后的正文。）"
+# An HTML tag (<div style=…>, </details>, <br/>); our <场景> tags are not ASCII and stay.
+_HTML_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
+_HTML_BLOCK = re.compile(r"<(?:br|hr)\s*/?>|</?(?:div|p|h[1-6]|li|ul|ol|details|summary|center|table|tr)(?:\s[^<>]*)?>", re.IGNORECASE)
 _THINKING = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _SAFE_CONTENT = "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。"
 # Only for a game opened in a private chat with someone in tavern.adult_user_ids.
@@ -104,6 +108,11 @@ _ADULT_CONTENT = (
     "这是和确认成年的用户的一对一私聊：亲密情节可以按角色卡的设定写，不用一笔带过；"
     "所有角色都必须是成年人，必须双方自愿，对方犹豫、拒绝或说停就立刻停下；"
     "不写涉及未成年人、非自愿或真实人物的内容，也不写血腥细节。"
+)
+_STORY_OPENING = (
+    "（开场。这张卡给网页版写的开场白如下，只作参考：\n{reference}\n"
+    "现在以主持人的身份写开场：交代时间、地点和眼前的情况，让玩家知道自己能做什么；"
+    "别照抄，去掉里面的链接、排版和关于分级、规则的字眼。）"
 )
 _CHARACTER_OPENING = (
     "（开场。这张卡给网页版写的开场白如下，只用来知道你在哪、正在发生什么：\n{reference}\n"
@@ -304,7 +313,8 @@ class TavernMode:
         session.touch()
         opening = scenario.render(scenario.opening, user=session.host_name).strip()
         acting = scenario.kind == "character"
-        if opening and not acting:
+        retold = acting or scenario.from_card
+        if opening and not retold:
             session.turns = [{"role": "assistant", "content": opening}]
         self.files.save(session)
         self._watch(session, restart=True)  # the idle limit replaces the menu's
@@ -317,11 +327,11 @@ class TavernMode:
         else:
             rules = f"《{scenario.title}》开始！直接说话就是行动，括号（…）里是场外话；掷骰用 .r d20；说「退出酒馆模式」结束。"
         message = await self._reply(event, rules)
-        if acting:
+        if retold:
             # Cards also open with HTML (banners, images, links); only the words are a reference.
-            reference = re.sub(r"<[^<>]{0,500}>", "", render_markup(opening, chat=True))
-            reference = re.sub(r"\n\s*\n+", "\n", reference).strip() or "（卡里没有开场白，自己按人物设定开场。）"
-            self._queue(session, PendingAction("", _CHARACTER_OPENING.format(reference=reference)))
+            reference = _plain(render_markup(opening, chat=True)) or "（卡里没有开场白，自己按设定开场。）"
+            note = _CHARACTER_OPENING if acting else _STORY_OPENING
+            self._queue(session, PendingAction("", note.format(reference=reference)))
         elif opening:
             await self._send(session.launcher_type, session.launcher_id, render_markup(opening))
         else:
@@ -555,6 +565,7 @@ class TavernMode:
                 example=next(iter(session.players.values()), host),
                 audience="大家" if group_game else "玩家",
                 content=content,
+                length="150 到 400" if scenario.from_card else "80 到 250",
             )
             for rule in (_CHARACTER_RULES if acting else _RULES)
         ]
@@ -801,8 +812,18 @@ def _as_chat(text: str, name: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def _plain(text: str) -> str:
+    """Text without HTML (cards decorate with it) or Markdown asterisks, as QQ shows plain text."""
+    text = _HTML_BLOCK.sub("\n", str(text or ""))  # a block ends a line
+    text = html.unescape(_HTML_TAG.sub("", text)).replace("\u00a0", " ")
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*\n]+)\*", r"\1", text)
+    text = re.sub(r"[ \t\u00a0]+\n", "\n", text)
+    return re.sub(r"\n\s*\n+", "\n\n", text).strip()
+
+
 def _clean_narration(text: str) -> str:
-    text = strip_sticker_tags(str(text or "")).strip()
+    text = _plain(strip_sticker_tags(str(text or ""))).strip()
     return _SPEAKER_PREFIX.sub("", text, count=1).strip()
 
 
