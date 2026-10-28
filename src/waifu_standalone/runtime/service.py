@@ -38,6 +38,7 @@ from ..models import EmotionState, InboundEvent, MessageSegment, OutboundMessage
 from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
 from ..reply_flow import Generator, OutboundEmitter, PENDING_SEARCH_METADATA_KEY, ReplyFlowService, ReplyGate, StickerLibrary
+from ..reply_flow.listener import Listener
 from ..repositories import (
     InMemoryRuntimeStateStore,
     KnowledgeRepository,
@@ -180,6 +181,7 @@ class WaifuService:
     character_service: CharacterService = field(init=False, repr=False)
     character_switcher: CharacterSwitcher = field(init=False, repr=False)
     tavern: TavernMode = field(init=False, repr=False)
+    listener: Listener = field(init=False, repr=False)
     member_service: MemberService = field(init=False, repr=False)
     memory_admin_service: MemoryAdminService = field(init=False, repr=False)
     skills_admin_service: SkillsAdminService = field(init=False, repr=False)
@@ -214,6 +216,7 @@ class WaifuService:
         self.character_service = CharacterService(self)
         self.character_switcher = CharacterSwitcher(self)
         self.tavern = TavernMode(self)
+        self.listener = Listener(self)
         self.member_service = MemberService(self)
         self.memory_admin_service = MemoryAdminService(self)
         self.skills_admin_service = SkillsAdminService(self)
@@ -275,6 +278,7 @@ class WaifuService:
     async def _process_event_async(self, event: InboundEvent, *, background_image_delivery: bool) -> OutboundMessage | Admission | None:
         # Before waiting on the chat's lock: a reply in progress must see newer messages.
         self.emitter.note_inbound(event)
+        self.listener.note_inbound(event)
         # A pending card switch goes first; this message is then answered by the new card.
         await self.character_switcher.wait_for_switch()
         if self.private_runtime is not None and self.private_runtime.routes(event):
@@ -306,6 +310,44 @@ class WaifuService:
                     # Threads used by the reply cannot be canceled. Keep their
                     # session/lifecycle lease until they finish, so a switch
                     # cannot redirect their final writes into another persona.
+                    if operation.cancelled():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+        finally:
+            if acquired:
+                lock.release()
+            with self._runtime_guard:
+                self._active_events -= 1
+
+    async def _process_chime_in(self, event: InboundEvent) -> OutboundMessage | None:
+        """Join a group's talk unasked; the listener chose ``event``, its newest message."""
+        while not self._runtime_guard.acquire(blocking=False):
+            await asyncio.sleep(0.01)
+        try:
+            if self._closing:
+                return None
+            self._ensure_character_scope_bound()
+            self._active_events += 1
+            lock = self._session_lock_for(event)
+        finally:
+            self._runtime_guard.release()
+        acquired = False
+        try:
+            await lock.acquire()
+            acquired = True
+            operation = asyncio.create_task(
+                self.reply_flow.handle_event_async_locked(event, background_image_delivery=True, spontaneous=True)
+            )
+            # As in _process_event_async: threads the reply started keep the lease until they end.
+            cancelled = False
+            while True:
+                try:
+                    result = await asyncio.shield(operation)
+                    break
+                except asyncio.CancelledError:
                     if operation.cancelled():
                         raise
                     cancelled = True
@@ -457,6 +499,7 @@ class WaifuService:
     def close(self, *, timeout: float | None = None) -> None:
         self.begin_shutdown()
         self.tavern.close()
+        self.listener.close()
         if self.private_runtime is not None:
             self.private_runtime.close(timeout=60.0 if timeout is None else timeout)
         with self._runtime_guard:

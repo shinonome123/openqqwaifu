@@ -16,7 +16,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from waifu_standalone.app import build_default_service, build_file_service, build_runtime_service
-from waifu_standalone.config import AppConfig, QQSidecarConfig
+from waifu_standalone.config import AppConfig, ListenConfig, QQSidecarConfig
 from waifu_standalone.contracts import GeneratedImage
 from waifu_standalone.gateways.onebot_actions import OneBotHttpOutboundPort
 from waifu_standalone.infra.llm_clients import LLMToolCall, LLMToolResponse
@@ -665,6 +665,7 @@ class WaifuServiceTests(unittest.TestCase):
                 data_root=tmpdir,
                 bot_account_id="3518944354",
                 group_follow_up_window_seconds=16.0,
+                listen=ListenConfig(enabled=False),  # the follow-up window is the listen-off behaviour
             )
             service1, _ = build_file_service(config)
             service1.state_store.save_member(
@@ -710,6 +711,7 @@ class WaifuServiceTests(unittest.TestCase):
         config = AppConfig(
             bot_account_id="3518944354",
             group_follow_up_window_seconds=0.0,
+            listen=ListenConfig(enabled=False),  # the follow-up window is the listen-off behaviour
         )
         service, _ = build_default_service(config)
         service.state_store.save_member(
@@ -808,6 +810,7 @@ class WaifuServiceTests(unittest.TestCase):
         config = AppConfig(
             bot_account_id="3518944354",
             group_follow_up_window_seconds=0.0,
+            listen=ListenConfig(enabled=False),  # the follow-up window is the listen-off behaviour
         )
         service, _ = build_default_service(config)
         service.state_store.save_member(

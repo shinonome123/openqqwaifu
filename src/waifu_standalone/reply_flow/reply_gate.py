@@ -75,6 +75,12 @@ class ReplyGate:
             return not service.emitter.superseded(event)
         if not bot_account_id:
             return True
+        if service.config.listen.enabled:
+            # Only the person the character is talking to, or someone calling it by name, is
+            # answered here; the listener weighs everyone else's talk once the group is quiet.
+            if service.listener.addresses_bot(event):
+                return True
+            return self._has_recent_search_link_follow_up(event) or self._has_pending_search_follow_up(event)
         if self.is_follow_up_window_active(event.launcher_id):
             return not service.emitter.superseded(event)
         if self._has_recent_search_link_follow_up(event):

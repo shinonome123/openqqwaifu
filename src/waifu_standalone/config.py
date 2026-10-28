@@ -162,6 +162,29 @@ class StickerConfig:
 
 
 @dataclass(slots=True)
+class ListenConfig:
+    # 听完再说：等对方把话说完再一起回；群里没人叫她时，按话题和她的兴趣决定要不要插话。
+    # 关掉就回到原来的做法：私聊每条都回，群里 @ 她或者在跟进窗口里才回。
+    enabled: bool = True
+    # 同一个人连着发时，最后一条之后安静这么久才开始回；中间又来消息就重新等。
+    quiet_seconds: float = 2.0
+    # 最早一条还没回的消息已经等了这么久，就不再等，直接回。
+    max_wait_seconds: float = 8.0
+    # 群里她刚回过的人，这么久之内接着说的话都算在跟她说（不用 @）。
+    continuation_seconds: float = 60.0
+    # 群里没人叫她时，大家安静这么久，她才判断要不要插话。
+    group_quiet_seconds: float = 4.0
+    # 插话的门槛（0 到 1）：最近的聊天和她的兴趣（人物卡 meta 的 interests，没有就用人设）、
+    # 和她刚说过的话有多相关。过了门槛才调模型，模型也可以决定不说。
+    # text-embedding-v4 上相关的话约 0.42–0.64，无关的约 0.19–0.37。
+    chime_in_threshold: float = 0.40
+    # 每个群主动插话的次数：连着最多几次、每小时回填几次；和她上一次在这个群说话至少隔多久。
+    chime_in_burst: int = 2
+    chime_in_per_hour: float = 6.0
+    chime_in_min_gap_seconds: float = 180.0
+
+
+@dataclass(slots=True)
 class TavernConfig:
     # 酒馆模式：@机器人说「启动酒馆」列出剧本，说的人当房主，「选 N」开本，机器人改当主持人带大家玩。
     # 剧本在 data_root 下 tavern/scenarios/（自己写的 YAML，或 SillyTavern 角色卡 .json/.png），另有几个自带的。
@@ -313,6 +336,7 @@ class AppConfig:
     segmented_reply: SegmentedReplyConfig = field(default_factory=SegmentedReplyConfig)
     stickers: StickerConfig = field(default_factory=StickerConfig)
     tavern: TavernConfig = field(default_factory=TavernConfig)
+    listen: ListenConfig = field(default_factory=ListenConfig)
     # 群里回复时，如果那条消息之后又有人说过话，就引用它（QQ 里显示为「回复 xx」），
     # 看得出在回谁；紧接着回的不引用，跟真人一样。
     group_reply_quote: bool = True
