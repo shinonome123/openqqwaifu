@@ -177,6 +177,7 @@ class ListenTests(unittest.TestCase):
         self.assertIsNotNone(self.service.handle_event(self._group("奴隶出来干活", sender=HOST)))
 
     def test_she_joins_talk_about_her_interests_and_may_keep_quiet(self) -> None:
+        self.config.listen.chime_in_burst = 2  # room for two chime-ins in a row
         self.model.reply = lambda messages: SILENCE
         self.assertIsNone(self.service.handle_event(self._group("我家的猫今天把杯子打碎了", sender=FRIEND)))
         self.service.listener.drain()
@@ -186,12 +187,12 @@ class ListenTests(unittest.TestCase):
         self.assertEqual(asked[-1]["content"], "苦力怕：我家的猫今天把杯子打碎了")
         self.assertEqual(self.outbound.sent, [])  # she chose to say nothing
 
-        self.model.reply = lambda messages: "笨猫！人没受伤吧？"
+        self.model.reply = lambda messages: "苦力怕，笨猫！人没受伤吧？[表情:担心]"
         self.service.handle_event(self._group("猫还躲到床底下不出来", sender=FRIEND))
         self.service.listener.drain()
-        self.assertEqual([part.text for part in self.outbound.sent], ["笨猫！人没受伤吧？"])
+        self.assertEqual([part.text for part in self.outbound.sent], ["笨猫！"])  # one sentence, no name, no sticker
         history = self.service.memory.load(GROUP_ID, "group").history
-        self.assertEqual(history[-3:], ["苦力怕: 我家的猫今天把杯子打碎了", "苦力怕: 猫还躲到床底下不出来", "assistant: 笨猫！人没受伤吧？"])
+        self.assertEqual(history[-3:], ["苦力怕: 我家的猫今天把杯子打碎了", "苦力怕: 猫还躲到床底下不出来", "assistant: 笨猫！"])
 
         # Having just spoken, she does not join in again so soon; 苦力怕 is now talking to her, though.
         self.service.handle_event(self._group("我家猫最喜欢吃鱼了", sender=HOST))
@@ -213,6 +214,39 @@ class ListenTests(unittest.TestCase):
         self.assertEqual([part.text for part in self.outbound.sent], ["笨猫！", "笨猫！"])
         self.assertEqual(self.service.listener.limits().burst, 5)
         self.assertEqual(self.service.listener.limits().threshold, self.config.listen.chime_in_threshold)
+
+    def test_she_keeps_quiet_when_told_to(self) -> None:
+        self.model.reply = lambda messages: "我毛病多，管不住~"
+        self.assertIsNotNone(self.service.handle_event(self._group("在吗", mention=True)))
+        asked = len(self.model.requests)
+
+        self.assertIsNone(self.service.handle_event(self._group("你别说话了")))
+        self.assertIsNone(self.service.handle_event(self._group("今天吃啥")))  # no longer talking with her
+        self.service.handle_event(self._group("我家的猫今天把杯子打碎了", sender=FRIEND))  # her interest, still no chime-in
+        self.service.listener.drain()
+        self.assertEqual(len(self.model.requests), asked)
+
+        self.assertIsNotNone(self.service.handle_event(self._group("好了，说吧", mention=True)))  # an @ still counts
+
+    def test_talking_on_lasts_from_the_at_and_is_not_extended_by_her_answers(self) -> None:
+        self.config.listen.continuation_seconds = 2.0
+        self.assertIsNotNone(self.service.handle_event(self._group("在吗", mention=True)))
+        self.assertIsNotNone(self.service.handle_event(self._group("今天吃什么")))
+        to_friend = self._group(" 你吃了吗")
+        to_friend.segments.insert(0, MessageSegment(kind="mention", mention_target=FRIEND, mention_display="苦力怕"))
+        self.assertIsNone(self.service.handle_event(to_friend))  # for someone else
+        time.sleep(2.2)
+        self.assertIsNone(self.service.handle_event(self._group("要不吃火锅")))
+
+    def test_a_line_she_talks_on_gets_one_sentence(self) -> None:
+        self.model.reply = lambda messages: "小夏，火锅好啊！不过记得别太辣。[表情:开心]"
+        self.service.handle_event(self._group("在吗", mention=True))
+        self.service.handle_event(self._group("晚上吃火锅"))
+
+        self.assertEqual(self.outbound.sent[-1].text, "火锅好啊！")
+        request = self._chat_requests()[-1]
+        self.assertIn("[接着刚才的话]", str(request[0]["content"]))
+        self.assertNotIn("[表情包]", str(request[0]["content"]))
 
     def test_commands_bots_and_bare_laughter_never_make_her_join_in(self) -> None:
         self.config.ignore_user_ids = [OTHER_BOT]

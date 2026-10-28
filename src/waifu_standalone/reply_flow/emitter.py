@@ -154,7 +154,7 @@ class OutboundEmitter:
             character_id=resolved_character_id,
         )
         self._service.gate.refresh_follow_up_window(event)
-        self._service.listener.mark_answered(event, message)
+        self._service.listener.mark_answered(event, message, reason=behavior_reason)
         return message
 
     async def aemit(
@@ -219,7 +219,7 @@ class OutboundEmitter:
             character_id=resolved_character_id,
         )
         self._service.gate.refresh_follow_up_window(event)
-        self._service.listener.mark_answered(event, message)
+        self._service.listener.mark_answered(event, message, reason=behavior_reason)
         return message
 
     async def _deliver_after_delay(self, event: InboundEvent, message: OutboundMessage, *, delay_seconds: float, **kwargs) -> None:

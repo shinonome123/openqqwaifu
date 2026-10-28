@@ -48,10 +48,21 @@ _LOGGER = logging.getLogger(__name__)
 SILENCE = "[不说话]"
 CHIME_IN_HINT = (
     "[这次是你自己想插话]\n"
-    "群里没人叫你，是你看到大家在聊，自己想说两句。只有真有想说的、接得上话才说，一两句就够，"
+    "群里没人叫你，是你看到大家在聊，自己想说一句。只说一句，二十来个字，不点名，"
     "别抢话题、别总结大家说了什么；只是笑、发表情、几个字的随口一句，一般不用接。"
     f"不想说或者不合适插嘴，就只输出「{SILENCE}」。"
 )
+TALK_ON_HINT = (
+    "[接着刚才的话]\n"
+    "对方没有 @ 你，只是接着刚才的话在说；回一句就好，不超过三十个字，不点名。"
+    f"要是这句其实是对别人说的，或者用不着你接，就只输出「{SILENCE}」。"
+)
+# A reply that nobody @-ed asks for one sentence; past this many characters it is cut there.
+ONE_SENTENCE_CHARS = 40
+# Someone telling her to be quiet ("你别说话了", "闭嘴").
+_QUIET = re.compile(r"(?:别|不要|甭|少)(?:再)?(?:说话|说了|插嘴|吵|讲了|讲话|回了|接话|bb|逼逼)|闭嘴|安静(?:点|一点|一会|会儿)|shut ?up", re.IGNORECASE)
+# How long a reply to a chime-in still counts as talking to her.
+_CHIME_IN_CONTINUATION_SECONDS = 20.0
 # Talk with fewer different characters than this ("哈哈哈哈", "6666", "?") is not weighed.
 _MIN_DISTINCT_CHARS = 4
 _KEYWORD_MAX_CHARS = 8
@@ -103,6 +114,8 @@ class Listener:
         self._embedder = None
         self._vectors: dict[str, list[float]] = {}
         self._names: tuple[str, tuple[str, ...], float] = ("", (), 0.0)
+        # Group id -> until when it keeps quiet there, after being told to.
+        self._quiet_until: dict[str, float] = {}
 
     @property
     def enabled(self) -> bool:
@@ -168,8 +181,8 @@ class Listener:
         room = max(0, _STASHED_IMAGES_MAX - len(own))
         return dataclasses.replace(event, segments=[*stashed[-room:], *event.segments] if room else event.segments)
 
-    def mark_answered(self, event: InboundEvent, message: OutboundMessage) -> None:
-        """A reply to ``event`` went out."""
+    def mark_answered(self, event: InboundEvent, message: OutboundMessage, *, reason: str = "") -> None:
+        """A reply to ``event`` went out (``reason`` "chime_in" when nobody asked for it)."""
         if not self.enabled:
             return
         now = time.monotonic()
@@ -180,12 +193,45 @@ class Listener:
             else:
                 entry.first_at = entry.at  # newer messages wait from their own arrival
         if event.launcher_type == "group":
-            self._continuation[(event.launcher_id, str(event.sender_id))] = now + float(
-                self._service.config.listen.continuation_seconds
-            )
+            # An @ or her name starts a talk with that person; so, briefly, does joining in on
+            # their line. Answering a line of that talk does not extend it: otherwise she
+            # answered everything a person said for as long as they kept talking.
+            hold = 0.0
+            if reason == "chime_in":
+                hold = _CHIME_IN_CONTINUATION_SECONDS
+            elif self.explicitly_addressed(event):
+                hold = float(self._service.config.listen.continuation_seconds)
+            key = (event.launcher_id, str(event.sender_id))
+            if hold > 0:
+                self._continuation[key] = max(self._continuation.get(key, 0.0), now + hold)
             said = strip_sticker_tags(message.text).strip()
             if said:
                 self._last_said[event.launcher_id] = (said, now)
+
+    def explicitly_addressed(self, event: InboundEvent) -> bool:
+        """An @ of the bot, or its name or call name: not just a line in an ongoing talk."""
+        bot = str(self._service.config.bot_account_id or "")
+        return event.launcher_type != "group" or event.has_bot_mention(bot) or self._name_called(event)
+
+    def asks_for_quiet(self, event: InboundEvent) -> bool:
+        """"你别说话了", "闭嘴": in a group she then keeps quiet for ``listen.quiet_minutes``.
+
+        Only an @ or her name gets an answer meanwhile: no chime-ins, no talking on.
+        """
+        if not self.enabled or event.launcher_type != "group":
+            return False
+        if not _QUIET.search(event.command_text(self._service.config.bot_account_id)):
+            return False
+        minutes = float(self._service.config.listen.quiet_minutes)
+        self._quiet_until[event.launcher_id] = time.monotonic() + minutes * 60.0
+        for key in [key for key in self._continuation if key[0] == event.launcher_id]:
+            del self._continuation[key]
+        self._newest.pop(event.launcher_id, None)
+        _LOGGER.info("told to keep quiet group=%s by=%s minutes=%.0f", event.launcher_id, event.sender_id, minutes)
+        return True
+
+    def keeping_quiet(self, group: str) -> bool:
+        return time.monotonic() < self._quiet_until.get(group, 0.0)
 
     def spoke_recently(self, group: str) -> bool:
         """Whether the character said something in this group within its minimum gap between chime-ins."""
@@ -216,6 +262,11 @@ class Listener:
         """Whether a group message without an @ is still for the character: its name, or its conversation."""
         if self._name_called(event):
             return True
+        if self.keeping_quiet(event.launcher_id):
+            return False
+        bot = str(self._service.config.bot_account_id or "")
+        if any(target != bot for target in event.mentioned_targets):
+            return False  # they @ someone else: that line is for them
         deadline = self._continuation.get((event.launcher_id, str(event.sender_id)))
         return deadline is not None and time.monotonic() <= deadline
 
@@ -292,6 +343,8 @@ class Listener:
         svc = self._service
         limits = self.limits()
         group = event.launcher_id
+        if self.keeping_quiet(group):
+            return  # told to keep quiet
         if self.spoke_recently(group):
             return  # it spoke here a moment ago
         if svc._session_lock_for(event).locked():
@@ -445,6 +498,21 @@ def _cosine(left: list[float], right: list[float]) -> float:
     dot = sum(a * b for a, b in zip(left, right))
     norm = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
     return dot / norm if norm else 0.0
+
+
+def one_sentence(text: str, *, names: tuple[str, ...] = (), limit: int = ONE_SENTENCE_CHARS) -> str:
+    """The first sentence of ``text``, without a leading "名字，", cut at ``limit`` characters."""
+    text = strip_sticker_tags(str(text or "")).strip()
+    for name in names:
+        name = str(name or "").strip()
+        if name and re.match(rf"{re.escape(name)}\s*[，,：:]", text):
+            text = text[len(name):].lstrip(" ，,：:")
+            break
+    match = re.search(r"[。！？!?~～]+[”’」』）)]*|\n", text)
+    head = (text[: match.end()] if match else text).strip()
+    if len(head) > limit:
+        head = head[:limit].rstrip("，,、；; ") + "…"
+    return head
 
 
 def is_silence(text: str) -> bool:

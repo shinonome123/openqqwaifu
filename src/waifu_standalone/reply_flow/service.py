@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from ..memory import KnowledgeService
 from ..models import InboundEvent, OutboundMessage
 from ..systems.searching import SearchContext
-from .listener import CHIME_IN_HINT, is_silence
+from .listener import CHIME_IN_HINT, TALK_ON_HINT, is_silence, one_sentence
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -72,6 +72,17 @@ class ReplyFlowService:
                 # Not for the character; it may still join in once the group goes quiet.
                 svc.listener.consider_chiming_in(event)
                 return None
+            if svc.listener.asks_for_quiet(event):
+                return None  # "你别说话了": no answer, and quiet in this group for a while
+        # A group line nobody @-ed: she joins in on her own, or talks on with the person she is
+        # talking to. Either way one sentence; a whole paragraph each time is too much.
+        talking_on = (
+            not spontaneous
+            and event.launcher_type == "group"
+            and not svc.listener.explicitly_addressed(event)
+            and svc.listener.addresses_bot(event)
+        )
+        unasked = spontaneous or talking_on
 
         await svc.onboarding.aremember_directory_member(event)
         ambient_context = svc._peek_ambient_history(event, character_id=current_character)
@@ -208,7 +219,7 @@ class ReplyFlowService:
             active_skills=active_skills,
             allow_fallback=not live_runtime,
         )
-        sticker_hint = await asyncio.to_thread(svc.stickers.prompt_section, event)
+        sticker_hint = "" if unasked else await asyncio.to_thread(svc.stickers.prompt_section, event)
         generated_reply = await svc.generator.agenerate_reply_message(
             event,
             session,
@@ -228,18 +239,25 @@ class ReplyFlowService:
             # Joining in uninvited, the character may also decide to say nothing.
             allow_fallback=not live_runtime and not spontaneous,
             turn_hint="\n\n".join(
-                hint for hint in (CHIME_IN_HINT if spontaneous else "", svc.tavern.prompt_hint(event, latest_message)) if hint
+                hint
+                for hint in (
+                    CHIME_IN_HINT if spontaneous else TALK_ON_HINT if talking_on else "",
+                    svc.tavern.prompt_hint(event, latest_message),
+                )
+                if hint
             ),
         )
         reply_text = generated_reply.text
         if "last_tool_calls" in session.metadata:
             await asyncio.to_thread(svc.memory.store.save, session)
-        if spontaneous and is_silence(reply_text) and not generated_reply.images:
-            _LOGGER.info("chime-in: the character kept quiet group=%s", event.launcher_id)
+        if unasked and is_silence(reply_text) and not generated_reply.images:
+            _LOGGER.info("%s: the character kept quiet group=%s", "chime-in" if spontaneous else "talk-on", event.launcher_id)
             return None
+        if unasked:
+            reply_text = one_sentence(reply_text, names=(address, event.sender_name))
         if live_runtime and not str(reply_text or "").strip() and not generated_reply.images:
             return None
-        if not spontaneous:
+        if not unasked:
             # Joining in unasked is no moment to ask a stranger what to call them.
             reply_text = await svc.onboarding.amaybe_append_soft_ask(
                 event,
@@ -268,7 +286,7 @@ class ReplyFlowService:
             assistant_name=dialogue_assistant_name,
             emotion=emotion,
             search_used=bool(search_context.active),
-            behavior_reason="reply",
+            behavior_reason="chime_in" if spontaneous else "reply",
             character_id=current_character,
         )
         await svc._schedule_knowledge_writeback_async(
