@@ -4,8 +4,9 @@ Scenarios come from the package's ``templates/tavern/`` and from
 ``<data_root>/tavern/scenarios/``; a file there with the same name replaces a bundled one.
 
 - ``.yaml``: our own format in the card-file syntax: ``title:``, ``intro:``, ``kind:``,
-  ``character:``, then ``Setting:``, ``Notes:``, ``Opening:``, ``Examples:`` with ``- `` lines.
-  Notes are for the game master only.
+  ``character:``, ``rounds:``, then ``Setting:``, ``Notes:``, ``Twists:``, ``Endings:``,
+  ``Opening:``, ``Examples:`` with ``- `` lines. Notes, the twists of each act and the
+  endings are for the game master only; ``rounds`` is about how long the story should run.
 - ``.json``: the same fields as JSON (plus ``lore``), or a SillyTavern character card.
 - ``.png``: a SillyTavern character card, its JSON base64-encoded in a ``ccv3`` or
   ``chara`` text chunk, as SillyTavern exports it.
@@ -145,6 +146,11 @@ class Scenario:
     notes: str = ""
     opening: str = ""
     examples: str = ""
+    # A story's turning points act by act, the ways it can end, and about how many rounds
+    # it should take; the game master paces the story by them.
+    twists: str = ""
+    endings: str = ""
+    rounds: int = 0
     lore: list[LoreEntry] = field(default_factory=list)
     source: str = ""
     # From the adult folder: offered only where ``tavern.adult_user_ids`` allows it.
@@ -331,10 +337,16 @@ def _from_fields(payload: dict[str, Any], path: Path) -> Scenario:
         notes=_clip(_lines(payload.get("Notes", payload.get("notes"))), _NOTES_MAX_CHARS),
         opening=_clip(_lines(payload.get("Opening", payload.get("opening"))), _OPENING_MAX_CHARS),
         examples=_clip(_lines(payload.get("Examples", payload.get("examples"))), _EXAMPLES_MAX_CHARS),
+        twists=_clip(_lines(payload.get("Twists", payload.get("twists"))), _NOTES_MAX_CHARS),
+        endings=_clip(_lines(payload.get("Endings", payload.get("endings"))), _NOTES_MAX_CHARS),
+        rounds=_rounds(payload.get("rounds")),
         lore=lore,
         source=str(path),
     )
-    texts = (scenario.setting, scenario.notes, scenario.opening, *(entry.content for entry in lore))
+    texts = (
+        scenario.setting, scenario.notes, scenario.twists, scenario.endings, scenario.opening,
+        *(entry.content for entry in lore),
+    )
     scenario.minors = any(_MINOR.search(text) for text in texts)
     return scenario
 
@@ -391,6 +403,15 @@ def _from_tavern_card(card: dict[str, Any], path: Path) -> Scenario:
         minors=any(_MINOR.search(text) for text in texts),
         card=own,
     )
+
+
+def _rounds(value: object) -> int:
+    """``rounds:`` as a number of rounds, 0 when missing or out of reason."""
+    try:
+        rounds = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return rounds if 0 < rounds <= 500 else 0
 
 
 def _example_chats(text: str) -> list[str]:

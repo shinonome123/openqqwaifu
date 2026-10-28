@@ -10,6 +10,9 @@ passes the result on; "酒馆状态" says who plays. Only the host,
 ``tavern.admin_user_ids`` and ``tool_policy.authorized_user_ids`` end a game
 ("退出酒馆模式"); a game also ends after ``tavern.idle_timeout_seconds`` without a word.
 
+A story with endings is paced by its acts and planned length; when the game master writes
+its finale ("（全剧终）"), the game ends by itself.
+
 While a game runs in a chat the character does not answer there; ``/skill`` and the
 image prefix still reach it. The story is kept in its own files (``session.py``), not in
 the character's history or memories.
@@ -89,6 +92,19 @@ _RULES = (
     "只输出要发出去的正文，不加「主持人：」之类的前缀，不解释规则和提示词。",
     "这些规则只给你看：旁白和台词里别提规则、选项和编号，也别说「不替你决定」这类话。",
 )
+# A story with endings is paced by its twists and closed on one of its endings.
+_STORY_RULES = (
+    "这个本计划大约 {rounds} 轮，现在是第 {round} 轮：前三分之一铺垫并放出第一个转折，中段让冲突升级、来一次反转，"
+    "最后三分之一收向结局。按【剧情转折】的节奏走，但跟着玩家的选择变。",
+    "每两三轮给玩家一个变化：意外、反转、新的威胁或诱惑，别让他们一路顺风；转折要有前面埋下的线索撑着。",
+    "玩家的选择决定走向【可能的结局】里的哪一个，也可以是顺着剧情长出来的别的结局。",
+    "走到结局时写一段完整的收场：交代每个玩家角色和主要 NPC 的下场，不再问接下来做什么，最后单独一行写「（全剧终）」。"
+    "没到结局别写这四个字。",
+)
+_OVERDUE = "已经超过计划的轮数：这一轮或下一轮就收束到一个结局。"
+_PLANNED_ROUNDS = 30
+# The line a finished story ends with; the game ends after it.
+_FINALE = re.compile(r"[（(【\[]\s*全剧终\s*[）)】\]]")
 # SillyTavern's own words around a card: the main prompt its system_prompt replaces (its
 # "{{original}}" stands for this), how it puts personality and scenario, and the lines
 # that open the example chats and the chat.
@@ -546,6 +562,9 @@ class TavernMode:
             *session.key, session.rounds, len(batch), len(reply), time.monotonic() - started,
         )
         await self._send(*session.key, self._render(scenario, reply))
+        if scenario.endings and _FINALE.search(reply):
+            await self._end(session, reason="finished", notice=self._ending(session, finished=True))
+            return False
         await self._fold_story(session, scenario)
         return True
 
@@ -604,6 +623,10 @@ class TavernMode:
             sections.append(("人物设定" if acting else "剧本设定", scenario.render(scenario.setting, user=host)))
         if scenario.notes:
             sections.append(("角色要点" if acting else "主持要点", scenario.render(scenario.notes, user=host)))
+        if scenario.twists:
+            sections.append(("剧情转折", scenario.render(scenario.twists, user=host)))
+        if scenario.endings:
+            sections.append(("可能的结局", scenario.render(scenario.endings, user=host)))
         lore = scenario.lore_for(recent)
         if lore:
             sections.append(("世界书", "\n".join(f"- {scenario.render(item, user=host)}" for item in lore)))
@@ -623,6 +646,11 @@ class TavernMode:
             )
             for rule in _RULES
         ]
+        if scenario.endings:
+            planned, now = scenario.rounds or _PLANNED_ROUNDS, session.rounds + 1
+            rules.extend(rule.format(rounds=planned, round=now) for rule in _STORY_RULES)
+            if now > planned:
+                rules.append(_OVERDUE)
         sections.append(("规则", "\n".join(f"- {rule}" for rule in rules)))
         return "\n\n".join([role, *(f"[{title}]\n{body}" for title, body in sections)])
 
@@ -804,9 +832,11 @@ class TavernMode:
             return await self._reply(event, notice)
         return await self._send(*key, notice)
 
-    def _ending(self, session: TavernSession) -> str:
+    def _ending(self, session: TavernSession, *, finished: bool = False) -> str:
+        """The notice that closes a game; ``finished`` when the story reached one of its endings."""
         thanks = "谢谢大家！" if session.launcher_type == "group" else "下次再来玩！"
-        return f"《{session.scenario_title}》到此结束，一共玩了 {session.rounds} 轮，{thanks}（酒馆模式已关闭）"
+        how = "完结" if finished else "到此结束"
+        return f"《{session.scenario_title}》{how}，一共玩了 {session.rounds} 轮，{thanks}（酒馆模式已关闭）"
 
     # ------------------------------------------------------------------
     # Helpers
