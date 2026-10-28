@@ -531,14 +531,25 @@ def _normalize_webui_fields(config: AppConfig) -> AppConfig:
 
 
 def _napcat_config_dirs(config_path: Path | None, *, data_root: str) -> list[Path]:
+    """Where NapCat's config may be, for a config file at ``config_path``.
+
+    With a config file, only places next to it (and the container's sidecar mount) count:
+    the working directory does not. Tests and scripts that load or save a config elsewhere
+    while standing in the repository used to rewrite the live NapCat OneBot config there
+    (an empty token and an HTTP callback instead of the reverse WebSocket).
+    """
     candidates: list[Path] = []
     if config_path is not None:
         repo_root = config_path.parent.parent
         candidates.append(repo_root / "napcat" / "config")
-    candidates.append(Path.cwd() / "napcat" / "config")
+    else:
+        candidates.append(Path.cwd() / "napcat" / "config")
     candidates.append(Path("/app/napcat-sidecar/config"))
     try:
-        data_root_parent = Path(data_root).resolve().parent
+        root = Path(data_root)
+        if not root.is_absolute() and config_path is not None:
+            root = config_path.parent / root  # as load() resolves it
+        data_root_parent = root.resolve().parent
         candidates.append(data_root_parent / "napcat-sidecar" / "config")
         candidates.append(data_root_parent / "napcat" / "config")
     except Exception:

@@ -203,6 +203,9 @@ class TavernConfig:
     starter_user_ids: list[str] = field(default_factory=list)
     # 除了房主，还能强制结束的 QQ 号；tool_policy.authorized_user_ids 里的人也能。
     admin_user_ids: list[str] = field(default_factory=list)
+    # 成人模式：这些 QQ 号在私聊里开局时，菜单里多出 data_root 下 tavern/adult/ 的卡，亲密情节按卡的设定写、
+    # 不一笔带过（角色都是成年人、双方自愿、说停就停）。群里永远不开。空表示谁都不行。
+    adult_user_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

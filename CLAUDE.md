@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common Commands
 
+Tests run in a temporary working directory (`tests/test__isolated_working_directory.py`), so a default `AppConfig()` never reads or writes the live `data/`; don't make a test depend on the working directory being the repository.
+
 ```bash
 # Run all tests
 python -B -m unittest discover -s tests -v

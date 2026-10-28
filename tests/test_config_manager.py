@@ -129,6 +129,27 @@ class ConfigManagerTests(unittest.TestCase):
         self.assertEqual(config.qq_sidecar.webui_token, "bridge-secret")
         self.assertFalse(config.qq_sidecar.dry_run)
 
+    def test_a_config_elsewhere_leaves_the_working_directorys_napcat_alone(self) -> None:
+        # The test suite runs from the repository, next to the live napcat/config: loading or
+        # saving a temporary config must not rewrite that one.
+        with tempfile.TemporaryDirectory() as workdir, tempfile.TemporaryDirectory() as tmpdir:
+            live = Path(workdir) / "napcat" / "config" / "onebot11_3956638110.json"
+            live.parent.mkdir(parents=True)
+            original = json.dumps({"network": {"websocketClients": [{"name": "openqqwaifu-reverse-ws", "token": "live"}]}})
+            live.write_text(original, encoding="utf-8")
+            config_path = Path(tmpdir) / "data" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps({"bot_account_id": "3956638110"}), encoding="utf-8")
+            previous = os.getcwd()
+            os.chdir(workdir)
+            try:
+                config = ConfigManager(config_path).load()
+                ConfigManager().save(config, config_path)
+                ConfigManager().save(AppConfig(bot_account_id="3956638110"), Path(tmpdir) / "other.json")
+            finally:
+                os.chdir(previous)
+            self.assertEqual(live.read_text(encoding="utf-8"), original)
+
     def test_autodiscovery_provisions_empty_napcat_onebot_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

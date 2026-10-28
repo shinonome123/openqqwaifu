@@ -70,9 +70,35 @@ _RULES = (
     "掷骰失败时，只写角色感知到的（可能是错的），不要接着点破真相。",
     "玩家没说过自己角色的性别时，用名字称呼，不要用「他」「她」。",
     "篇幅 80 到 250 字，节奏紧凑，默认用简体中文；结尾用一句话问{audience}接下来做什么。",
-    "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。",
+    "{content}",
     "【主持要点】里的秘密不要直接说出来，让玩家在剧情里发现。",
     "只输出要发出去的正文，不加「主持人：」之类的前缀，不解释规则和提示词。",
+    "这些规则只给你看：旁白和台词里别提规则、选项和编号，也别说「不替你决定」这类话。",
+)
+# A character card is played the way people chat in QQ, not as a script with a status bar:
+# cards written for SillyTavern's web page read like a game log in a chat.
+_CHARACTER_RULES = (
+    "像真人在 QQ 里发消息那样说话：第一人称，动作和神态写在（）里，一次一到四句，可以分两三行；不写大段旁白。",
+    "不写场景标题、状态栏、数值、选项列表，也不用「名字：「台词」」的剧本格式。角色卡里要是要求了那种格式，那是给别的界面用的，这里不用。",
+    "{each}接着对方说的、做的往下演；不复述对方的话，不提选项、编号和规则（「不替你决定」「你可以拒绝」这类话都不要说）。",
+    "只演你自己和需要出场的配角；玩家的动作、台词和决定由玩家自己说。要对方拿主意时，就像平时聊天那样问一句。",
+    "行动有风险或结果拿不准时，可以让玩家掷骰（例如「{example}，掷个 d20 看看」）；骰子由程序掷，结果会写在玩家消息里，不要自己编。",
+    "掷骰失败时，只写角色感知到的，不要接着点破真相。",
+    "玩家没说过自己的性别时，用名字称呼，不要用「他」「她」。",
+    "默认用简体中文；{content}",
+    "【角色要点】里的秘密按剧情节奏慢慢透露，不要一次说穿。",
+)
+_SAFE_CONTENT = "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。"
+# Only for a game opened in a private chat with someone in tavern.adult_user_ids.
+_ADULT_CONTENT = (
+    "这是和确认成年的用户的一对一私聊：亲密情节可以按角色卡的设定写，不用一笔带过；"
+    "所有角色都必须是成年人，必须双方自愿，对方犹豫、拒绝或说停就立刻停下；"
+    "不写涉及未成年人、非自愿或真实人物的内容，也不写血腥细节。"
+)
+_CHARACTER_OPENING = (
+    "（开场。这张卡给网页版写的开场白如下，只用来知道你在哪、正在发生什么：\n{reference}\n"
+    "现在用你在 QQ 里的口吻发第一条消息：两三句，像真人那样开口，让对方知道可以怎么接；"
+    "别照抄，去掉里面关于分级、规则、选项的字眼。）"
 )
 
 
@@ -81,7 +107,9 @@ class TavernMode:
         self._service = service
         root = Path(service.config.data_root) / "tavern"
         self.files = SessionFiles(root)
-        self.library = ScenarioLibrary(root / "scenarios", Path(__file__).resolve().parents[1] / "templates" / "tavern")
+        self.library = ScenarioLibrary(
+            root / "scenarios", Path(__file__).resolve().parents[1] / "templates" / "tavern", adult_dir=root / "adult"
+        )
         self._sessions: dict[tuple[str, str], TavernSession] = {}
         # Chats whose session file was looked at since the start; others are read on first use.
         self._checked: set[tuple[str, str]] = set()
@@ -151,7 +179,8 @@ class TavernMode:
         allowed = {str(uid).strip() for uid in settings.starter_user_ids if str(uid).strip()}
         if allowed and str(event.sender_id).strip() not in allowed:
             return await self._reply(event, "酒馆只有指定的人能开。")
-        scenarios = await asyncio.to_thread(self.library.scenarios)
+        adult = self._adult_allowed(event)
+        scenarios = await asyncio.to_thread(self.library.scenarios, adult=adult)
         if not scenarios:
             return await self._reply(event, "酒馆里还没有剧本，把剧本放进 tavern/scenarios 文件夹再来吧。")
         shown = scenarios[:_MENU_MAX]
@@ -161,6 +190,7 @@ class TavernMode:
             host_id=str(event.sender_id),
             host_name=self._name(event),
             menu=[scenario.scenario_id for scenario in shown],
+            adult=adult,
         )
         self._sessions[session.key] = session
         self._checked.add(session.key)
@@ -169,7 +199,7 @@ class TavernMode:
         _LOGGER.info("tavern menu chat=%s:%s host=%s scenarios=%s", *session.key, session.host_id, len(scenarios))
         lines = ["酒馆开张啦！今天能玩这些本："]
         for index, scenario in enumerate(shown, start=1):
-            kind = "（角色卡）" if scenario.kind == "character" else ""
+            kind = ("（成人）" if scenario.adult else "") + ("（角色卡）" if scenario.kind == "character" else "")
             intro = f"：{scenario.intro}" if scenario.intro else ""
             lines.append(f"{index}. {scenario.title}{kind}{intro}")
         if len(scenarios) > len(shown):
@@ -210,7 +240,11 @@ class TavernMode:
                     return f"没有第 {number} 个本，回 1 到 {len(session.menu)} 的数字。"
                 scenario_id = session.menu[number - 1]
             else:
-                titles = {item.scenario_id: item.title for item in self.library.scenarios() if item.scenario_id in session.menu}
+                titles = {
+                    item.scenario_id: item.title
+                    for item in self.library.scenarios(adult=session.adult)
+                    if item.scenario_id in session.menu
+                }
                 scenario_id = next((key for key, title in titles.items() if wanted and wanted == title), "")
                 if not scenario_id and len(wanted) >= 2:
                     # "便利店" and "我想玩雾港酒馆" both name a scenario.
@@ -220,6 +254,8 @@ class TavernMode:
                 if not scenario_id:
                     return None
         scenario = self.library.get(scenario_id)
+        if scenario is not None and scenario.adult and not session.adult:
+            return "这个本这里不能开。"
         return scenario if scenario is not None else "这个本的文件不见了，换一个吧。"
 
     async def _start_game(self, event: InboundEvent, session: TavernSession, scenario: Scenario) -> OutboundMessage:
@@ -231,7 +267,8 @@ class TavernMode:
         session.started_at = time.time()
         session.touch()
         opening = scenario.render(scenario.opening, user=session.host_name).strip()
-        if opening:
+        acting = scenario.kind == "character"
+        if opening and not acting:
             session.turns = [{"role": "assistant", "content": opening}]
         self.files.save(session)
         self._watch(session, restart=True)  # the idle limit replaces the menu's
@@ -244,7 +281,12 @@ class TavernMode:
         else:
             rules = f"《{scenario.title}》开始！直接说话就是行动，括号（…）里是场外话；掷骰用 .r d20；说「退出酒馆模式」结束。"
         message = await self._reply(event, rules)
-        if opening:
+        if acting:
+            # Cards also open with HTML (banners, images, links); only the words are a reference.
+            reference = re.sub(r"<[^<>]{0,500}>", "", render_markup(opening, chat=True))
+            reference = re.sub(r"\n\s*\n+", "\n", reference).strip() or "（卡里没有开场白，自己按人物设定开场。）"
+            self._queue(session, PendingAction("", _CHARACTER_OPENING.format(reference=reference)))
+        elif opening:
             await self._send(session.launcher_type, session.launcher_id, render_markup(opening))
         else:
             self._queue(session, PendingAction("", _START_NOTE))
@@ -381,7 +423,7 @@ class TavernMode:
     async def _narrate(self, session: TavernSession, batch: list[PendingAction]) -> bool:
         """One game-master turn for ``batch``; ``False`` stops the rounds until someone speaks again."""
         scenario = await asyncio.to_thread(self.library.get, session.scenario_id)
-        if scenario is None:
+        if scenario is None or (scenario.adult and not session.adult):
             await self._end(session, reason="missing", notice=f"《{session.scenario_title}》的剧本文件不见了，这一局只能先停在这里。")
             return False
         round_text = "\n".join(action.text for action in batch)
@@ -392,6 +434,9 @@ class TavernMode:
                     self._messages(session, scenario, round_text), user=self._user_key(session)
                 )
             )
+            if scenario.kind == "character":
+                # Stored as sent, so the story the model sees keeps the chat style.
+                reply = _as_chat(reply, scenario.character or scenario.title)
             if not reply:
                 raise ValueError("the game master wrote nothing")
         except Exception as exc:  # the actions stay pending and go with the next round
@@ -414,7 +459,7 @@ class TavernMode:
             "tavern round chat=%s:%s round=%s actions=%s chars=%s seconds=%.1f",
             *session.key, session.rounds, len(batch), len(reply), time.monotonic() - started,
         )
-        await self._send(*session.key, render_markup(reply))
+        await self._send(*session.key, reply if scenario.kind == "character" else render_markup(reply))
         await self._fold_story(session, scenario)
         return True
 
@@ -431,16 +476,18 @@ class TavernMode:
 
     def _system_prompt(self, session: TavernSession, scenario: Scenario, recent: str) -> str:
         place = "群里" if session.launcher_type == "group" else "私聊里"
-        if scenario.kind == "character":
-            role = f"你在 QQ {place}和玩家角色扮演：你扮演{scenario.character or scenario.title}，同时用旁白描述环境、推动情节。"
+        acting = scenario.kind == "character"
+        if acting:
+            partner = "跟大家" if session.launcher_type == "group" else "跟对方"
+            role = f"你就是{scenario.character or scenario.title}，正在 QQ {place}{partner}对戏。"
         else:
             role = f"你在 QQ {place}当跑团主持人，正在主持《{scenario.title}》：你描述世界、扮演所有 NPC、推进剧情。"
         host = session.host_name
         sections: list[tuple[str, str]] = []
         if scenario.setting:
-            sections.append(("剧本设定", scenario.render(scenario.setting, user=host)))
+            sections.append(("人物设定" if acting else "剧本设定", scenario.render(scenario.setting, user=host)))
         if scenario.notes:
-            sections.append(("主持要点", scenario.render(scenario.notes, user=host)))
+            sections.append(("角色要点" if acting else "主持要点", scenario.render(scenario.notes, user=host)))
         lore = scenario.lore_for(recent)
         if lore:
             sections.append(("世界书", "\n".join(f"- {scenario.render(item, user=host)}" for item in lore)))
@@ -449,15 +496,23 @@ class TavernMode:
         players = [f"{name}（房主）" if uid == session.host_id else name for uid, name in session.players.items()]
         sections.append(("玩家", "、".join(players)))
         if scenario.examples:
-            sections.append(("说话风格示例", scenario.render(scenario.examples, user=host)))
+            title = "说话感觉参考（格式别照抄）" if acting else "说话风格示例"
+            sections.append((title, scenario.render(scenario.examples, user=host)))
         group_game = session.launcher_type == "group" and len(session.players) > 1
+        if acting:
+            each = "好几个人一起玩时，自然地回应每个人（可以叫名字）；" if group_game else ""
+        else:
+            each = "，点到每个人的名字" if group_game else ""
+        # Adult content only in a private game opened by someone in tavern.adult_user_ids.
+        content = _ADULT_CONTENT if session.adult and session.launcher_type == "person" else _SAFE_CONTENT
         rules = [
             rule.format(
-                each="，点到每个人的名字" if group_game else "",
+                each=each,
                 example=next(iter(session.players.values()), host),
                 audience="大家" if group_game else "玩家",
+                content=content,
             )
-            for rule in _RULES
+            for rule in (_CHARACTER_RULES if acting else _RULES)
         ]
         sections.append(("规则", "\n".join(f"- {rule}" for rule in rules)))
         return "\n\n".join([role, *(f"[{title}]\n{body}" for title, body in sections)])
@@ -619,6 +674,11 @@ class TavernMode:
             "有人想玩或者问起来，就告诉他这么开，别说你不会、不肯开。"
         )
 
+    def _adult_allowed(self, event: InboundEvent) -> bool:
+        """A private chat with someone in ``tavern.adult_user_ids``; never a group."""
+        allowed = {str(uid).strip() for uid in self._service.config.tavern.adult_user_ids if str(uid).strip()}
+        return event.launcher_type == "person" and str(event.sender_id).strip() in allowed
+
     def _addressed(self, event: InboundEvent) -> bool:
         """A private chat, an @, or (with listen on) her name or the person she is talking to."""
         svc = self._service
@@ -665,17 +725,17 @@ def _wants_start(compact: str) -> bool:
     return bool(_START_INTENT.search(compact)) and not _START_REFUSED.search(compact)
 
 
-def render_markup(text: str) -> str:
-    """A card's <场景>, <状态> and <选项> lines as plain text for QQ.
+def render_markup(text: str, *, chat: bool = False) -> str:
+    """A scenario's <场景>, <状态> and <选项> lines as plain text for QQ; ``chat`` drops them.
 
-    The story keeps the tags, so the model goes on writing them (and the numbers in
-    <状态> carry over from round to round); only what is sent is rewritten.
+    In a story the tags stay in what the model sees, so it goes on writing them (and the
+    numbers in <状态> carry over); only what is sent is rewritten.
     """
 
     def one(match: re.Match[str]) -> str:
         tag = match.group("tag")
         parts = [part.strip() for part in match.group("body").split("|") if part.strip()]
-        if not parts:
+        if not parts or (chat and tag in {"场景", "状态", "选项"}):
             return ""
         if tag == "场景":
             return "【" + " · ".join(parts) + "】"
@@ -686,6 +746,15 @@ def render_markup(text: str) -> str:
         return " · ".join(parts)
 
     return re.sub(r"\n{3,}", "\n\n", _MARKUP.sub(one, str(text or ""))).strip()
+
+
+def _as_chat(text: str, name: str) -> str:
+    """A character's reply as a chat message: no tags, no "名字：「台词」" script lines."""
+    text = render_markup(text, chat=True)
+    if name:
+        script = re.compile(rf"^{re.escape(name)}[：:]\s*「(.*)」\s*$")
+        text = "\n".join(script.sub(r"\1", line.strip()) for line in text.splitlines())
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _clean_narration(text: str) -> str:

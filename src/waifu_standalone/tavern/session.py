@@ -50,6 +50,9 @@ class TavernSession:
     # People outside the game already told that one is running.
     hinted: list[str] = field(default_factory=list)
     rounds: int = 0
+    # Opened in a private chat with someone in ``tavern.adult_user_ids``: adult scenarios
+    # are on the menu and intimate scenes need not fade out. Never true in a group.
+    adult: bool = False
     started_at: float = field(default_factory=time.time)
     last_activity_at: float = field(default_factory=time.time)
 
