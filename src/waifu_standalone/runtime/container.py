@@ -23,7 +23,12 @@ from ..infra import (
 from ..memory import FileMemoryStore, InMemoryStore, Memory
 from ..models import OutboundMessage, SessionMemory
 from ..organs.memory_graph import MemoryGraphBuilder
-from ..reply_flow.companion import REMINDER_TOOL_DESCRIPTION, REMINDER_TOOL_PARAMETERS
+from ..reply_flow.companion import (
+    REMINDER_TOOL_DESCRIPTION,
+    REMINDER_TOOL_PARAMETERS,
+    WATCH_TOOL_DESCRIPTION,
+    WATCH_TOOL_PARAMETERS,
+)
 from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
 from ..repositories import InMemoryRuntimeStateStore, SqliteRuntimeStateStore
@@ -242,7 +247,10 @@ def _build_service(
     tools.register(
         "image",
         name="图片生成",
-        description="调用图像生成能力并返回图文消息。",
+        description=(
+            "生成一张图片发给对方。对方想看到一幅画面时用：明说要画、要图，或者话里明显希望看到"
+            "（「要是能看看就好了」「长什么样啊」）。只是普通聊天就不要自己配图。prompt 写清楚画什么、什么风格。"
+        ),
         handler=service.dispatcher.run_image_tool,
         async_handler=service.dispatcher.arun_image_tool,
         parameters={
@@ -339,6 +347,18 @@ def _build_service(
         parameters=REMINDER_TOOL_PARAMETERS,
         model_handler=service.companion.use_tool,
         async_model_handler=service.companion.ause_tool,
+        risk_level="safe",
+    )
+    tools.register(
+        "watch",
+        name="长期盯一件事",
+        description=WATCH_TOOL_DESCRIPTION,
+        handler=lambda invocation: OutboundMessage(
+            invocation.event.launcher_id, invocation.event.launcher_type, service.companion.use_watch_tool(invocation).text
+        ),
+        parameters=WATCH_TOOL_PARAMETERS,
+        model_handler=service.companion.use_watch_tool,
+        async_model_handler=service.companion.ause_watch_tool,
         risk_level="safe",
     )
     tools.register(
