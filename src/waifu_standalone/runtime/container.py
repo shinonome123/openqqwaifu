@@ -22,6 +22,7 @@ from ..infra import (
 )
 from ..memory import FileMemoryStore, InMemoryStore, Memory
 from ..models import OutboundMessage, SessionMemory
+from ..memory.diary import RECALL_DESCRIPTION, RECALL_PARAMETERS
 from ..organs.memory_graph import MemoryGraphBuilder
 from ..reply_flow.companion import (
     REMINDER_TOOL_DESCRIPTION,
@@ -372,6 +373,18 @@ def _build_service(
         parameters=CHAT_LOG_PARAMETERS,
         model_handler=service.tasks.use_chat_log_tool,
         async_model_handler=service.tasks.ause_chat_log_tool,
+        risk_level="safe",
+    )
+    tools.register(
+        "recall",
+        name="回想以前",
+        description=RECALL_DESCRIPTION,
+        handler=lambda invocation: OutboundMessage(
+            invocation.event.launcher_id, invocation.event.launcher_type, service.diary.use_tool(invocation).text
+        ),
+        parameters=RECALL_PARAMETERS,
+        model_handler=service.diary.use_tool,
+        async_model_handler=service.diary.ause_tool,
         risk_level="safe",
     )
     tools.register(

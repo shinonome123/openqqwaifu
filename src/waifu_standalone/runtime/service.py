@@ -39,6 +39,7 @@ from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
 from ..reply_flow import Generator, OutboundEmitter, PENDING_SEARCH_METADATA_KEY, ReplyFlowService, ReplyGate, StickerLibrary
 from ..memory.chat_log import ChatLog
+from ..memory.diary import Diary
 from ..reply_flow.companion import Companion
 from ..reply_flow.tasks import ASSISTANT_SPEAKER, TaskRunner
 from ..reply_flow.listener import Listener
@@ -192,6 +193,7 @@ class WaifuService:
     companion: Companion = field(init=False, repr=False)
     tasks: TaskRunner = field(init=False, repr=False)
     chat_log: ChatLog = field(init=False, repr=False)
+    diary: Diary = field(init=False, repr=False)
     member_service: MemberService = field(init=False, repr=False)
     memory_admin_service: MemoryAdminService = field(init=False, repr=False)
     skills_admin_service: SkillsAdminService = field(init=False, repr=False)
@@ -231,6 +233,7 @@ class WaifuService:
         self.companion = Companion(self)
         self.tasks = TaskRunner(self)
         self.chat_log = ChatLog(Path(self.config.data_root) / "chatlog", timezone=self.config.timezone)
+        self.diary = Diary(self)
         self.member_service = MemberService(self)
         self.memory_admin_service = MemoryAdminService(self)
         self.skills_admin_service = SkillsAdminService(self)
