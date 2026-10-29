@@ -71,6 +71,7 @@ class _SillyTavern:
         self.chats: dict[str, dict[str, list[dict[str, object]]]] = {}
         self.connection = {"api": "koboldhorde", "source": "openai", "url": "", "model": ""}
         self.connects: list[dict[str, object]] = []
+        self.reasoning_parsed = 0
         self.imports: list[dict[str, object]] = []
         self.turns: list[dict[str, object]] = []
         self.quiet: list[dict[str, object]] = []
@@ -106,6 +107,10 @@ class _SillyTavern:
         self.connects.append(options)
         self.connection = {"api": "openai", "source": "custom", "url": options["url"], "model": options["model"]}
         return {"online": "Valid"}
+
+    def do_parseReasoning(self, options):  # type: ignore[no-untyped-def]
+        self.reasoning_parsed += 1
+        return True
 
     def do_characters(self, options):  # type: ignore[no-untyped-def]
         return [{"avatar": avatar, **data, "lore": ""} for avatar, data in self.characters.items()]
@@ -712,6 +717,7 @@ class TavernTests(unittest.TestCase):
         )
         state = (self.root / "tavern" / "sillytavern.json").read_text(encoding="utf-8")
         self.assertNotIn("sk-test", state)  # only a fingerprint of it
+        self.assertEqual(self.st.reasoning_parsed, 1)  # <think> blocks go into SillyTavern's reasoning
 
         # The next start leaves SillyTavern's settings as they are, until the tavern model changes.
         self.service.tavern.close()
@@ -723,6 +729,7 @@ class TavernTests(unittest.TestCase):
         self.service, self.outbound = self._build()
         self._send(_private("启动酒馆"))
         self.assertEqual([(item["key"], item["firstTime"]) for item in self.st.connects[1:]], [("sk-new", False)])
+        self.assertEqual(self.st.reasoning_parsed, 1)  # once
 
     def test_without_a_tavern_model_sillytavern_uses_the_chat_model_or_its_own(self) -> None:
         tavern = self.config.tavern

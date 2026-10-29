@@ -10,7 +10,8 @@ are all SillyTavern's own. One page plays one chat at a time, so calls take turn
 The first call sets SillyTavern up (``_setup``):
 - its chat-completion connection is the tavern's model (``tavern.llm_*``, else an
   OpenAI-compatible ``llm``), sent again only when that changes, so a preset or sampler
-  changed in SillyTavern's own page stays;
+  changed in SillyTavern's own page stays; once, its reasoning "Auto-Parse" is turned on,
+  so a model's <think> block stays out of the reply and the history;
 - the bundled cards (``templates/tavern/*.json``) and the card files in
   ``<data_root>/tavern/scenarios/`` and ``adult/`` are imported, again when a file changes;
 - games saved before SillyTavern played them become SillyTavern chats.
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 PAGE_SCRIPT = (Path(__file__).with_name("sillytavern_page.js")).read_text(encoding="utf-8")
-_PAGE_VERSION = 1
+_PAGE_VERSION = 2
 _MISSING = "__openqqwaifu_missing__"
 BUNDLED_DIR = Path(__file__).resolve().parents[1] / "templates" / "tavern"
 _CARD_SUFFIXES = (".png", ".json")
@@ -319,7 +320,7 @@ class SillyTavernBridge:
     # ------------------------------------------------------------------
     async def _setup(self) -> bool:
         done = True
-        for step in (self._connect, self._sync_cards, self._move_saves):
+        for step in (self._connect, self._parse_reasoning, self._sync_cards, self._move_saves):
             try:
                 await step()
             except (BridgeError, asyncio.TimeoutError, OSError, ValueError, KeyError) as exc:
@@ -363,6 +364,16 @@ class SillyTavernBridge:
         state["defaults"] = True
         self._save_state(state)
         _LOGGER.info("sillytavern connected to the tavern model model=%s status=%s", model, result.get("online"))
+
+    async def _parse_reasoning(self) -> None:
+        state = self._state()
+        if state.get("reasoning_parsed"):
+            return
+        await self._run("parseReasoning", {}, _CALL_SECONDS)
+        state = self._state()
+        state["reasoning_parsed"] = True
+        self._save_state(state)
+        _LOGGER.info("sillytavern parses reasoning out of replies now")
 
     async def _sync_cards(self) -> None:
         """Bundled cards, then the card folders; each imported once, and again when its file changes."""
