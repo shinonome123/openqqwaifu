@@ -121,6 +121,20 @@ def _parse_segments(payload: dict[str, Any]) -> list[MessageSegment]:
                     image_sticker=str(data.get("sub_type", "")).strip() == "1",
                 )
             )
+        elif item_type == "file":
+            try:
+                size = int(data.get("file_size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            segments.append(
+                MessageSegment(
+                    kind="file",
+                    file_name=str(data.get("file") or data.get("name") or ""),
+                    file_id=str(data.get("file_id") or ""),
+                    file_url=str(data.get("url") or ""),
+                    file_size=size,
+                )
+            )
         elif item_type == "at":
             segments.append(
                 MessageSegment(

@@ -8,13 +8,14 @@ import time
 import unittest
 import zlib
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from waifu_standalone.app import build_default_service
 from waifu_standalone.config import AppConfig, TavernConfig
 from waifu_standalone.infra.llm_clients import LLMClientError, LLMToolResponse
+from waifu_standalone.infra.safe_fetch import FetchedPage
 from waifu_standalone.models import InboundEvent, MessageSegment
 from waifu_standalone.settings_admin.config_manager import _load_dataclass
 from waifu_standalone.tavern import dice as dice_module
@@ -690,6 +691,137 @@ class TavernTests(unittest.TestCase):
         self.service.handle_event(_group("启动酒馆", mention=True))
         self.assertFalse(any(text.startswith("酒馆开张啦") for text in self._texts()))
 
+
+    # ------------------------------------------------------------------
+    # Saves
+    # ------------------------------------------------------------------
+    def test_an_ended_game_is_picked_up_where_it_stopped(self) -> None:
+        self._start()
+        self._send(_group("我拔出短刀"))
+        self.service.handle_event(_group("退出酒馆模式"))
+        self.assertFalse(self._session_file().exists())
+
+        listing = self.service.handle_event(_group("继续酒馆", mention=True)).text
+        self.assertTrue(listing.startswith("能接着玩的存档：\n1. 《雾港酒馆》玩到第 1 轮，"), listing)
+        self.assertEqual(self.service.handle_event(_group("酒馆状态")).text, "酒馆在等「资本狗」选存档。")
+
+        # Like the menu, only the one who asked picks; anyone else is talking to the character.
+        self.service.handle_event(_group("选 1", sender=PLAYER))
+        self.assertTrue(self.service.tavern._sessions[("group", GROUP_ID)].menu)
+        self.service.handle_event(_group("选 3"))
+        self.assertEqual(self._texts()[-1], "没有第 3 个存档，回 1 到 1 的数字。")
+
+        self._send(_group("选 1"))
+        self.assertTrue(self._texts()[-2].startswith("读档成功：《雾港酒馆》，已经玩了 1 轮。房主：资本狗。"))
+        self.assertEqual(self._texts()[-1], "上回说到——\n第1段剧情。")
+        self.assertTrue(self._session_file().exists())
+
+        self._send(_group("我冲进雾里"))
+        request = self.gm.game_requests()[-1]
+        self.assertEqual(request[-3]["content"], "【资本狗】我拔出短刀")
+        self.assertEqual(request[-1]["content"], "【资本狗】我冲进雾里")
+
+        # Ended again, it is still one save, now two rounds in.
+        self.service.handle_event(_group("退出酒馆模式"))
+        self.assertEqual(len(list((self.root / "tavern" / "archive").glob("group_*.json"))), 1)
+        self.assertIn("玩到第 2 轮", self.service.handle_event(_group("读档", mention=True)).text)
+
+    def test_only_unfinished_games_of_this_chat_are_offered(self) -> None:
+        self.assertEqual(
+            self.service.handle_event(_group("继续酒馆", mention=True)).text,
+            "这里没有能接着玩的存档。说「启动酒馆」开一局新的吧。",
+        )
+        self._start()
+        self._send(_group("我拔出短刀"))
+        self.service.handle_event(_group("退出酒馆模式"))
+
+        # Not in another chat.
+        self.assertIn("没有能接着玩的存档", self.service.handle_event(_private("继续酒馆")).text)
+
+        # Not once the story reached its finale.
+        archive = next((self.root / "tavern" / "archive").glob("group_*.json"))
+        payload = json.loads(archive.read_text(encoding="utf-8"))
+        payload["turns"][-1]["content"] += "\n（全剧终）"
+        archive.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        self.assertIn("没有能接着玩的存档", self.service.handle_event(_group("继续酒馆", mention=True)).text)
+
+        # Not an adult game, outside the private chat that may play it.
+        payload["turns"][-1]["content"] = "第1段剧情。"
+        payload["adult"] = True
+        archive.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        self.assertIn("没有能接着玩的存档", self.service.handle_event(_group("继续酒馆", mention=True)).text)
+
+    # ------------------------------------------------------------------
+    # Cards sent as files
+    # ------------------------------------------------------------------
+    def _send_file(self, name: str, data: bytes, *, sender: str = HOST, url: str = "http://qq.example/file") -> str:
+        event = InboundEvent(
+            sender, "person", sender, NAMES[sender],
+            [MessageSegment(kind="file", file_name=name, file_id="fid", file_url=url, file_size=len(data))],
+        )
+        page = FetchedPage(url=url, status_code=200, text="", headers={}, content=data)
+        with patch("waifu_standalone.tavern.cards.afetch_public_url", AsyncMock(return_value=page)) as fetch:
+            reply = self.service.handle_event(event)
+        self.fetched = fetch
+        return reply.text if reply is not None else ""
+
+    def test_an_admin_sends_a_card_as_a_file_and_it_is_on_the_menu(self) -> None:
+        card = {"spec": "chara_card_v2", "data": {"name": "艾琳", "description": "温柔但毒舌的青梅竹马。", "first_mes": "怎么还没睡？"}}
+        self.assertEqual(self._send_file("艾琳.png", _png_card(card)), "只有管理员能往酒馆里放角色卡。")
+
+        self.config.tool_policy.authorized_user_ids = [HOST]
+        self.assertEqual(
+            self._send_file("main_card_v2.png", _png_card(card)),
+            "收到角色卡《艾琳》，放进了酒馆卡库。说「启动酒馆」就能在菜单里选到它。",
+        )
+        self.assertTrue((self.root / "tavern" / "scenarios" / "艾琳.png").is_file())
+        self.assertIn("艾琳（角色卡）", self.service.handle_event(_private("启动酒馆")).text)
+        self.service.handle_event(_private("退出酒馆模式"))
+
+        # Sent again, it replaces the copy; as JSON it is read the same way.
+        self.assertIn("更新了酒馆卡库", self._send_file("艾琳.json", json.dumps(card, ensure_ascii=False).encode("utf-8")))
+        self.assertEqual(sorted(path.name for path in (self.root / "tavern" / "scenarios").iterdir()), ["艾琳.json"])
+
+        # Tagged NSFW, it goes where only an allowed private chat sees it.
+        night = {"spec": "chara_card_v2", "data": {"name": "夜莺", "tags": ["NSFW"], "first_mes": "晚上好。"}}
+        self.assertIn("成人卡库", self._send_file("夜莺.png", _png_card(night)))
+        self.assertTrue((self.root / "tavern" / "adult" / "夜莺.png").is_file())
+        self.assertFalse((self.root / "tavern" / ".incoming").exists() and any((self.root / "tavern" / ".incoming").iterdir()))
+
+    def test_a_file_that_is_not_a_card_is_turned_down_and_others_are_not_ours(self) -> None:
+        self.config.tool_policy.authorized_user_ids = [HOST]
+        plain = _png_card({}).replace(b"tEXtchara", b"tEXtother")
+        self.assertIn("PNG 角色卡要用「文件」发", self._send_file("立绘.png", plain))
+        self.assertIn("不是酒馆能读的角色卡", self._send_file("notes.json", b'{"hello": 1}'))
+        self.assertFalse(any((self.root / "tavern" / "scenarios").glob("*")) if (self.root / "tavern" / "scenarios").exists() else False)
+
+        # Any other file is left alone: no answer from the tavern or the character.
+        before = len(self.outbound.sent)
+        self.assertEqual(self._send_file("报告.pdf", b"%PDF"), "")
+        self.assertEqual(len(self.outbound.sent), before)
+        self.fetched.assert_not_called()
+
+    def test_a_file_without_a_link_is_fetched_through_napcat(self) -> None:
+        self.config.tool_policy.authorized_user_ids = [HOST]
+        card = {"spec": "chara_card_v2", "data": {"name": "艾琳", "first_mes": "怎么还没睡？"}}
+        with patch.object(
+            type(self.outbound), "acall_action",
+            AsyncMock(return_value={"status": "ok", "retcode": 0, "data": {"url": "http://qq.example/real"}}),
+        ) as call:
+            self.assertIn("收到角色卡《艾琳》", self._send_file("艾琳.png", _png_card(card), url=""))
+        call.assert_awaited_once_with("get_private_file_url", {"file_id": "fid"})
+        self.assertEqual(self.fetched.await_args.args[0], "http://qq.example/real")
+
+    def test_napcat_file_segments_are_read(self) -> None:
+        from waifu_standalone.web.http_api import _parse_segments
+
+        (segment,) = _parse_segments({"message": [
+            {"type": "file", "data": {"file": "艾琳.png", "file_id": "abc", "file_size": "2048", "url": "http://x/y"}}
+        ]})
+        self.assertEqual(
+            (segment.kind, segment.file_name, segment.file_id, segment.file_size, segment.file_url),
+            ("file", "艾琳.png", "abc", 2048, "http://x/y"),
+        )
 
 if __name__ == "__main__":
     unittest.main()

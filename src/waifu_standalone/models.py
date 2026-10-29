@@ -5,7 +5,7 @@ from typing import Literal
 
 
 LauncherType = Literal["group", "person"]
-MessageKind = Literal["text", "image", "mention"]
+MessageKind = Literal["text", "image", "mention", "file"]
 
 
 @dataclass(slots=True)
@@ -18,6 +18,12 @@ class MessageSegment:
     image_sticker: bool = False
     mention_target: str = ""
     mention_display: str = ""
+    # A file someone sent (QQ's 文件, not a picture): its name, NapCat's id for it, and a
+    # download link when NapCat gave one.
+    file_name: str = ""
+    file_id: str = ""
+    file_url: str = ""
+    file_size: int = 0
 
 
 @dataclass(slots=True)
@@ -39,6 +45,10 @@ class InboundEvent:
     @property
     def image_count(self) -> int:
         return sum(1 for segment in self.segments if segment.kind == "image")
+
+    @property
+    def files(self) -> list[MessageSegment]:
+        return [segment for segment in self.segments if segment.kind == "file"]
 
     @property
     def mentioned_targets(self) -> list[str]:
