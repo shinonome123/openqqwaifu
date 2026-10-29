@@ -112,8 +112,10 @@ class SessionFiles:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=path.stem, suffix=".tmp")
         try:
+            # Half an emoji from a model must not leave a game that can no longer be saved.
+            text = json.dumps(session.to_dict(), ensure_ascii=False, indent=1)
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump(session.to_dict(), stream, ensure_ascii=False, indent=1)
+                stream.write(text.encode("utf-16", "surrogatepass").decode("utf-16", "replace"))
             os.replace(temp_name, path)
         except BaseException:
             Path(temp_name).unlink(missing_ok=True)
@@ -128,7 +130,8 @@ class SessionFiles:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(session.started_at))
         target = self.archive_dir / f"{path.stem}-{stamp}.json"
-        target.write_text(json.dumps(session.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
+        text = json.dumps(session.to_dict(), ensure_ascii=False, indent=1)
+        target.write_text(text.encode("utf-16", "surrogatepass").decode("utf-16", "replace"), encoding="utf-8")
         path.unlink(missing_ok=True)
         return target
 

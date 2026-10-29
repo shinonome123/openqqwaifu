@@ -88,6 +88,12 @@ class LlmClientsTests(unittest.TestCase):
         (call,) = client._parse_tool_response(calls).tool_calls
         self.assertEqual((call.call_id, call.tool_name, call.arguments), ("c1", "search-command", {"query": "雨"}))
 
+        # An emoji whose escape is split across two chunks comes back whole.
+        split = 'data: {"choices":[{"delta":{"content":"笑\\ud83d"}}]}\ndata: {"choices":[{"delta":{"content":"\\ude00了"}}]}\n'
+        text = client._parse_tool_response(split).text
+        self.assertEqual(text, "笑😀了")
+        text.encode("utf-8")
+
         plain = '{"choices":[{"message":{"role":"assistant","content":"好"}}]}'
         self.assertEqual(client._parse_tool_response(plain).text, "好")
 

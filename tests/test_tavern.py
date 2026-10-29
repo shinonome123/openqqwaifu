@@ -692,6 +692,15 @@ class TavernTests(unittest.TestCase):
         self.assertFalse(any(text.startswith("酒馆开张啦") for text in self._texts()))
 
 
+    def test_half_an_emoji_does_not_stop_a_game_from_being_saved(self) -> None:
+        self.gm.narrate = lambda messages: "雾里传来笑声\ud83d，你听见了吗？"
+        self._start()
+        self._send(_group("我循着笑声走过去"))
+        self._send(_group("我停下脚步"))
+        saved = json.loads(self._session_file().read_text(encoding="utf-8"))
+        self.assertEqual(saved["turns"][-1]["content"], "雾里传来笑声\ufffd，你听见了吗？")
+        self.assertEqual(saved["rounds"], 2)
+
     # ------------------------------------------------------------------
     # Saves
     # ------------------------------------------------------------------
