@@ -131,3 +131,35 @@ class SessionFiles:
         target.write_text(json.dumps(session.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
         path.unlink(missing_ok=True)
         return target
+
+    def saves(self, launcher_type: str, launcher_id: str) -> list[tuple[str, TavernSession]]:
+        """This chat's games under archive/ as (file name, game), the last played first.
+
+        A game picked up again is archived to the same name when it ends, so each game is one save.
+        """
+        stem = self.path(launcher_type, launcher_id).stem
+        found: list[tuple[str, TavernSession]] = []
+        if not self.archive_dir.is_dir():
+            return found
+        for path in self.archive_dir.glob(f"{stem}-*.json"):
+            session = self._read(path)
+            if session is not None and session.key == (launcher_type, str(launcher_id)) and session.turns:
+                found.append((path.name, session))
+        found.sort(key=lambda item: item[1].last_activity_at, reverse=True)
+        return found
+
+    def load_save(self, launcher_type: str, launcher_id: str, name: str) -> TavernSession | None:
+        """One of ``saves`` by its file name; ``None`` if it is gone or not this chat's."""
+        stem = self.path(launcher_type, launcher_id).stem
+        if "/" in name or "\\" in name or not name.startswith(f"{stem}-"):
+            return None
+        session = self._read(self.archive_dir / name)
+        return session if session is not None and session.key == (launcher_type, str(launcher_id)) else None
+
+    @staticmethod
+    def _read(path: Path) -> TavernSession | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return TavernSession.from_dict(payload) if isinstance(payload, dict) else None
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None

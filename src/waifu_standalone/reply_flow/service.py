@@ -36,17 +36,23 @@ class ReplyFlowService:
         latest_message = svc._latest_message_text(event, text)
         if not spontaneous:
             svc._record_inbound(event, text)
-        if not text and event.image_count == 0:
+        if not text and event.image_count == 0 and not event.files:
             return None
-        # A tavern game in this chat takes its players' messages and its own commands.
-        # It sits in front of every message, so a fault in it must not silence the character.
-        try:
-            handled, tavern_reply = (False, None) if spontaneous else await svc.tavern.ahandle(event, text)
-        except Exception:
-            _LOGGER.exception("tavern mode failed; the character answers instead")
-            handled, tavern_reply = False, None
+        # A tavern game or a bowl of 海龟汤 in this chat takes its players' messages and its own
+        # commands. They sit in front of every message, so a fault in them must not silence the character.
+        handled, game_reply = False, None
+        for name, game in (("tavern mode", svc.tavern), ("turtle soup", svc.soup)):
+            if spontaneous or handled:
+                break
+            try:
+                handled, game_reply = await game.ahandle(event, text)
+            except Exception:
+                _LOGGER.exception("%s failed; the character answers instead", name)
+                handled, game_reply = False, None
         if handled:
-            return tavern_reply
+            return game_reply
+        if not text and event.image_count == 0:
+            return None  # only a file, and not one the tavern takes
         # "/skill <name> ..." is a command even though "/" is an ignored prefix.
         explicit_skill = svc.dispatcher.resolve_explicit_skill_request(text)
         # "/skill 在我的电脑上写个笑话" names no skill: the model takes the request, with
@@ -254,6 +260,7 @@ class ReplyFlowService:
                 for hint in (
                     CHIME_IN_HINT if spontaneous else TALK_ON_HINT if talking_on else "",
                     svc.tavern.prompt_hint(event, latest_message),
+                    svc.soup.prompt_hint(event, latest_message),
                 )
                 if hint
             ),

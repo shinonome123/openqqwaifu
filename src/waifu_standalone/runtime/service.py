@@ -68,6 +68,7 @@ from ..systems.events import BehaviorEventEngine
 from ..systems.searching import SearchContext, SearchDecider
 from ..systems.value_game import ValueGameEngine
 from ..tavern import TavernMode
+from ..tavern.soup import TurtleSoup
 from ..web.console_panels import ConsolePanels
 from .container import (
     _build_embedding_client,
@@ -181,6 +182,7 @@ class WaifuService:
     character_service: CharacterService = field(init=False, repr=False)
     character_switcher: CharacterSwitcher = field(init=False, repr=False)
     tavern: TavernMode = field(init=False, repr=False)
+    soup: TurtleSoup = field(init=False, repr=False)
     listener: Listener = field(init=False, repr=False)
     member_service: MemberService = field(init=False, repr=False)
     memory_admin_service: MemoryAdminService = field(init=False, repr=False)
@@ -216,6 +218,7 @@ class WaifuService:
         self.character_service = CharacterService(self)
         self.character_switcher = CharacterSwitcher(self)
         self.tavern = TavernMode(self)
+        self.soup = TurtleSoup(self)
         self.listener = Listener(self)
         self.member_service = MemberService(self)
         self.memory_admin_service = MemoryAdminService(self)

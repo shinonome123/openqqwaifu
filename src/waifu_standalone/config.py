@@ -219,6 +219,15 @@ class TavernConfig:
 
 
 @dataclass(slots=True)
+class TurtleSoupConfig:
+    # 海龟汤：说「海龟汤」出一碗（汤面），大家问能用「是」「不是」回答的问题，猜出汤底就赢。
+    # 题目是自带的一批，再加 data_root 下 turtle_soup/ 里的 .json；用日常聊天那个模型当裁判。
+    enabled: bool = True
+    # 这么久没人问，就悄悄收掉这碗汤（群里不再把问句当成在猜汤）。
+    idle_timeout_seconds: float = 1200.0
+
+
+@dataclass(slots=True)
 class RateLimitConfig:
     # 付费和外部工具的令牌桶：每个用户一个、每个群一个，两个都有余量才放行。
     # image 管生图；network 管搜索、网页抓取、summarize（三者共用一个桶）。
@@ -352,6 +361,7 @@ class AppConfig:
     segmented_reply: SegmentedReplyConfig = field(default_factory=SegmentedReplyConfig)
     stickers: StickerConfig = field(default_factory=StickerConfig)
     tavern: TavernConfig = field(default_factory=TavernConfig)
+    turtle_soup: TurtleSoupConfig = field(default_factory=TurtleSoupConfig)
     listen: ListenConfig = field(default_factory=ListenConfig)
     # 群里回复时，如果那条消息之后又有人说过话，就引用它（QQ 里显示为「回复 xx」），
     # 看得出在回谁；紧接着回的不引用，跟真人一样。

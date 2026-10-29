@@ -13,6 +13,11 @@ passes the result on; "酒馆状态" says who plays. Only the host,
 A story with endings is paced by its acts and planned length; when the game master writes
 its finale ("（全剧终）"), the game ends by itself.
 
+A game that ended before its finale (ended by the host, or idle) stays under archive/:
+"继续酒馆" / "读档" lists the chat's unfinished ones like a menu, and the pick plays on
+from where it stopped, hosted by whoever picked it. A card sent to the bot as a file in a
+private chat by an admin goes into the card folders (``cards.py``).
+
 While a game runs in a chat the character does not answer there; ``/skill`` and the
 image prefix still reach it. The story is kept in its own files (``session.py``), not in
 the character's history or memories.
@@ -40,6 +45,7 @@ from ..infra.llm_clients import OpenAILLMClient
 from ..models import InboundEvent, OutboundMessage
 from ..reply_flow.prompt_assembler import Generator
 from ..reply_flow.stickers import strip_sticker_tags
+from .cards import CardIntake
 from .dice import DiceError, parse_roll
 from .scenarios import LoreEntry, Scenario, ScenarioLibrary, card_picture
 from .session import PendingAction, SessionFiles, TavernSession
@@ -62,6 +68,10 @@ _MARKUP = re.compile(r"<(?P<tag>[^<>/\s]{1,8})>(?P<body>[^<>]*)</(?P=tag)>")
 _CARD_MARKUP = re.compile(r"<(?P<tag>场景|状态|选项)>[ \t]*(?P<body>[^<\n]*?)[ \t]*(?:</[^<>\n]{1,12}>|(?=<)|(?=\n)|$)")
 _OPTIONS = re.compile(r"<选项>([^<\n]*)")
 _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+# Pick up a game that ended before its finale: "继续酒馆", "读档", "酒馆存档".
+_RESUME = re.compile(r"^(?:继续|读取|载入|恢复)(?:酒馆|存档|上一?局)(?:存档)?$|^读档$|^酒馆(?:存档|读档)$")
+_SAVE_PREFIX = "save:"
+_SAVES_MAX = 9
 _END = re.compile(r"^(?:退出|关闭|结束)酒馆(?:模式)?$|^打烊$")
 _JOIN = re.compile(r"^我?也?要?(?:加入|参加)(?:酒馆|游戏|冒险|队伍)?$|^(?:带我一个|加我一个|算我一个|我也玩|我也要玩)$")
 _LEAVE = re.compile(r"^我?要?(?:离开|退出)(?:游戏|冒险|队伍)?$|^我不玩了$")
@@ -152,6 +162,8 @@ class TavernMode:
         self.library = ScenarioLibrary(
             root / "scenarios", Path(__file__).resolve().parents[1] / "templates" / "tavern", adult_dir=root / "adult"
         )
+        # Character cards someone sends the bot as a file in a private chat.
+        self._cards = CardIntake(service, root / "scenarios", root / "adult")
         self._sessions: dict[tuple[str, str], TavernSession] = {}
         # Chats whose session file was looked at since the start; others are read on first use.
         self._checked: set[tuple[str, str]] = set()
@@ -180,9 +192,17 @@ class TavernMode:
         prefixes = [*svc.config.explicit_skill_prefixes, svc.config.image_command_prefix]
         if stripped and any(prefix and stripped.startswith(prefix) for prefix in prefixes):
             return False, None
+        if event.files and event.launcher_type == "person":
+            taken = await self._cards.take(event)
+            if taken is not None:
+                return True, await self._reply(event, taken)
         compact = _IGNORED_CHARS.sub("", stripped)
         session = self._session(event)
         if session is None:
+            if svc.soup.running(event.launcher_type, event.launcher_id):
+                return False, None  # a bowl of 海龟汤 is out; it takes this chat's games for now
+            if self._addressed(event) and _RESUME.match(compact):
+                return True, await self._open_saves(event)
             if self._addressed(event) and _wants_start(compact):
                 return True, await self._open_menu(event)
             return False, None
@@ -290,10 +310,17 @@ class TavernMode:
             if not self._can_end(session, sender):
                 return True, await self._reply(event, f"只有房主「{session.host_name}」能关酒馆。")
             return True, await self._end(session, reason="cancelled", notice="酒馆先关了，想玩再叫我。", event=event)
-        if self._addressed(event) and _wants_start(compact):
-            return True, await self._reply(event, f"酒馆在等「{session.host_name}」选本。")
+        if _STATUS.match(compact) or (self._addressed(event) and _wants_start(compact)):
+            return True, await self._reply(event, self._status(session))
         if sender != session.host_id:
             return False, None
+        if session.menu and session.menu[0].startswith(_SAVE_PREFIX):
+            game = self._pick_save(session, compact)
+            if game is None:
+                return False, None
+            if isinstance(game, str):
+                return True, await self._reply(event, game)
+            return True, await self._resume(event, session, game)
         choice = self._pick(session, compact)
         if choice is None:
             return False, None  # the host said something else; the character answers as usual
@@ -347,18 +374,7 @@ class TavernMode:
         self.files.save(session)
         self._watch(session, restart=True)  # the idle limit replaces the menu's
         _LOGGER.info("tavern started chat=%s:%s scenario=%s host=%s", *session.key, scenario.scenario_id, session.host_id)
-        how = "直接说话就是行动" + ("，回数字就是选那个选项" if _OPTIONS.search(opening) else "")
-        if event.launcher_type == "group":
-            rules = (
-                f"《{scenario.title}》开始！房主：{session.host_name}。想一起玩的说「加入」；{how}，"
-                "括号（…）里是场外话；掷骰用 .r d20；房主说「退出酒馆模式」结束。"
-            )
-        else:
-            rules = f"《{scenario.title}》开始！{how}，括号（…）里是场外话；掷骰用 .r d20；说「退出酒馆模式」结束。"
-        if session.adult and scenario.minors:
-            _LOGGER.info("tavern scenario %s has someone under 18; no adult content", scenario.scenario_id)
-            rules += "（卡里有人未满 18 岁，这一局不写成人内容。）"
-        message = await self._reply(event, rules)
+        message = await self._reply(event, self._how_to_play(session, scenario, f"《{scenario.title}》开始！", opening))
         # A PNG card's picture comes next, as SillyTavern shows the character beside the chat.
         picture = await asyncio.to_thread(card_picture, Path(scenario.source)) if scenario.card is not None else ""
         if picture:
@@ -370,6 +386,104 @@ class TavernMode:
             await self._send(session.launcher_type, session.launcher_id, self._render(scenario, opening))
         else:
             self._queue(session, PendingAction("", _START_NOTE))
+        return message
+
+    def _how_to_play(self, session: TavernSession, scenario: Scenario, head: str, last: str) -> str:
+        """The line that opens play: who hosts, how to act, join and end; ``last`` is the game master's latest."""
+        how = "直接说话就是行动" + ("，回数字就是选那个选项" if _OPTIONS.search(last) else "")
+        if session.launcher_type == "group":
+            rules = (
+                f"{head}房主：{session.host_name}。想一起玩的说「加入」；{how}，"
+                "括号（…）里是场外话；掷骰用 .r d20；房主说「退出酒馆模式」结束。"
+            )
+        else:
+            rules = f"{head}{how}，括号（…）里是场外话；掷骰用 .r d20；说「退出酒馆模式」结束。"
+        if session.adult and scenario.minors:
+            _LOGGER.info("tavern scenario %s has someone under 18; no adult content", scenario.scenario_id)
+            rules += "（卡里有人未满 18 岁，这一局不写成人内容。）"
+        return rules
+
+    # ------------------------------------------------------------------
+    # Saves: a game that ended before its finale, picked up where it stopped
+    # ------------------------------------------------------------------
+    async def _open_saves(self, event: InboundEvent) -> OutboundMessage:
+        """"继续酒馆": this chat's unfinished games, newest first; the asker picks one, like a menu."""
+        settings = self._service.config.tavern
+        allowed = {str(uid).strip() for uid in settings.starter_user_ids if str(uid).strip()}
+        if allowed and str(event.sender_id).strip() not in allowed:
+            return await self._reply(event, "酒馆只有指定的人能开。")
+        adult = self._adult_allowed(event)
+        saves = await asyncio.to_thread(self._playable_saves, event.launcher_type, event.launcher_id, adult=adult)
+        if not saves:
+            return await self._reply(event, "这里没有能接着玩的存档。说「启动酒馆」开一局新的吧。")
+        shown = saves[:_SAVES_MAX]
+        session = TavernSession(
+            launcher_type=event.launcher_type,
+            launcher_id=event.launcher_id,
+            host_id=str(event.sender_id),
+            host_name=self._name(event),
+            menu=[_SAVE_PREFIX + name for name, _ in shown],
+            adult=adult,
+        )
+        self._sessions[session.key] = session
+        self._checked.add(session.key)
+        self.files.save(session)
+        self._watch(session)
+        _LOGGER.info("tavern saves chat=%s:%s host=%s saves=%s", *session.key, session.host_id, len(saves))
+        lines = ["能接着玩的存档："]
+        for index, (_, game) in enumerate(shown, start=1):
+            when = time.strftime("%m月%d日 %H:%M", time.localtime(game.last_activity_at))
+            lines.append(f"{index}. 《{game.scenario_title}》玩到第 {game.rounds} 轮，{when}停下的")
+        lines.append("回数字就从停下的地方接着玩，比如「选 1」；不读了就说「退出酒馆模式」。")
+        return await self._reply(event, "\n".join(lines))
+
+    def _playable_saves(self, launcher_type: str, launcher_id: str, *, adult: bool) -> list[tuple[str, TavernSession]]:
+        """Saves that can go on here: not at their finale, their scenario still there, adult ones only where allowed."""
+        playable = []
+        for name, game in self.files.saves(launcher_type, launcher_id):
+            if game.state != "playing" or (game.adult and not adult):
+                continue
+            if game.turns[-1]["role"] == "assistant" and _FINALE.search(game.turns[-1]["content"]):
+                continue
+            if self.library.get(game.scenario_id) is None:
+                continue
+            playable.append((name, game))
+        return playable
+
+    def _pick_save(self, session: TavernSession, compact: str) -> TavernSession | str | None:
+        """The save the host picked, a reason the pick failed, or ``None`` for other talk."""
+        match = _PICK_NUMBER.match(_PICK_VERB.sub("", compact))
+        if match is None:
+            return None
+        number = _number(match.group("number"))
+        if not 1 <= number <= len(session.menu):
+            return f"没有第 {number} 个存档，回 1 到 {len(session.menu)} 的数字。"
+        game = self.files.load_save(*session.key, session.menu[number - 1][len(_SAVE_PREFIX):])
+        return game if game is not None else "这个存档不见了，换一个吧。"
+
+    async def _resume(self, event: InboundEvent, menu: TavernSession, game: TavernSession) -> OutboundMessage:
+        """Play ``game`` on from where it stopped, hosted by whoever picked it."""
+        scenario = self.library.get(game.scenario_id)
+        if scenario is None:
+            return await self._reply(event, "这个存档的剧本文件不见了，没法接着玩。")
+        game.state = "playing"
+        game.menu = []
+        game.pending = []
+        game.hinted = []
+        game.adult = game.adult and menu.adult
+        game.host_id, game.host_name = menu.host_id, menu.host_name
+        game.players = {menu.host_id: menu.host_name, **{k: v for k, v in game.players.items() if k != menu.host_id}}
+        game.touch()
+        self._sessions[game.key] = game
+        self._stalled.discard(game.key)
+        self.files.save(game)
+        self._watch(game, restart=True)
+        _LOGGER.info("tavern resumed a save chat=%s:%s scenario=%s rounds=%s", *game.key, game.scenario_id, game.rounds)
+        last = next((turn["content"] for turn in reversed(game.turns) if turn["role"] == "assistant"), "")
+        head = f"读档成功：《{game.scenario_title}》，已经玩了 {game.rounds} 轮。"
+        message = await self._reply(event, self._how_to_play(game, scenario, head, last))
+        if last:
+            await self._send(*game.key, "上回说到——\n" + self._render(scenario, last))
         return message
 
     # ------------------------------------------------------------------
@@ -461,7 +575,8 @@ class TavernMode:
 
     def _status(self, session: TavernSession) -> str:
         if session.state == "menu":
-            return f"酒馆在等「{session.host_name}」选本。"
+            what = "选存档" if session.menu and session.menu[0].startswith(_SAVE_PREFIX) else "选本"
+            return f"酒馆在等「{session.host_name}」{what}。"
         names = "、".join(session.players.values())
         text = f"正在玩《{session.scenario_title}》，已经玩了 {session.rounds} 轮。房主：{session.host_name}；玩家：{names}。"
         if session.launcher_type == "group":
