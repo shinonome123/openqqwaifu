@@ -189,11 +189,19 @@ class ListenConfig:
 
 @dataclass(slots=True)
 class TavernConfig:
-    # 酒馆模式：@机器人说「启动酒馆」列出剧本，说的人当房主，「选 N」开本，机器人改当主持人带大家玩。
-    # 剧本在 data_root 下 tavern/scenarios/（自己写的 YAML，或 SillyTavern 角色卡 .json/.png），另有几个自带的。
-    # 角色卡按 SillyTavern 原版的方式玩：用卡自己的提示词、开场白和世界书，回复原样保留，只在发到 QQ 时转成纯文本。
+    # 酒馆模式：@机器人说「启动酒馆」列出角色卡，说的人当房主，「选 N」开局，机器人收集玩家的行动交给 SillyTavern 玩。
+    # 卡由 SillyTavern 本身来玩（提示词顺序、世界书、正则、预设、调模型都是它的），回复只在发到 QQ 时转成纯文本。
+    # 菜单是 SillyTavern 里的角色：自带的几张跑团卡、data_root 下 tavern/scenarios/ 和 adult/ 里的卡文件（启动时导入），
+    # 以及在 SillyTavern 网页里自己加的卡。
     enabled: bool = True
-    # 有人行动后最多等这么久，把这段时间所有玩家的行动合在一起，主持人一次写完。
+    # SillyTavern 的网页地址（无头浏览器打开它），和无头浏览器的 DevTools 地址；两项都填了酒馆才能开。
+    # compose 部署里是 http://sillytavern:8000/ 和 http://browser:9222。
+    sillytavern_url: str = ""
+    browser_url: str = ""
+    # 第一次接上 SillyTavern 时给它设的上下文长度和单条回复长度（它自带的是 4k 和 300，角色卡不够用）；之后在它网页里改的为准。
+    context_tokens: int = 32000
+    reply_tokens: int = 2000
+    # 有人行动后最多等这么久，把这段时间所有玩家的行动合在一起，一次交给 SillyTavern。
     batch_seconds: float = 10.0
     # 每个玩家都说过话、之后又安静了这么久，就不再等满 batch_seconds（只有一个玩家时总是这样）。
     settle_seconds: float = 2.0
@@ -201,16 +209,15 @@ class TavernConfig:
     idle_timeout_seconds: float = 1800.0
     menu_timeout_seconds: float = 300.0
     max_players: int = 6
-    # 发给主持人的剧情最多多少字，超出的旧剧情压成前情提要。角色卡一轮常有上千字，所以给得宽。
-    history_chars: int = 24000
     # 能开酒馆的 QQ 号；空表示谁都可以。
     starter_user_ids: list[str] = field(default_factory=list)
     # 除了房主，还能强制结束的 QQ 号；tool_policy.authorized_user_ids 里的人也能。
     admin_user_ids: list[str] = field(default_factory=list)
-    # 成人模式：这些 QQ 号在私聊里开局时，菜单里多出 data_root 下 tavern/adult/ 的卡，亲密情节按卡的设定写、
-    # 不一笔带过（角色都是成年人、双方自愿、说停就停）。群里永远不开。空表示谁都不行。
+    # 成人模式：这些 QQ 号在私聊里开局时，菜单里多出成人卡（tavern/adult/ 里的，和标了 NSFW 或写得露骨的卡），
+    # 亲密情节按卡的设定写、不一笔带过（角色都是成年人、双方自愿、说停就停）。群里永远不开。空表示谁都不行。
     adult_user_ids: list[str] = field(default_factory=list)
-    # 酒馆单独用的模型（OpenAI 兼容接口）：三项都填了就用它主持和扮演角色卡，否则沿用 llm 那个。
+    # 酒馆用的模型（OpenAI 兼容接口）：三项都填了就把它设成 SillyTavern 的连接，否则用 llm 那个（Dify 不行）；
+    # 改了才会重新写进 SillyTavern。timeout 是等 SillyTavern 写完一轮的时间。
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""

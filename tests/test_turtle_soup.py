@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -192,7 +193,11 @@ class TurtleSoupTests(unittest.TestCase):
         self.assertEqual(self._say(_group("启动酒馆", mention=True)), "这碗海龟汤还没喝完，说「揭晓」看了汤底再开酒馆。")
         self._say(_group("揭晓"))
 
-        self.assertIn("酒馆开张啦", self._say(_group("启动酒馆", mention=True)))
+        # SillyTavern, which the tavern plays its cards in, lists one.
+        self.config.tavern.sillytavern_url, self.config.tavern.browser_url = "http://sillytavern:8000/", "http://browser:9222"
+        listed = [{"avatar": "雾港酒馆.png", "name": "雾港酒馆", "first_mes": "夜里十一点。"}]
+        with patch.object(self.service.tavern.bridge, "characters", AsyncMock(return_value=listed)):
+            self.assertIn("酒馆开张啦", self._say(_group("启动酒馆", mention=True)))
         self.assertEqual(self._say(_group("来碗海龟汤", mention=True)), "酒馆还开着呢，这一局结束了再来喝海龟汤。")
 
     def test_the_bundled_riddles_are_complete(self) -> None:
