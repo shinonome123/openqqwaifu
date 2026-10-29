@@ -504,6 +504,10 @@ def _apply_env_overrides(config: AppConfig, config_path: Path | None = None) -> 
     )
     # Dry run captures replies instead of sending them (see _build_runtime_outbound).
     qq_sidecar.dry_run = _env_bool("OPENQQWAIFU_QQ_SIDECAR_DRY_RUN", qq_sidecar.dry_run)
+    # Where the tavern finds SillyTavern and the browser that keeps its page open (compose sets both).
+    tavern = config.tavern
+    tavern.sillytavern_url = _env_str("OPENQQWAIFU_TAVERN_SILLYTAVERN_URL", tavern.sillytavern_url)
+    tavern.browser_url = _env_str("OPENQQWAIFU_TAVERN_BROWSER_URL", tavern.browser_url)
     return config
 
 

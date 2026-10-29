@@ -1,32 +1,31 @@
-"""Tavern mode: the bot runs a tabletop-style story game in a chat.
+"""Tavern mode: the bot runs a tabletop-style story game in a chat, played by SillyTavern.
 
-"启动酒馆" (in a group, @ the bot) lists the scenarios and makes whoever asked the host,
-who picks one with "选 2". The bot then acts as game master. Everything a player says is
-an action. Actions are gathered for up to ``tavern.batch_seconds`` (less once every
-player has spoken), so one narration answers everyone instead of one reply per line.
+"启动酒馆" (in a group, @ the bot) lists SillyTavern's cards and makes whoever asked the
+host, who picks one with "选 2". From then on everything a player says is an action.
+Actions are gathered for up to ``tavern.batch_seconds`` (less once every player has
+spoken) and go to SillyTavern as one user message, so one reply answers everyone.
 "加入" joins and "离开" leaves; a line in brackets "（…）" or starting with "//" is
-table talk the game master does not see; ".r 2d6" rolls dice here in the program and
-passes the result on; "酒馆状态" says who plays. Only the host,
-``tavern.admin_user_ids`` and ``tool_policy.authorized_user_ids`` end a game
-("退出酒馆模式"); a game also ends after ``tavern.idle_timeout_seconds`` without a word.
+table talk the card does not see; ".r 2d6" rolls dice here in the program and passes the
+result on; "酒馆状态" says who plays. Only the host, ``tavern.admin_user_ids`` and
+``tool_policy.authorized_user_ids`` end a game ("退出酒馆模式"); a game also ends after
+``tavern.idle_timeout_seconds`` without a word.
 
-A story with endings is paced by its acts and planned length; when the game master writes
-its finale ("（全剧终）"), the game ends by itself.
+SillyTavern plays the card (``sillytavern.py``): each game is a chat of that character in
+SillyTavern, and the prompt, its lorebook, regex scripts, preset and the model call are
+SillyTavern's own. The tavern adds one system note at the end of the chat: who plays,
+when there are several, the content rule, and for a bundled story how far along it is.
+A bundled story ends by itself when its finale line ("（全剧终）") comes.
 
 A game that ended before its finale (ended by the host, or idle) stays under archive/:
 "继续酒馆" / "读档" lists the chat's unfinished ones like a menu, and the pick plays on
-from where it stopped, hosted by whoever picked it. A card sent to the bot as a file in a
-private chat by an admin goes into the card folders (``cards.py``).
+in its SillyTavern chat, hosted by whoever picked it. A card sent to the bot as a file in
+a private chat by an admin goes into SillyTavern (``cards.py``).
 
 While a game runs in a chat the character does not answer there; ``/skill`` and the
-image prefix still reach it. The story is kept in its own files (``session.py``), not in
-the character's history or memories.
+image prefix still reach it. The story is not in the character's history or memories.
 
-A SillyTavern card is played the way SillyTavern plays it: its greeting is the first
-message, the prompt is built from its own words in SillyTavern's order
-(``_card_messages``), and its replies are kept as the model wrote them. Only what is sent
-is rendered (``render_card``): QQ shows no HTML, Markdown, status bar or buttons, so those
-become plain lines, and "2" sends the second button's words.
+Only what is sent is rendered (``render_card``): QQ shows no HTML, Markdown, status bar or
+buttons, so those become plain lines, and "2" sends the second button's words.
 """
 
 from __future__ import annotations
@@ -38,17 +37,14 @@ import logging
 import random
 import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..infra.llm_clients import OpenAILLMClient
 from ..models import InboundEvent, OutboundMessage
-from ..reply_flow.prompt_assembler import Generator
-from ..reply_flow.stickers import strip_sticker_tags
 from .cards import CardIntake
 from .dice import DiceError, parse_roll
-from .scenarios import LoreEntry, Scenario, ScenarioLibrary, card_picture
+from .scenarios import EXPLICIT, Scenario, card_picture, scenario_from_character
 from .session import PendingAction, SessionFiles, TavernSession
+from .sillytavern import BridgeError, SillyTavernBridge, chat_name
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -61,10 +57,9 @@ _START = re.compile(r"^(?:启动|开启|开始|打开|进入|开)酒馆(?:模式
 _START_INTENT = re.compile(r"(?:启动|开启|开始|打开|进入|开|玩|来)(?:一下|一个|一局|个|下|局)?(?:酒馆|跑团)")
 _START_REFUSED = re.compile(r"(?:不|别|没|甭)(?:要|想|用|能|会)?(?:启动|开启|打开|进入|开|玩|来)(?:一下|一个|个|下)?(?:酒馆|跑团)")
 _MENTIONS_TAVERN = re.compile(r"酒馆|跑团")
-# Tags SillyTavern cards ask for, which their web page draws as a status bar and buttons.
-_MARKUP = re.compile(r"<(?P<tag>[^<>/\s]{1,8})>(?P<body>[^<>]*)</(?P=tag)>")
-# The same three in a card's reply, where a model may leave the closing tag out or get it
-# wrong ("<状态>33|…</status>"), or start the next tag on the same line.
+# The tags SillyTavern cards ask for, which their web page draws as a scene card, a status
+# bar and buttons. A model may leave the closing tag out or get it wrong ("<状态>33|…</status>"),
+# or start the next tag on the same line.
 _CARD_MARKUP = re.compile(r"<(?P<tag>场景|状态|选项)>[ \t]*(?P<body>[^<\n]*?)[ \t]*(?:</[^<>\n]{1,12}>|(?=<)|(?=\n)|$)")
 _OPTIONS = re.compile(r"<选项>([^<\n]*)")
 _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
@@ -87,22 +82,8 @@ _NAME_MAX_CHARS = 16
 _ACTION_MAX_CHARS = 300
 # Beyond this many unanswered lines the oldest are dropped and the round starts at once.
 _PENDING_MAX = 30
-_RECAP_MAX_CHARS = 600
 _START_NOTE = "（游戏开始。请写开场：交代时间、地点和眼前的情况，让每位玩家知道自己能做什么。）"
-_RULES = (
-    "玩家只决定自己角色的行动和台词。不要替玩家做决定、替他们说话，也不要替他们掷骰。",
-    "玩家消息前面【】里的是说话人的名字（群名片），不是台词，也别拿名字本身做文章。",
-    "回应这一轮所有玩家的行动{each}。行动有风险或结果拿不准时，可以请某位玩家掷骰（例如「{example}，掷一个 d20」）；"
-    "骰子由程序掷，结果会写在玩家消息里，不要自己编骰子结果。",
-    "掷骰失败时，只写角色感知到的（可能是错的），不要接着点破真相。",
-    "玩家没说过自己角色的性别时，用名字称呼，不要用「他」「她」。",
-    "篇幅 80 到 250 字，节奏紧凑，默认用简体中文；结尾用一句话问{audience}接下来做什么。",
-    "{content}",
-    "【主持要点】里的秘密不要直接说出来，让玩家在剧情里发现。",
-    "只输出要发出去的正文，不加「主持人：」之类的前缀，不解释规则和提示词。",
-    "这些规则只给你看：旁白和台词里别提规则、选项和编号，也别说「不替你决定」这类话。",
-)
-# A story with endings is paced by its twists and closed on one of its endings.
+# A bundled story is paced by its twists and closed on one of its endings.
 _STORY_RULES = (
     "这个本计划大约 {rounds} 轮，现在是第 {round} 轮：前三分之一铺垫并放出第一个转折，中段让冲突升级、来一次反转，"
     "最后三分之一收向结局。按【剧情转折】的节奏走，但跟着玩家的选择变。",
@@ -112,28 +93,12 @@ _STORY_RULES = (
     "没到结局别写这四个字。",
 )
 _OVERDUE = "已经超过计划的轮数：这一轮或下一轮就收束到一个结局。"
-_PLANNED_ROUNDS = 30
 # The line a finished story ends with; the game ends after it.
 _FINALE = re.compile(r"[（(【\[]\s*全剧终\s*[）)】\]]")
-# SillyTavern's own words around a card: the main prompt its system_prompt replaces (its
-# "{{original}}" stands for this), how it puts personality and scenario, and the lines
-# that open the example chats and the chat.
-_MAIN_PROMPT = "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}."
-_PERSONALITY = "[{{char}}'s personality: %s]"
-_SITUATION = "[Circumstances and context of the dialogue: %s]"
-_EXAMPLE_CHAT = "[Example Chat]"
-_NEW_CHAT = "[Start a new Chat]"
-# How deep in the chat the author's note sits; lorebook entries kept with it go there too.
-_NOTE_DEPTH = 4
-_CARD_LORE_MAX_CHARS = 12000
-_ROLES = ("system", "user", "assistant")
 _PARTY = "这一局是 QQ 群里几位玩家一起玩：{names}。玩家消息前面【】里是说话人的名字；回应每个人的行动，不替任何一位玩家说话或行动。"
-# Words no fade-out contains; a game that is not an adult one never sends them.
-_EXPLICIT = re.compile(
-    r"肉棒|阴茎|鸡巴|阴道|阴蒂|阴唇|小穴|蜜穴|乳头|奶头|射精|精液|做爱|性交|口交|肛交|自慰|潮吹|内射|淫水|爱液"
-)
 _TOO_EXPLICIT = "（刚才那段写得太露骨了。这一局不写露骨内容：把这一段重写成一笔带过或转场的版本，只输出重写后的正文。）"
-# An HTML tag (<div style=…>, </details>, <br/>); our <场景> tags are not ASCII and stay.
+_SKIPPED = "（这一段跳过。）"
+# An HTML tag (<div style=…>, </details>, <br/>); the <场景> tags are not ASCII and stay.
 _HTML_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
 _HTML_BLOCK = re.compile(r"<(?:br|hr)\s*/?>|</?(?:div|p|h[1-6]|li|ul|ol|details|summary|center|table|tr)(?:\s[^<>]*)?>", re.IGNORECASE)
 _THINKING = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
@@ -152,29 +117,29 @@ _WRAPPERS = re.compile(r"</?(?:content|response|output|reply|plot)>", re.IGNOREC
 _RULE_LINE = re.compile(r"^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$", re.MULTILINE)
 _QUOTE_OR_HEADING = re.compile(r"^[ \t]*(?:>[ \t]?|#{1,6}[ \t]+)", re.MULTILINE)
 _FOLD_HINT = re.compile(r"[（(]\s*点击(?:展开|查看)\s*[)）]")
+# SillyTavern ships a sample character or two; they are not on the menu.
+_STOCK_AVATAR = "default_"
+_UNREACHABLE = (BridgeError, asyncio.TimeoutError, OSError)
 
 
 class TavernMode:
     def __init__(self, service: "WaifuService") -> None:
         self._service = service
-        root = Path(service.config.data_root) / "tavern"
-        self.files = SessionFiles(root)
-        self.library = ScenarioLibrary(
-            root / "scenarios", Path(__file__).resolve().parents[1] / "templates" / "tavern", adult_dir=root / "adult"
-        )
+        self.bridge = SillyTavernBridge(service)
+        self.files = SessionFiles(self.bridge.root)
         # Character cards someone sends the bot as a file in a private chat.
-        self._cards = CardIntake(service, root / "scenarios", root / "adult")
+        self._cards = CardIntake(service, self.bridge)
         self._sessions: dict[tuple[str, str], TavernSession] = {}
         # Chats whose session file was looked at since the start; others are read on first use.
         self._checked: set[tuple[str, str]] = set()
+        # The card each running game plays, as it was when the game (or this run) started.
+        self._playing: dict[tuple[str, str], Scenario] = {}
         self._runners: dict[tuple[str, str], asyncio.Task[None]] = {}
         # The runners as futures that callers outside their event loop can wait on.
         self._runner_futures: dict[tuple[str, str], concurrent.futures.Future[None]] = {}
         self._watchdogs: dict[tuple[str, str], asyncio.Task[None]] = {}
-        # Chats already told that the game master is stuck, so a failing model is not announced twice.
+        # Chats already told that the game is stuck, so a failing SillyTavern is not announced twice.
         self._stalled: set[tuple[str, str]] = set()
-        # The tavern's own model (tavern.llm_*), built when first needed: (settings, client).
-        self._model: tuple[tuple[object, ...], OpenAILLMClient] | None = None
 
     # ------------------------------------------------------------------
     # Entry point
@@ -234,36 +199,40 @@ class TavernMode:
                     task.get_loop().call_soon_threadsafe(task.cancel)
                 except RuntimeError:
                     pass  # the loop is already closed
-        if self._model is not None:
-            self._model[1].close()
+        loop = getattr(self.bridge, "_loop", None)
+        if loop is not None and not loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(self.bridge.aclose(), loop)
+            except RuntimeError:
+                pass
 
-    async def _complete(
-        self, messages: list[dict[str, object]], *, user: str, sampling: dict[str, float] | None = None
-    ) -> str:
-        """One completion from the tavern's own model if ``tavern.llm_*`` is set, else the chat model.
+    # ------------------------------------------------------------------
+    # The cards
+    # ------------------------------------------------------------------
+    async def _scenarios(self, *, adult: bool) -> list[Scenario]:
+        """SillyTavern's cards for a menu: the bundled stories, then the others by name; adult ones
+        last and only with ``adult``."""
+        listed = [
+            (character, self.bridge.card(str(character.get("avatar", ""))))
+            for character in await self.bridge.characters()
+            if not str(character.get("avatar", "")).startswith(_STOCK_AVATAR)
+        ]
+        scenarios = [(scenario_from_character(character, known), known) for character, known in listed]
+        scenarios = [(item, known) for item, known in scenarios if item.scenario_id and (adult or not item.adult)]
+        scenarios.sort(key=lambda pair: (pair[0].adult, not pair[0].bundled, str(pair[1].get("key") or ""), pair[0].title))
+        return [item for item, _known in scenarios]
 
-        ``sampling`` (a card's preset) only reaches the tavern's own model.
-        """
-        settings = self._service.config.tavern
-        if not (settings.llm_base_url and settings.llm_api_key and settings.llm_model):
-            return await self._service.generator.acomplete_chat(messages, user=user)
-        key = (settings.llm_base_url, settings.llm_api_key, settings.llm_model,
-               float(settings.llm_timeout_seconds), settings.llm_reasoning_effort)
-        if self._model is None or self._model[0] != key:
-            if self._model is not None:
-                self._model[1].close()
-            client = OpenAILLMClient(
-                base_url=settings.llm_base_url,
-                api_key=settings.llm_api_key,
-                model=settings.llm_model,
-                timeout_seconds=float(settings.llm_timeout_seconds) or 120.0,
-                reasoning_effort=settings.llm_reasoning_effort,
+    async def _scenario(self, session: TavernSession) -> Scenario | None:
+        """The card a running game plays; ``None`` when it is gone from SillyTavern or not for this game."""
+        scenario = self._playing.get(session.key)
+        if scenario is None:
+            scenario = next(
+                (item for item in await self._scenarios(adult=True) if item.scenario_id == session.scenario_id), None
             )
-            self._model = (key, client)
-        extra = {"sampling": sampling} if sampling else {}
-        response = await self._model[1].ainvoke_with_tools(messages, tools=[], user=user, **extra)
-        # Reasoning models may put their thoughts in the text; only the answer is wanted.
-        return Generator._clean_response(_THINKING.sub("", response.text))
+            if scenario is None:
+                return None
+            self._playing[session.key] = scenario
+        return None if scenario.adult and not session.adult else scenario
 
     # ------------------------------------------------------------------
     # The menu
@@ -273,10 +242,16 @@ class TavernMode:
         allowed = {str(uid).strip() for uid in settings.starter_user_ids if str(uid).strip()}
         if allowed and str(event.sender_id).strip() not in allowed:
             return await self._reply(event, "酒馆只有指定的人能开。")
+        if not self.bridge.configured:
+            return await self._reply(event, "酒馆还没接上 SillyTavern，等管理员配好再来吧。")
         adult = self._adult_allowed(event)
-        scenarios = await asyncio.to_thread(self.library.scenarios, adult=adult)
+        try:
+            scenarios = await self._scenarios(adult=adult)
+        except _UNREACHABLE as exc:
+            _LOGGER.warning("tavern menu: sillytavern unreachable: %s", exc)
+            return await self._reply(event, "酒馆这会儿连不上 SillyTavern，过一会儿再试试。")
         if not scenarios:
-            return await self._reply(event, "酒馆里还没有剧本，把剧本放进 tavern/scenarios 文件夹再来吧。")
+            return await self._reply(event, "酒馆里还没有角色卡。把卡（.png 或 .json）当文件私聊发给我，或者在 SillyTavern 里加一张再来吧。")
         shown = scenarios[:_MENU_MAX]
         session = TavernSession(
             launcher_type=event.launcher_type,
@@ -290,10 +265,10 @@ class TavernMode:
         self._checked.add(session.key)
         self.files.save(session)
         self._watch(session)
-        _LOGGER.info("tavern menu chat=%s:%s host=%s scenarios=%s", *session.key, session.host_id, len(scenarios))
+        _LOGGER.info("tavern menu chat=%s:%s host=%s cards=%s", *session.key, session.host_id, len(scenarios))
         lines = ["酒馆开张啦！今天能玩这些本："]
         for index, scenario in enumerate(shown, start=1):
-            kind = ("（成人）" if scenario.adult else "") + ("（角色卡）" if scenario.kind == "character" else "")
+            kind = "（成人）" if scenario.adult else ""
             intro = f"：{scenario.intro}" if scenario.intro else ""
             lines.append(f"{index}. {scenario.title}{kind}{intro}")
         if len(scenarios) > len(shown):
@@ -321,43 +296,50 @@ class TavernMode:
             if isinstance(game, str):
                 return True, await self._reply(event, game)
             return True, await self._resume(event, session, game)
-        choice = self._pick(session, compact)
+        try:
+            choice = await self._pick(session, compact)
+        except _UNREACHABLE as exc:
+            _LOGGER.warning("tavern pick: sillytavern unreachable: %s", exc)
+            return True, await self._reply(event, "酒馆这会儿连不上 SillyTavern，过一会儿再选一次试试。")
         if choice is None:
             return False, None  # the host said something else; the character answers as usual
         if isinstance(choice, str):
             return True, await self._reply(event, choice)
         return True, await self._start_game(event, session, choice)
 
-    def _pick(self, session: TavernSession, compact: str) -> Scenario | str | None:
-        """The scenario the host picked, a reason the pick failed, or ``None`` for other talk."""
+    async def _pick(self, session: TavernSession, compact: str) -> Scenario | str | None:
+        """The card the host picked, a reason the pick failed, or ``None`` for other talk."""
         wanted = _PICK_VERB.sub("", compact)
+        match = _PICK_NUMBER.match(wanted)
         if compact in _RANDOM_PICK or wanted in _RANDOM_PICK:
             scenario_id = random.choice(session.menu)
+        elif match is not None:
+            number = _number(match.group("number"))
+            if not 1 <= number <= len(session.menu):
+                return f"没有第 {number} 个本，回 1 到 {len(session.menu)} 的数字。"
+            scenario_id = session.menu[number - 1]
+        elif wanted:
+            scenario_id = ""
         else:
-            match = _PICK_NUMBER.match(wanted)
-            if match is not None:
-                number = _number(match.group("number"))
-                if not 1 <= number <= len(session.menu):
-                    return f"没有第 {number} 个本，回 1 到 {len(session.menu)} 的数字。"
-                scenario_id = session.menu[number - 1]
-            else:
-                titles = {
-                    item.scenario_id: item.title
-                    for item in self.library.scenarios(adult=session.adult)
-                    if item.scenario_id in session.menu
-                }
-                scenario_id = next((key for key, title in titles.items() if wanted and wanted == title), "")
-                if not scenario_id and len(wanted) >= 2:
-                    # "便利店" and "我想玩雾港酒馆" both name a scenario.
-                    scenario_id = next(
-                        (key for key, title in titles.items() if wanted in title or (len(title) >= 2 and title in wanted)), ""
-                    )
-                if not scenario_id:
-                    return None
-        scenario = self.library.get(scenario_id)
-        if scenario is not None and scenario.adult and not session.adult:
-            return "这个本这里不能开。"
-        return scenario if scenario is not None else "这个本的文件不见了，换一个吧。"
+            return None
+        try:
+            cards = {item.scenario_id: item for item in await self._scenarios(adult=session.adult)}
+        except _UNREACHABLE:
+            if not scenario_id:
+                return None  # other talk, as far as anyone can tell now
+            raise
+        if not scenario_id:
+            titles = {key: item.title for key, item in cards.items() if key in session.menu}
+            scenario_id = next((key for key, title in titles.items() if wanted == title), "")
+            if not scenario_id and len(wanted) >= 2:
+                # "便利店" and "我想玩雾港酒馆" both name a card.
+                scenario_id = next(
+                    (key for key, title in titles.items() if wanted in title or (len(title) >= 2 and title in wanted)), ""
+                )
+            if not scenario_id:
+                return None
+        scenario = cards.get(scenario_id)
+        return scenario if scenario is not None else "这张卡在 SillyTavern 里不见了，换一个吧。"
 
     async def _start_game(self, event: InboundEvent, session: TavernSession, scenario: Scenario) -> OutboundMessage:
         session.state = "playing"
@@ -367,19 +349,32 @@ class TavernMode:
         session.menu = []
         session.started_at = time.time()
         session.touch()
-        # The opening is the game master's first message; a card's greeting, as SillyTavern shows it.
-        opening = scenario.render(scenario.opening, user=session.host_name).strip()
-        if opening:
-            session.turns = [{"role": "assistant", "content": opening}]
+        try:
+            opened = await self.bridge.start(
+                scenario.scenario_id,
+                user=self._user_name(session),
+                chat=chat_name(session.launcher_type, session.launcher_id, session.started_at),
+                greeting=scenario.greeting,
+            )
+        except _UNREACHABLE as exc:
+            _LOGGER.warning("tavern start failed chat=%s:%s card=%s: %s", *session.key, scenario.scenario_id, exc)
+            return await self._end(session, reason="failed", notice="SillyTavern 没能开这一局，过一会儿再试试。", event=event)
+        session.chat = str(opened.get("chat", ""))
+        opening = str(opened.get("greeting", "")).strip()
+        session.last_reply = opening
+        self._playing[session.key] = scenario
         self.files.save(session)
         self._watch(session, restart=True)  # the idle limit replaces the menu's
-        _LOGGER.info("tavern started chat=%s:%s scenario=%s host=%s", *session.key, scenario.scenario_id, session.host_id)
+        _LOGGER.info(
+            "tavern started chat=%s:%s card=%s st_chat=%s host=%s", *session.key, scenario.scenario_id, session.chat, session.host_id
+        )
         message = await self._reply(event, self._how_to_play(session, scenario, f"《{scenario.title}》开始！", opening))
-        # A PNG card's picture comes next, as SillyTavern shows the character beside the chat.
-        picture = await asyncio.to_thread(card_picture, Path(scenario.source)) if scenario.card is not None else ""
-        if picture:
+        # The card's picture comes next, as SillyTavern shows the character beside the chat.
+        if scenario.picture:
             try:
-                await self._send(session.launcher_type, session.launcher_id, "", images=[picture])
+                picture = card_picture(await self.bridge.picture(scenario.scenario_id))
+                if picture:
+                    await self._send(session.launcher_type, session.launcher_id, "", images=[picture])
             except Exception as exc:  # the game goes on without it
                 _LOGGER.warning("tavern picture not sent chat=%s:%s: %s", *session.key, exc)
         if opening:
@@ -389,7 +384,7 @@ class TavernMode:
         return message
 
     def _how_to_play(self, session: TavernSession, scenario: Scenario, head: str, last: str) -> str:
-        """The line that opens play: who hosts, how to act, join and end; ``last`` is the game master's latest."""
+        """The line that opens play: who hosts, how to act, join and end; ``last`` is the card's latest reply."""
         how = "直接说话就是行动" + ("，回数字就是选那个选项" if _OPTIONS.search(last) else "")
         if session.launcher_type == "group":
             rules = (
@@ -399,7 +394,7 @@ class TavernMode:
         else:
             rules = f"{head}{how}，括号（…）里是场外话；掷骰用 .r d20；说「退出酒馆模式」结束。"
         if session.adult and scenario.minors:
-            _LOGGER.info("tavern scenario %s has someone under 18; no adult content", scenario.scenario_id)
+            _LOGGER.info("tavern card %s has someone under 18; no adult content", scenario.scenario_id)
             rules += "（卡里有人未满 18 岁，这一局不写成人内容。）"
         return rules
 
@@ -412,8 +407,15 @@ class TavernMode:
         allowed = {str(uid).strip() for uid in settings.starter_user_ids if str(uid).strip()}
         if allowed and str(event.sender_id).strip() not in allowed:
             return await self._reply(event, "酒馆只有指定的人能开。")
+        if not self.bridge.configured:
+            return await self._reply(event, "酒馆还没接上 SillyTavern，等管理员配好再来吧。")
         adult = self._adult_allowed(event)
-        saves = await asyncio.to_thread(self._playable_saves, event.launcher_type, event.launcher_id, adult=adult)
+        try:
+            await self.bridge.ensure()  # games saved before SillyTavern played them are moved over first
+            saves = await self._playable_saves(event.launcher_type, event.launcher_id, adult=adult)
+        except _UNREACHABLE as exc:
+            _LOGGER.warning("tavern saves: sillytavern unreachable: %s", exc)
+            return await self._reply(event, "酒馆这会儿连不上 SillyTavern，过一会儿再试试。")
         if not saves:
             return await self._reply(event, "这里没有能接着玩的存档。说「启动酒馆」开一局新的吧。")
         shown = saves[:_SAVES_MAX]
@@ -437,17 +439,26 @@ class TavernMode:
         lines.append("回数字就从停下的地方接着玩，比如「选 1」；不读了就说「退出酒馆模式」。")
         return await self._reply(event, "\n".join(lines))
 
-    def _playable_saves(self, launcher_type: str, launcher_id: str, *, adult: bool) -> list[tuple[str, TavernSession]]:
-        """Saves that can go on here: not at their finale, their scenario still there, adult ones only where allowed."""
+    async def _playable_saves(self, launcher_type: str, launcher_id: str, *, adult: bool) -> list[tuple[str, TavernSession]]:
+        """Saves that can go on here: not at their finale, their card and chat still in SillyTavern,
+        adult ones only where allowed."""
+        games = [
+            (name, game)
+            for name, game in await asyncio.to_thread(self.files.saves, launcher_type, launcher_id)
+            if game.state == "playing" and not (game.adult and not adult) and not _FINALE.search(game.last_reply)
+        ]
+        if not games:
+            return []
+        cards = {item.scenario_id for item in await self._scenarios(adult=adult)}
+        chats: dict[str, set[str]] = {}
         playable = []
-        for name, game in self.files.saves(launcher_type, launcher_id):
-            if game.state != "playing" or (game.adult and not adult):
+        for name, game in games:
+            if game.scenario_id not in cards:
                 continue
-            if game.turns[-1]["role"] == "assistant" and _FINALE.search(game.turns[-1]["content"]):
-                continue
-            if self.library.get(game.scenario_id) is None:
-                continue
-            playable.append((name, game))
+            if game.scenario_id not in chats:
+                chats[game.scenario_id] = set(await self.bridge.chats(game.scenario_id))
+            if game.chat in chats[game.scenario_id]:
+                playable.append((name, game))
         return playable
 
     def _pick_save(self, session: TavernSession, compact: str) -> TavernSession | str | None:
@@ -462,28 +473,33 @@ class TavernMode:
         return game if game is not None else "这个存档不见了，换一个吧。"
 
     async def _resume(self, event: InboundEvent, menu: TavernSession, game: TavernSession) -> OutboundMessage:
-        """Play ``game`` on from where it stopped, hosted by whoever picked it."""
-        scenario = self.library.get(game.scenario_id)
+        """Play ``game`` on in its SillyTavern chat, hosted by whoever picked it."""
+        game.adult = game.adult and menu.adult
+        try:
+            scenario = await self._scenario(game)
+            last = await self.bridge.resume(game.scenario_id, game.chat) if scenario is not None else ""
+        except _UNREACHABLE as exc:
+            _LOGGER.warning("tavern resume failed chat=%s:%s: %s", *game.key, exc)
+            return await self._reply(event, "酒馆这会儿连不上 SillyTavern，过一会儿再读一次试试。")
         if scenario is None:
-            return await self._reply(event, "这个存档的剧本文件不见了，没法接着玩。")
+            return await self._reply(event, "这个存档的角色卡在 SillyTavern 里不见了，没法接着玩。")
         game.state = "playing"
         game.menu = []
         game.pending = []
         game.hinted = []
-        game.adult = game.adult and menu.adult
         game.host_id, game.host_name = menu.host_id, menu.host_name
         game.players = {menu.host_id: menu.host_name, **{k: v for k, v in game.players.items() if k != menu.host_id}}
+        game.last_reply = last or game.last_reply
         game.touch()
         self._sessions[game.key] = game
         self._stalled.discard(game.key)
         self.files.save(game)
         self._watch(game, restart=True)
-        _LOGGER.info("tavern resumed a save chat=%s:%s scenario=%s rounds=%s", *game.key, game.scenario_id, game.rounds)
-        last = next((turn["content"] for turn in reversed(game.turns) if turn["role"] == "assistant"), "")
+        _LOGGER.info("tavern resumed a save chat=%s:%s card=%s rounds=%s", *game.key, game.scenario_id, game.rounds)
         head = f"读档成功：《{game.scenario_title}》，已经玩了 {game.rounds} 轮。"
-        message = await self._reply(event, self._how_to_play(game, scenario, head, last))
-        if last:
-            await self._send(*game.key, "上回说到——\n" + self._render(scenario, last))
+        message = await self._reply(event, self._how_to_play(game, scenario, head, game.last_reply))
+        if game.last_reply:
+            await self._send(*game.key, "上回说到——\n" + self._render(scenario, game.last_reply))
         return message
 
     # ------------------------------------------------------------------
@@ -553,9 +569,7 @@ class TavernMode:
     @staticmethod
     def _option(session: TavernSession, compact: str) -> str:
         """"2" or "选②" for the second <选项> of the last reply: the words its button would send."""
-        if not session.turns or session.turns[-1]["role"] != "assistant":
-            return ""
-        offered = _OPTIONS.findall(session.turns[-1]["content"])
+        offered = _OPTIONS.findall(session.last_reply)
         if not offered:
             return ""
         options = [part.strip() for part in re.split(r"[|｜]", offered[-1]) if part.strip()]
@@ -587,7 +601,7 @@ class TavernMode:
         return text
 
     # ------------------------------------------------------------------
-    # Rounds: gather the players' actions, then one narration answers them all
+    # Rounds: gather the players' actions, then one reply answers them all
     # ------------------------------------------------------------------
     def _schedule(self, session: TavernSession) -> None:
         key = session.key
@@ -637,41 +651,41 @@ class TavernMode:
             await asyncio.sleep(max(0.05, min(0.5, due - now)))
 
     async def _narrate(self, session: TavernSession, batch: list[PendingAction]) -> bool:
-        """One game-master turn for ``batch``; ``False`` stops the rounds until someone speaks again."""
-        scenario = await asyncio.to_thread(self.library.get, session.scenario_id)
-        if scenario is None or (scenario.adult and not session.adult):
-            await self._end(session, reason="missing", notice=f"《{session.scenario_title}》的剧本文件不见了，这一局只能先停在这里。")
-            return False
-        round_text = "\n".join(self._line(session, scenario, action) for action in batch)
+        """One SillyTavern turn for ``batch``; ``False`` stops the rounds until someone speaks again."""
         started = time.monotonic()
         try:
-            if scenario.card is not None:
-                messages = self._card_messages(session, scenario, round_text)
-            else:
-                messages = self._messages(session, scenario, round_text)
-            reply = await self._write(session, scenario, messages)
-            if not self._adult_content(session, scenario) and _EXPLICIT.search(reply):
-                # The prompt asks for a fade-out, but a model made for taverns may not keep to it.
+            scenario = await self._scenario(session)
+            if scenario is None:
+                await self._end(
+                    session, reason="missing", notice=f"《{session.scenario_title}》的角色卡在 SillyTavern 里不见了，这一局只能先停在这里。"
+                )
+                return False
+            round_text = _quote_macros("\n".join(self._line(session, action) for action in batch))
+            user, note = self._user_name(session), self._note(session, scenario)
+            reply = (await self.bridge.turn(session.scenario_id, session.chat, user=user, text=round_text, note=note)).strip()
+            if not self._adult_content(session, scenario) and EXPLICIT.search(reply):
+                # The note asks for a fade-out, but a model made for taverns may not keep to it.
                 _LOGGER.warning("tavern round too explicit for this game, rewriting chat=%s:%s", *session.key)
-                retry = [*messages, {"role": "assistant", "content": reply}, {"role": "user", "content": _TOO_EXPLICIT}]
-                reply = await self._write(session, scenario, retry)
-                if _EXPLICIT.search(reply):
-                    reply = "（这一段跳过。）"
+                rewritten = await self.bridge.rewrite(
+                    session.scenario_id, session.chat, user=user, note=note, instruction=_TOO_EXPLICIT
+                )
+                rewritten = _THINKING.sub("", rewritten).strip()
+                reply = rewritten if rewritten and not EXPLICIT.search(rewritten) else _SKIPPED
+                await self.bridge.replace_last(session.scenario_id, session.chat, reply)
             if not reply:
-                raise ValueError("the game master wrote nothing")
-        except Exception as exc:  # the actions stay pending and go with the next round
+                raise BridgeError("SillyTavern wrote nothing")
+        except _UNREACHABLE as exc:  # the actions stay pending and go with the next round
             _LOGGER.warning("tavern round failed chat=%s:%s: %s", *session.key, exc)
             if session.key not in self._stalled and self._sessions.get(session.key) is session:
                 self._stalled.add(session.key)
                 await self._send(*session.key, "（主持人卡了一下。刚才的行动都记着，谁再说一句就接着来。）")
             return False
         if self._sessions.get(session.key) is not session:
-            return False  # the game ended while the model was writing
+            return False  # the game ended while SillyTavern was writing
         self._stalled.discard(session.key)
         answered = {id(action) for action in batch}
         session.pending = [action for action in session.pending if id(action) not in answered]
-        session.turns.append({"role": "user", "content": round_text})
-        session.turns.append({"role": "assistant", "content": reply})
+        session.last_reply = reply
         session.rounds += 1
         session.touch()
         self.files.save(session)
@@ -680,29 +694,22 @@ class TavernMode:
             *session.key, session.rounds, len(batch), len(reply), time.monotonic() - started,
         )
         await self._send(*session.key, self._render(scenario, reply))
-        if scenario.endings and _FINALE.search(reply):
+        if scenario.rounds and _FINALE.search(reply):
             await self._end(session, reason="finished", notice=self._ending(session, finished=True))
             return False
-        await self._fold_story(session, scenario)
         return True
 
-    async def _write(self, session: TavernSession, scenario: Scenario, messages: list[dict[str, object]]) -> str:
-        card = scenario.card
-        reply = await self._complete(messages, user=self._user_key(session), sampling=card.sampling if card else None)
-        # A card's reply is kept as the model wrote it, as SillyTavern keeps it; it is rendered when sent.
-        return reply.strip() if card is not None else _clean_narration(reply)
-
     @staticmethod
-    def _line(session: TavernSession, scenario: Scenario, action: PendingAction) -> str:
-        """An action as the model reads it; a card played alone gets it without the name, as typed."""
+    def _line(session: TavernSession, action: PendingAction) -> str:
+        """An action as SillyTavern gets it; played alone, without the name, as typed."""
         name = session.players.get(action.actor_id)
-        if scenario.card is not None and len(session.players) == 1 and name and action.text.startswith(f"【{name}】"):
+        if len(session.players) == 1 and name and action.text.startswith(f"【{name}】"):
             return action.text[len(name) + 2:]
         return action.text
 
     @staticmethod
     def _render(scenario: Scenario, text: str) -> str:
-        return render_card(text, stat=scenario.card.stat) if scenario.card is not None else render_markup(text)
+        return _SPEAKER_PREFIX.sub("", render_card(_THINKING.sub("", text), stat=scenario.stat), count=1).strip()
 
     @staticmethod
     def _adult_content(session: TavernSession, scenario: Scenario) -> bool:
@@ -714,186 +721,16 @@ class TavernMode:
             return _ADULT_CONTENT
         return _MINORS_CONTENT if scenario.minors else _SAFE_CONTENT
 
-    def _messages(self, session: TavernSession, scenario: Scenario, round_text: str) -> list[dict[str, object]]:
-        recent = "\n".join([session.turns[-1]["content"] if session.turns else "", round_text])
-        messages: list[dict[str, object]] = [{"role": "system", "content": self._system_prompt(session, scenario, recent)}]
-        turns = self._turns_within_budget(session)
-        if turns and turns[0]["role"] == "assistant":
-            # Chat turns start with the user's; the opening answers the start of the game.
-            messages.append({"role": "user", "content": "（开场）"})
-        messages.extend(turns)
-        messages.append({"role": "user", "content": round_text})
-        return messages
-
-    def _system_prompt(self, session: TavernSession, scenario: Scenario, recent: str) -> str:
-        place = "群里" if session.launcher_type == "group" else "私聊里"
-        acting = scenario.kind == "character"
-        if acting:
-            role = (
-                f"你在 QQ {place}扮演{scenario.character or scenario.title}，带大家玩《{scenario.title}》："
-                "你演这个角色，也描述世界、扮演其他 NPC、推进剧情。"
-            )
-        else:
-            role = f"你在 QQ {place}当跑团主持人，正在主持《{scenario.title}》：你描述世界、扮演所有 NPC、推进剧情。"
-        host = session.host_name
-        sections: list[tuple[str, str]] = []
-        if scenario.setting:
-            sections.append(("人物设定" if acting else "剧本设定", scenario.render(scenario.setting, user=host)))
-        if scenario.notes:
-            sections.append(("角色要点" if acting else "主持要点", scenario.render(scenario.notes, user=host)))
-        if scenario.twists:
-            sections.append(("剧情转折", scenario.render(scenario.twists, user=host)))
-        if scenario.endings:
-            sections.append(("可能的结局", scenario.render(scenario.endings, user=host)))
-        lore = scenario.lore_for(recent)
-        if lore:
-            sections.append(("世界书", "\n".join(f"- {scenario.render(item, user=host)}" for item in lore)))
-        if session.summary:
-            sections.append(("前情提要", session.summary))
-        players = [f"{name}（房主）" if uid == session.host_id else name for uid, name in session.players.items()]
-        sections.append(("玩家", "、".join(players)))
-        if scenario.examples:
-            sections.append(("说话风格示例", scenario.render(scenario.examples, user=host)))
-        group_game = session.launcher_type == "group" and len(session.players) > 1
-        rules = [
-            rule.format(
-                each="，点到每个人的名字" if group_game else "",
-                example=next(iter(session.players.values()), host),
-                audience="大家" if group_game else "玩家",
-                content=self._content_rule(session, scenario),
-            )
-            for rule in _RULES
-        ]
-        if scenario.endings:
-            planned, now = scenario.rounds or _PLANNED_ROUNDS, session.rounds + 1
+    def _note(self, session: TavernSession, scenario: Scenario) -> str:
+        """The system note at the end of SillyTavern's prompt: who plays, the content rule, the story's pace."""
+        rules = [_PARTY.format(names="、".join(session.players.values()))] if len(session.players) > 1 else []
+        rules.append(self._content_rule(session, scenario))
+        if scenario.rounds:
+            planned, now = scenario.rounds, session.rounds + 1
             rules.extend(rule.format(rounds=planned, round=now) for rule in _STORY_RULES)
             if now > planned:
                 rules.append(_OVERDUE)
-        sections.append(("规则", "\n".join(f"- {rule}" for rule in rules)))
-        return "\n\n".join([role, *(f"[{title}]\n{body}" for title, body in sections)])
-
-    def _card_messages(self, session: TavernSession, scenario: Scenario, round_text: str) -> list[dict[str, object]]:
-        """The prompt SillyTavern sends a chat-completion API for a card, from the card's own words.
-
-        The main prompt (the card's system_prompt), its preset's prompts, lorebook entries before
-        the character, its description, personality and scenario, entries after it, the example
-        chats; then the chat from the greeting on, with entries placed at a depth (or with the
-        author's note) inside it; then the card's post-history instructions. Ours is only the
-        last system message: who plays, when there are several, and the content rule.
-        """
-        card = scenario.card
-        assert card is not None
-        user = "、".join(session.players.values()) or session.host_name
-
-        def fill(text: str) -> str:
-            return scenario.render(text, user=user).strip()
-
-        recent = "\n".join([session.turns[-1]["content"] if session.turns else "", round_text]).lower()
-        lore = self._card_lore(scenario, recent)
-
-        def placed(*positions: int) -> list[str]:
-            return [fill(entry.content) for entry in lore if entry.position in positions]
-
-        main = card.system_prompt.replace("{{original}}", _MAIN_PROMPT) if card.system_prompt else _MAIN_PROMPT
-        head = [
-            fill(main),
-            *(fill(prompt) for prompt in card.prompts),
-            *placed(0),
-            fill(card.description),
-            fill(_PERSONALITY % card.personality) if card.personality else "",
-            fill(_SITUATION % card.scenario) if card.scenario else "",
-            *placed(1),
-            f"[前情提要]\n{session.summary}" if session.summary else "",
-        ]
-        messages: list[dict[str, object]] = [{"role": "system", "content": "\n\n".join(part for part in head if part)}]
-        examples = [*placed(5), *(f"{_EXAMPLE_CHAT}\n{fill(chat)}" for chat in card.examples), *placed(6)]
-        if examples:
-            messages.append({"role": "system", "content": "\n\n".join(examples)})
-        messages.append({"role": "system", "content": _NEW_CHAT})
-        chat: list[dict[str, object]] = [*self._turns_within_budget(session), {"role": "user", "content": round_text}]
-        inserts: dict[tuple[int, int], list[str]] = {}
-        for entry in lore:
-            if entry.position in {2, 3, 4}:
-                depth, role = (entry.depth, entry.role) if entry.position == 4 else (_NOTE_DEPTH, 0)
-                inserts.setdefault((depth, role), []).append(fill(entry.content))
-        # The deepest first: an entry put in deeper does not move where a shallower one goes.
-        for (depth, role), texts in sorted(inserts.items(), key=lambda item: -item[0][0]):
-            chat.insert(max(0, len(chat) - depth), {"role": _ROLES[role], "content": "\n".join(texts)})
-        messages.extend(chat)
-        if card.post_history_instructions:
-            messages.append({"role": "system", "content": fill(card.post_history_instructions.replace("{{original}}", ""))})
-        rules = [_PARTY.format(names="、".join(session.players.values()))] if len(session.players) > 1 else []
-        rules.append(self._content_rule(session, scenario))
-        messages.append({"role": "system", "content": "\n".join(rules)})
-        return messages
-
-    @staticmethod
-    def _card_lore(scenario: Scenario, lowered_recent: str) -> list[LoreEntry]:
-        """The lorebook entries the recent chat calls up, in their order, within a budget."""
-        picked: list[LoreEntry] = []
-        used = 0
-        for entry in sorted((item for item in scenario.lore if item.matches(lowered_recent)), key=lambda item: item.order):
-            if used + len(entry.content) > _CARD_LORE_MAX_CHARS:
-                continue
-            picked.append(entry)
-            used += len(entry.content)
-        return picked
-
-    def _turns_within_budget(self, session: TavernSession) -> list[dict[str, str]]:
-        """The opening plus as many recent turns as fit ``tavern.history_chars``."""
-        turns = session.turns
-        if not turns:
-            return []
-        head = turns[:1] if turns[0]["role"] == "assistant" else []
-        budget = max(1000, int(self._service.config.tavern.history_chars))
-        used = sum(len(turn["content"]) for turn in head)
-        kept: list[dict[str, str]] = []
-        for turn in reversed(turns[len(head):]):
-            used += len(turn["content"])
-            if used > budget and kept:
-                break
-            kept.append(turn)
-        kept.reverse()
-        # Turns keep alternating: the kept part starts with a players' round.
-        while kept and kept[0]["role"] != "user":
-            kept.pop(0)
-        return [*head, *kept]
-
-    async def _fold_story(self, session: TavernSession, scenario: Scenario) -> None:
-        """Fold the oldest rounds into the recap once the story outgrows its budget."""
-        budget = max(1000, int(self._service.config.tavern.history_chars))
-        turns = session.turns
-        if sum(len(turn["content"]) for turn in turns) <= budget:
-            return
-        head = 1 if turns[0]["role"] == "assistant" else 0
-        cut, kept_chars = len(turns), 0
-        while cut > head and kept_chars + len(turns[cut - 1]["content"]) <= budget // 2:
-            cut -= 1
-            kept_chars += len(turns[cut]["content"])
-        while cut < len(turns) and turns[cut]["role"] != "user":
-            cut += 1
-        folded = turns[head:cut]
-        if not folded:
-            return
-        story = "\n".join(("玩家：" if turn["role"] == "user" else "主持人：") + turn["content"] for turn in folded)
-        earlier = f"之前的前情提要：\n{session.summary}\n\n" if session.summary else ""
-        prompt = (
-            f"下面是跑团《{scenario.title}》的一段剧情。\n{earlier}新的剧情：\n{story}\n\n"
-            "把它们合成一段新的前情提要，300 字以内，按时间顺序写，保留人物、关系、线索、物品、伤势和还没解决的事。只输出提要本身。"
-        )
-        try:
-            recap = await self._complete(
-                [{"role": "system", "content": "你在帮跑团主持人整理笔记。"}, {"role": "user", "content": prompt}],
-                user=self._user_key(session),
-            )
-        except Exception as exc:  # the story is then only cut to its budget when it is sent
-            _LOGGER.warning("tavern recap failed chat=%s:%s: %s", *session.key, exc)
-            return
-        if not recap.strip() or self._sessions.get(session.key) is not session:
-            return
-        session.summary = _clip(recap, _RECAP_MAX_CHARS)
-        del session.turns[head:cut]
-        self.files.save(session)
+        return "\n".join(rules)
 
     # ------------------------------------------------------------------
     # Ending
@@ -938,6 +775,7 @@ class TavernMode:
         key = session.key
         if self._sessions.get(key) is session:
             del self._sessions[key]
+        self._playing.pop(key, None)
         current = asyncio.current_task()
         for tasks in (self._runners, self._watchdogs):
             task = tasks.pop(key, None)
@@ -975,6 +813,9 @@ class TavernMode:
             # It went stale while the bot was down; announcing it now would come out of nowhere.
             self.files.archive(session)
             _LOGGER.info("tavern closed a stale game chat=%s:%s rounds=%s", *key, session.rounds)
+            return None
+        if session.state == "playing" and not session.chat:
+            self.files.archive(session)  # from before SillyTavern played the games, and not moved over
             return None
         self._sessions[key] = session
         self._watch(session)
@@ -1023,8 +864,9 @@ class TavernMode:
         return _clip(name, _NAME_MAX_CHARS)
 
     @staticmethod
-    def _user_key(session: TavernSession) -> str:
-        return f"tavern:{session.launcher_type}:{session.launcher_id}"
+    def _user_name(session: TavernSession) -> str:
+        """SillyTavern's {{user}}: the players."""
+        return "、".join(session.players.values()) or session.host_name
 
     async def _reply(self, event: InboundEvent, text: str) -> OutboundMessage:
         return await self._send(event.launcher_type, event.launcher_id, text, event=event)
@@ -1057,27 +899,9 @@ def _wants_start(compact: str) -> bool:
     return bool(_START_INTENT.search(compact)) and not _START_REFUSED.search(compact)
 
 
-def render_markup(text: str) -> str:
-    """A scenario's <场景>, <状态> and <选项> lines as plain text for QQ.
-
-    In a story the tags stay in what the model sees, so it goes on writing them (and the
-    numbers in <状态> carry over); only what is sent is rewritten.
-    """
-
-    def one(match: re.Match[str]) -> str:
-        tag = match.group("tag")
-        parts = [part.strip() for part in match.group("body").split("|") if part.strip()]
-        if not parts:
-            return ""
-        if tag == "场景":
-            return "【" + " · ".join(parts) + "】"
-        if tag == "状态":
-            return "（" + "｜".join(parts) + "）"
-        if tag == "选项":
-            return "可以选：" + "　".join(f"{_CIRCLED[index]} {part}" for index, part in enumerate(parts[:10]))
-        return " · ".join(parts)
-
-    return re.sub(r"\n{3,}", "\n\n", _MARKUP.sub(one, str(text or ""))).strip()
+def _quote_macros(text: str) -> str:
+    """Players' words reach SillyTavern as words: "{{…}}" would be one of its macros."""
+    return str(text or "").replace("{{", "{​{").replace("}}", "}​}")
 
 
 def render_card(text: str, *, stat: str = "") -> str:
@@ -1120,16 +944,11 @@ def _status_bar(parts: list[str], stat: str) -> str:
 def _plain(text: str) -> str:
     """Text without HTML (cards decorate with it) or Markdown asterisks, as QQ shows plain text."""
     text = _HTML_BLOCK.sub("\n", str(text or ""))  # a block ends a line
-    text = html.unescape(_HTML_TAG.sub("", text)).replace("\u00a0", " ")
+    text = html.unescape(_HTML_TAG.sub("", text)).replace(" ", " ")
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"\*([^*\n]+)\*", r"\1", text)
-    text = re.sub(r"[ \t\u00a0]+\n", "\n", text)
+    text = re.sub(r"[ \t ]+\n", "\n", text)
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
-
-
-def _clean_narration(text: str) -> str:
-    text = _plain(strip_sticker_tags(str(text or ""))).strip()
-    return _SPEAKER_PREFIX.sub("", text, count=1).strip()
 
 
 def _clip(text: str, limit: int) -> str:

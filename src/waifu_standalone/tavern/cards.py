@@ -1,10 +1,11 @@
-"""Character cards sent to the bot as a file in a private chat, put where the tavern finds them.
+"""Character cards sent to the bot as a file in a private chat, put into SillyTavern.
 
 Someone in ``tavern.admin_user_ids`` or ``tool_policy.authorized_user_ids`` sends a
-SillyTavern card (``.png`` or ``.json``) as a QQ file. It is downloaded, read as a card,
-and saved under ``<data_root>/tavern/scenarios/``, or ``adult/`` when the card is tagged
-or written as an adult one, so it shows on the next "启动酒馆" menu. A PNG sent as a
-picture instead of a file has been recompressed by QQ and lost the card in it.
+SillyTavern card (``.png`` or ``.json``) as a QQ file. It is downloaded, checked to be a
+card, kept under ``<data_root>/tavern/scenarios/`` (or ``adult/`` when the card is tagged
+or written as an adult one) and imported into SillyTavern, so it shows on the next
+"启动酒馆" menu. A card sent again under the same name replaces the earlier one. A PNG sent
+as a picture instead of a file has been recompressed by QQ and lost the card in it.
 """
 
 from __future__ import annotations
@@ -21,10 +22,12 @@ from typing import TYPE_CHECKING, Any
 
 from ..infra.safe_fetch import afetch_public_url
 from ..models import InboundEvent, MessageSegment
-from .scenarios import _SUFFIXES, Scenario, _is_tavern_card, load_scenario_file, read_png_card
+from .scenarios import is_tavern_card, looks_adult, read_png_card
+from .sillytavern import BridgeError
 
 if TYPE_CHECKING:
     from ..app import WaifuService
+    from .sillytavern import SillyTavernBridge
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,21 +35,16 @@ _CARD_SUFFIXES = (".png", ".json")
 _MAX_BYTES = 20 * 1024 * 1024
 _FILES_PER_MESSAGE = 3
 _DOWNLOAD_TIMEOUT_SECONDS = 60.0
-# A card's own tags that mark it as an adult one.
-_ADULT_TAGS = re.compile(r"nsfw|r-?18|18\+|成人|色情|涩涩|里番|hentai", re.IGNORECASE)
-# Words no card meant for a group would carry.
-_EXPLICIT = re.compile(
-    r"肉棒|阴茎|鸡巴|阴道|阴蒂|阴唇|小穴|蜜穴|乳头|奶头|射精|精液|做爱|性交|口交|肛交|自慰|潮吹|内射|淫水|爱液"
-)
 _UNSAFE_NAME = re.compile(r"[\\/:*?\"<>|\x00-\x1f]+")
 _NAME_MAX_CHARS = 40
 
 
 class CardIntake:
-    def __init__(self, service: "WaifuService", scenarios_dir: Path, adult_dir: Path) -> None:
+    def __init__(self, service: "WaifuService", bridge: "SillyTavernBridge") -> None:
         self._service = service
-        self.scenarios_dir = scenarios_dir
-        self.adult_dir = adult_dir
+        self._bridge = bridge
+        self.scenarios_dir = bridge.root / "scenarios"
+        self.adult_dir = bridge.root / "adult"
 
     async def take(self, event: InboundEvent) -> str | None:
         """What to answer for the cards in ``event``; ``None`` when it sends none (other files are not ours)."""
@@ -75,7 +73,7 @@ class CardIntake:
             _LOGGER.warning("tavern card download failed file=%s: %s", name, exc)
             return f"「{name}」没下载下来，再发一次试试。"
         try:
-            return await asyncio.to_thread(self._save, name, data)
+            target, title, adult, replaced = await asyncio.to_thread(self._save, name, data)
         except ValueError as exc:
             _LOGGER.info("tavern card refused file=%s: %s", name, exc)
             if Path(name).suffix.lower() == ".png":
@@ -84,6 +82,18 @@ class CardIntake:
                     "卡里的数据就没了。"
                 )
             return f"「{name}」不是酒馆能读的角色卡（SillyTavern 的 .json 或 .png）。"
+        where = "成人卡" if adult else "酒馆"
+        kept = f"换下了{where}里的旧版" if replaced else f"放进了{where}"
+        if adult:
+            kept += "（成人卡只出现在允许的人的私聊菜单里）"
+        if not self._bridge.configured:
+            return f"收到角色卡《{title}》，先存下了；酒馆还没接上 SillyTavern，接上后会自动导入。"
+        try:
+            await self._bridge.import_file(target, adult=adult)
+        except (BridgeError, asyncio.TimeoutError, OSError) as exc:
+            _LOGGER.warning("tavern card %s not imported yet: %s", target.name, exc)
+            return f"收到角色卡《{title}》，先存下了；SillyTavern 这会儿连不上，下次连上时会自动导入。"
+        return f"收到角色卡《{title}》，{kept}。说「启动酒馆」就能在菜单里选到它。"
 
     async def _download(self, segment: MessageSegment) -> bytes:
         url = segment.file_url
@@ -101,38 +111,35 @@ class CardIntake:
             raise RuntimeError("the file is larger than the limit")
         return page.content
 
-    def _save(self, file_name: str, data: bytes) -> str:
-        """Check ``data`` is a card, save it, and say where; ``ValueError`` if it is not a card."""
+    def _save(self, file_name: str, data: bytes) -> tuple[Path, str, bool, bool]:
+        """Check ``data`` is a card and keep it; (where, its name, adult, replaced an earlier copy).
+
+        ``ValueError`` if it is not a card.
+        """
         suffix = Path(file_name).suffix.lower()
         raw = _card_payload(suffix, data)
-        adult = _looks_adult(raw)
+        adult = looks_adult(raw)
+        card = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+        title = str(card.get("name") or card.get("char_name") or Path(file_name).stem).strip()
         target_dir = self.adult_dir if adult else self.scenarios_dir
         target_dir.mkdir(parents=True, exist_ok=True)
-        # Written beside the card folders (not in them, where a menu would list it half-written),
-        # then read back the way the tavern reads it.
-        staging = target_dir.parent / ".incoming"
-        staging.mkdir(parents=True, exist_ok=True)
-        handle, temp_name = tempfile.mkstemp(dir=staging, suffix=suffix)
+        stem = _file_stem(title, file_name)
+        target = target_dir / f"{stem}{suffix}"
+        # A card is known by its file's name, so the same card in another format goes.
+        earlier = [path for path in target_dir.glob(f"{glob.escape(stem)}.*") if path.suffix.lower() in _CARD_SUFFIXES]
+        handle, temp_name = tempfile.mkstemp(dir=target_dir.parent, suffix=suffix)
         try:
             with os.fdopen(handle, "wb") as stream:
                 stream.write(data)
-            scenario = load_scenario_file(Path(temp_name))
-            stem = _file_stem(scenario, file_name)
-            target = target_dir / f"{stem}{suffix}"
-            # The menu knows a card by its file's name, so the same card in another format goes.
-            earlier = [path for path in target_dir.glob(f"{glob.escape(stem)}.*") if path.suffix.lower() in _SUFFIXES]
             os.replace(temp_name, target)
-            for path in earlier:
-                if path != target:
-                    path.unlink(missing_ok=True)
-            replaced = bool(earlier)
         except BaseException:
             Path(temp_name).unlink(missing_ok=True)
             raise
-        _LOGGER.info("tavern card added file=%s adult=%s replaced=%s", target.name, adult, replaced)
-        where = "成人卡库（只在你的私聊菜单里出现）" if adult else "酒馆卡库"
-        verb = "更新了" if replaced else "放进了"
-        return f"收到角色卡《{scenario.title}》，{verb}{where}。说「启动酒馆」就能在菜单里选到它。"
+        for path in earlier:
+            if path != target:
+                path.unlink(missing_ok=True)
+        _LOGGER.info("tavern card kept file=%s adult=%s replaced=%s", target.name, adult, bool(earlier))
+        return target, title, adult, bool(earlier)
 
 
 def _card_payload(suffix: str, data: bytes) -> dict[str, Any]:
@@ -142,23 +149,14 @@ def _card_payload(suffix: str, data: bytes) -> dict[str, Any]:
         payload = json.loads(data.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("the JSON is not readable") from exc
-    if not isinstance(payload, dict) or not _is_tavern_card(payload):
+    if not isinstance(payload, dict) or not is_tavern_card(payload):
         raise ValueError("the JSON is not a character card")
     return payload
 
 
-def _looks_adult(payload: dict[str, Any]) -> bool:
-    """Tagged NSFW, or explicit in its own words: such a card stays out of group menus."""
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    tags = data.get("tags") if isinstance(data.get("tags"), list) else []
-    if any(_ADULT_TAGS.search(str(tag)) for tag in tags):
-        return True
-    return bool(_EXPLICIT.search(json.dumps(payload, ensure_ascii=False)))
-
-
-def _file_stem(scenario: Scenario, file_name: str) -> str:
+def _file_stem(title: str, file_name: str) -> str:
     """The card's name as a file name, so a card sent again replaces the earlier copy."""
-    for candidate in (scenario.title, Path(file_name).stem):
+    for candidate in (title, Path(file_name).stem):
         stem = _UNSAFE_NAME.sub("_", str(candidate or "")).strip(" ._")[:_NAME_MAX_CHARS]
         if stem:
             return stem

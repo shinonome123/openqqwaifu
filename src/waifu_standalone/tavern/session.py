@@ -2,7 +2,7 @@
 
 A game lives in ``<data_root>/tavern/sessions/<chat>.json`` while it runs, so a restart
 picks it up again, and moves to ``<data_root>/tavern/archive/`` when it ends. The story
-stays out of the character's own chat history and memories.
+itself is a SillyTavern chat (``chat``), out of the character's own history and memories.
 """
 
 from __future__ import annotations
@@ -34,18 +34,17 @@ class TavernSession:
     launcher_id: str
     host_id: str
     host_name: str
-    # "menu" until the host picks a scenario, then "playing".
+    # "menu" until the host picks a card, then "playing".
     state: str = "menu"
-    # Scenario ids in the order the menu numbered them, so "选 2" means what the host saw.
+    # Card ids (SillyTavern avatars) in the order the menu numbered them, so "选 2" means what the host saw.
     menu: list[str] = field(default_factory=list)
     scenario_id: str = ""
     scenario_title: str = ""
     # QQ id -> name, in the order they joined; the host is the first.
     players: dict[str, str] = field(default_factory=dict)
-    # The story so far as chat turns: players' rounds are "user", the game master "assistant".
-    turns: list[dict[str, str]] = field(default_factory=list)
-    # Older rounds folded into a recap once the story outgrows its budget.
-    summary: str = ""
+    # The SillyTavern chat the story is in, and its latest reply (for "2" picking its second option).
+    chat: str = ""
+    last_reply: str = ""
     pending: list[PendingAction] = field(default_factory=list)
     # People outside the game already told that one is running.
     hinted: list[str] = field(default_factory=list)
@@ -75,11 +74,6 @@ class TavernSession:
             if isinstance(item, dict)
         ]
         values["players"] = {str(key): str(value) for key, value in dict(payload.get("players") or {}).items()}
-        values["turns"] = [
-            {"role": str(turn.get("role")), "content": str(turn.get("content", ""))}
-            for turn in payload.get("turns", []) or []
-            if isinstance(turn, dict) and turn.get("role") in {"user", "assistant"}
-        ]
         return cls(**values)
 
 
@@ -124,7 +118,7 @@ class SessionFiles:
     def archive(self, session: TavernSession) -> Path | None:
         """Keep a finished game under archive/ and forget the running one."""
         path = self.path(session.launcher_type, session.launcher_id)
-        if not session.turns:
+        if not session.chat:
             path.unlink(missing_ok=True)
             return None
         self.archive_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +140,7 @@ class SessionFiles:
             return found
         for path in self.archive_dir.glob(f"{stem}-*.json"):
             session = self._read(path)
-            if session is not None and session.key == (launcher_type, str(launcher_id)) and session.turns:
+            if session is not None and session.key == (launcher_type, str(launcher_id)) and session.chat:
                 found.append((path.name, session))
         found.sort(key=lambda item: item[1].last_activity_at, reverse=True)
         return found

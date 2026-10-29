@@ -14,6 +14,9 @@ napcat/config/*
 napcat/qq/*
 !napcat/qq/.gitkeep
 
+# SillyTavern's settings, keys, cards and chats (compose.napcat.yml).
+sillytavern/
+
 .playwright-cli/
 .codex-server*.log
 .codex-temp/

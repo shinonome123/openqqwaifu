@@ -22,11 +22,17 @@ services:
       OPENQQWAIFU_QQ_SIDECAR_WEBUI_API_PREFIX: /api
       OPENQQWAIFU_QQ_SIDECAR_WEBUI_TIMEOUT_SECONDS: ${OPENQQWAIFU_QQ_SIDECAR_WEBUI_TIMEOUT_SECONDS:-10}
       OPENQQWAIFU_QQ_SIDECAR_WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN:-}
+      # The tavern's cards are played by SillyTavern, in its page kept open by the browser below.
+      OPENQQWAIFU_TAVERN_SILLYTAVERN_URL: http://sillytavern:8000/
+      OPENQQWAIFU_TAVERN_BROWSER_URL: http://browser:9222
     volumes:
       - ./data:/app/data
       - ./napcat/config:/app/napcat-sidecar/config
     ports:
       - "${OPENQQWAIFU_PORT:-8080}:8080"
+    networks:
+      - default
+      - tavern
     restart: unless-stopped
     depends_on:
       - napcat
@@ -58,3 +64,36 @@ services:
       - ./napcat/qq:/app/.config/QQ
       - ./napcat/config:/app/napcat/config
     restart: unless-stopped
+
+  sillytavern:
+    # Pinned: the tavern drives SillyTavern's own page (tavern/sillytavern_page.js), which can
+    # change between releases. Upgrade on purpose and play a round in dry_run first.
+    image: ghcr.io/sillytavern/sillytavern:1.19.0
+    container_name: sillytavern
+    environment:
+      # Only this machine (through the port below) and the tavern network may open it.
+      SILLYTAVERN_WHITELIST: '["127.0.0.1", "::1", "172.30.87.0/24"]'
+    volumes:
+      - ./sillytavern/config:/home/node/app/config
+      - ./sillytavern/data:/home/node/app/data
+    ports:
+      - "127.0.0.1:${SILLYTAVERN_PORT:-8000}:8000"
+    networks:
+      - tavern
+    restart: unless-stopped
+
+  browser:
+    # Headless Chrome that keeps SillyTavern's page open for the tavern (DevTools on 9222,
+    # reachable only on the tavern network).
+    image: chromedp/headless-shell:157.0.8103.27
+    container_name: sillytavern-browser
+    shm_size: 1g
+    networks:
+      - tavern
+    restart: unless-stopped
+
+networks:
+  tavern:
+    ipam:
+      config:
+        - subnet: 172.30.87.0/24

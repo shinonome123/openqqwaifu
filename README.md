@@ -74,14 +74,16 @@ WaifuService (app.py)
   - 内置技能 + 工作区技能 + 插件技能
   - skill pack / bundle 导入导出
   - tool alias、显式 `/skill` 调用、模型 tool loop
-- 酒馆模式（跑团）
-  - 群里 @机器人说「启动酒馆」列出剧本，说的人当房主，回「选 1」开本，机器人改当主持人
-  - 「加入」「离开」上下桌；直接说话就是行动，几秒内所有人的行动由主持人一次接上；括号（…）或 `//` 开头是场外话
-  - `.r 2d6+1 撬锁` 由程序掷骰，结果交给主持人；「酒馆状态」看谁在玩；只有房主（和 `tavern.admin_user_ids`、`tool_policy.authorized_user_ids`）能「退出酒馆模式」，30 分钟没人说话自动结束
-  - 自带 4 个本，每个都有三幕转折和四个结局，走到结局时主持人写完收场就自动收摊；自己的本放进 `data/tavern/scenarios/`：YAML（格式见 `src/waifu_standalone/templates/tavern/`），或直接放 SillyTavern 角色卡（`.json` / `.png`）
-  - 剧情存在 `data/tavern/`，不进角色的聊天记录和记忆
-  - SillyTavern 角色卡按酒馆原版的方式玩：开局先发卡面图（`.png` 卡），开场白原样发，提示词用卡自己的系统提示、描述、世界书、示例对话和预设，按 SillyTavern 的顺序拼；网页上画的场景卡、状态栏和选项按钮转成文字发到 QQ，回「2」就是点第二个选项
-  - 成人模式只在私聊里、只对 `tavern.adult_user_ids` 里的人生效，成人卡放 `data/tavern/adult/`；群里永远不开，卡里写了未满 18 岁的人物也不开
+- 酒馆模式（跑团），由 SillyTavern 本身来玩
+  - 群里 @机器人说「启动酒馆」列出 SillyTavern 里的角色卡，说的人当房主，回「选 1」开局
+  - 「加入」「离开」上下桌；直接说话就是行动，几秒内所有人的行动合成一条发给 SillyTavern，由它写一段回复；括号（…）或 `//` 开头是场外话
+  - `.r 2d6+1 撬锁` 由程序掷骰，结果一起发过去；「酒馆状态」看谁在玩；只有房主（和 `tavern.admin_user_ids`、`tool_policy.authorized_user_ids`）能「退出酒馆模式」，30 分钟没人说话自动结束；「继续酒馆」从没玩完的存档接着玩
+  - 卡由 SillyTavern 1.19.0 自己来玩：compose 里跑着官方镜像和一个无头浏览器，浏览器一直开着 SillyTavern 的网页，酒馆通过它调 SillyTavern 自己的函数，所以提示词顺序、世界书、正则、预设和调模型都是 SillyTavern 的。每局是它里面的一个聊天，在它的网页（本机 http://127.0.0.1:8000/）里能直接看、能改预设
+  - 模型用 `tavern.llm_*`（没填就用 `llm`），第一次连上和配置改了时自动写进 SillyTavern
+  - 自带 4 个跑团本（主持人卡），每个都有三幕转折和四个结局，走到结局写完收场就自动收摊。别的卡：管理员私聊把 `.png` / `.json` 卡当文件发给机器人，放进 `data/tavern/scenarios/`，或者直接在 SillyTavern 网页里加，都会出现在菜单里
+  - 开局先发卡面图，开场白原样发；卡网页上画的场景卡、状态栏和选项按钮转成文字发到 QQ，回「2」就是点第二个选项
+  - 剧情不进角色的聊天记录和记忆
+  - 成人模式只在私聊里、只对 `tavern.adult_user_ids` 里的人生效（成人卡放 `data/tavern/adult/`，或卡本身标了 NSFW）；群里永远不开，卡里写了未满 18 岁的人物也不开
 - OpenClaw 兼容层
   - `SKILL.md` / bundle 导入
   - native plugin / bundle capability 诊断
