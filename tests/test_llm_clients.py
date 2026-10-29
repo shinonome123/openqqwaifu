@@ -66,6 +66,31 @@ class LlmClientsTests(unittest.TestCase):
             self.assertIn("FACT_MARKER", str(payload["messages"]))
             self.assertIn("call_1", str(payload["messages"]))
 
+    def test_a_reply_streamed_though_not_asked_for_is_read_whole(self) -> None:
+        # DZMM streams long tavern replies even with stream off; every round failed to parse.
+        from waifu_standalone.infra.llm_clients import OpenAILLMClient
+
+        client = OpenAILLMClient(base_url="http://example.invalid/v1", api_key="k", model="m")
+        streamed = (
+            'data:  {"choices":[{"delta":{"content":"<think>线索：茶杯</think>"}}]}\n\n'
+            'data:  {"choices":[{"delta":{"content":"雨还在下，"}}]}\n\n'
+            'data:  {"choices":[{"delta":{"content":"书房的门闩着。"},"finish_reason":"stop"}]}\n\n'
+            "data: [DONE]\n"
+        )
+        self.assertEqual(client._parse_tool_response(streamed).text, "<think>线索：茶杯</think>雨还在下，书房的门闩着。")
+        self.assertEqual(client._parse_invoke(streamed), "<think>线索：茶杯</think>雨还在下，书房的门闩着。")
+
+        calls = (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"search-command","arguments":"{\\"q"}}]}}]}\n'
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"uery\\": \\"雨\\"}"}}]}}]}\n'
+            "data: [DONE]\n"
+        )
+        (call,) = client._parse_tool_response(calls).tool_calls
+        self.assertEqual((call.call_id, call.tool_name, call.arguments), ("c1", "search-command", {"query": "雨"}))
+
+        plain = '{"choices":[{"message":{"role":"assistant","content":"好"}}]}'
+        self.assertEqual(client._parse_tool_response(plain).text, "好")
+
     def test_build_llm_client_returns_strategy_for_backend(self) -> None:
         self.assertIsInstance(
             build_llm_client_from_values(

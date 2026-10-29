@@ -428,6 +428,63 @@ class DifyLLMClient(_BaseHTTPClient):
         return answer
 
 
+def _unstream(raw: str) -> str:
+    """A chat completion sent as server-sent events, as one completion's JSON.
+
+    Some OpenAI-compatible providers (DZMM) stream long replies even when asked not to:
+    ``data: {"choices": [{"delta": {...}}]}`` lines. The deltas are put back together —
+    text, and tool calls by their index — so the body parses like a plain completion.
+    Anything else is returned as it came.
+    """
+    text = str(raw or "")
+    if not text.lstrip().startswith("data:"):
+        return text
+    content: list[str] = []
+    calls: dict[int, dict[str, object]] = {}
+    finish_reason = None
+    usage = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        chunk = line[5:].strip()
+        if not chunk or chunk == "[DONE]":
+            continue
+        try:
+            event = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        usage = event.get("usage") or usage
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        finish_reason = choices[0].get("finish_reason") or finish_reason
+        delta = choices[0].get("delta") or choices[0].get("message") or {}
+        if not isinstance(delta, dict):
+            continue
+        if isinstance(delta.get("content"), str):
+            content.append(delta["content"])
+        for item in delta.get("tool_calls") or []:
+            if not isinstance(item, dict):
+                continue
+            call = calls.setdefault(int(item.get("index", len(calls)) or 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+            call["id"] = item.get("id") or call["id"]
+            function = item.get("function") if isinstance(item.get("function"), dict) else {}
+            target = call["function"]
+            assert isinstance(target, dict)
+            target["name"] = function.get("name") or target["name"]
+            target["arguments"] = str(target["arguments"]) + str(function.get("arguments") or "")
+    message: dict[str, object] = {"role": "assistant", "content": "".join(content)}
+    if calls:
+        message["tool_calls"] = [calls[index] for index in sorted(calls)]
+    completion: dict[str, object] = {"choices": [{"message": message, "finish_reason": finish_reason or "stop", "index": 0}]}
+    if usage:
+        completion["usage"] = usage
+    return json.dumps(completion, ensure_ascii=False)
+
+
 class OpenAILLMClient(_BaseHTTPClient):
     @property
     def supports_json_object(self) -> bool:
@@ -454,7 +511,7 @@ class OpenAILLMClient(_BaseHTTPClient):
             for message in payload["messages"]:
                 if message["role"] == "system":
                     message["role"] = "developer"
-        raw = await self._apost_json(self._endpoint("chat/completions"), payload, headers=self._headers())
+        raw = _unstream(await self._apost_json(self._endpoint("chat/completions"), payload, headers=self._headers()))
         response = self._parse_tool_response(raw)
         data = json.loads(raw)
         reason = data["choices"][0].get("finish_reason")
@@ -601,6 +658,7 @@ class OpenAILLMClient(_BaseHTTPClient):
         }
 
     def _parse_invoke(self, raw: str) -> str:
+        raw = _unstream(raw)
         data = json.loads(raw) if raw else {}
         choices = data.get("choices", [])
         if not isinstance(choices, list) or not choices:
@@ -644,6 +702,7 @@ class OpenAILLMClient(_BaseHTTPClient):
         return self._parse_tool_response(raw)
 
     def _parse_tool_response(self, raw: str) -> LLMToolResponse:
+        raw = _unstream(raw)
         data = json.loads(raw) if raw else {}
         choices = data.get("choices", [])
         if not isinstance(choices, list) or not choices:
