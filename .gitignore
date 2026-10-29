@@ -18,6 +18,8 @@ napcat/qq/*
 sillytavern/
 
 .playwright-cli/
+# Serena (code assistant) project settings and cache, local to each machine.
+.serena/
 .codex-server*.log
 .codex-temp/
 
