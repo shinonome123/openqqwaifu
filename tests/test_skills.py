@@ -944,9 +944,9 @@ Use summarize for URLs.
         tool_ids = {item["id"] for item in tools["items"]}
         aliases_by_id = {item["id"]: set(item.get("aliases", [])) for item in tools["items"]}
 
-        self.assertEqual(tools["count"], 18)
+        self.assertEqual(tools["count"], 19)
         self.assertEqual(tools["alias_count"], 66)
-        self.assertEqual(tools["model_callable_count"], 17)
+        self.assertEqual(tools["model_callable_count"], 18)
         self.assertSetEqual(
             tool_ids,
             {
@@ -959,6 +959,7 @@ Use summarize for URLs.
                 "summarize",
                 "weather",
                 "web-fetch",
+                "reminder",
                 "read-file",
                 "list-files",
                 "write-file",
