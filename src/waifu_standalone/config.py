@@ -301,6 +301,11 @@ class AppConfig:
     skills_enabled: bool = True
     # 只在消息看起来需要时才把工具交给模型（天气、搜索、改称呼、链接……）；普通闲聊不带工具。
     tools_on_demand: bool = True
+    # 有人在跟她说话时（不是她自己插话），这些查东西的工具总是交给模型，由模型按意思判断要不要用：
+    # 「帮我看看影之刃零评价怎么样」没有「搜」字，也该去查。其余工具仍按 tools_on_demand 看措辞。
+    always_offered_tool_ids: list[str] = field(
+        default_factory=lambda: ["search", "search-links", "weather", "web-fetch", "summarize"]
+    )
     max_active_skills: int = 3
     search_enabled: bool = True
     search_result_limit: int = 3

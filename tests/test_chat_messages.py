@@ -103,8 +103,9 @@ class ChatMessageTests(unittest.TestCase):
         system = str(messages[0]["content"])
         self.assertTrue(system.startswith(f"你是{self.card_name}"))
         self.assertIn("[规则]", system)
-        self.assertNotIn("[工具]", system)  # ordinary chat carries no tools
-        self.assertEqual(tools, [])
+        # Talking to her, she always has the lookup tools; nothing else for ordinary chat.
+        self.assertIn("[工具]", system)
+        self.assertTrue({tool["name"] for tool in tools} <= {"search-command", "search-links-command", "weather-command", "summarize-command", "web-fetch-command"})
         self.assertEqual(
             [(message["role"], message["content"]) for message in messages[1:]],
             [("user", "你好"), ("assistant", "你好呀"), ("user", "今天怎么样"),
@@ -135,12 +136,30 @@ class ChatMessageTests(unittest.TestCase):
         self.assertNotIn("你是大母牛", system)
 
     def test_tools_and_tool_rules_appear_only_when_the_message_needs_them(self) -> None:
+        self.service.config.always_offered_tool_ids = []  # the wording alone
         client = self._use(_ChatClient("带吧"))
         self.service.handle_event(_private("出门要带伞吗"))
 
         messages, tools = client.requests[-1]
         self.assertEqual([tool["name"] for tool in tools], ["weather-command"])
         self.assertIn("[工具]", str(messages[0]["content"]))
+
+    def test_a_question_that_wants_a_lookup_gets_search_without_saying_search(self) -> None:
+        client = self._use(_ChatClient("哼，我看看。"))
+        self.service.handle_event(_private("帮我看看现在影之刃零的评价怎么样？"))
+        messages, tools = client.requests[-1]
+        self.assertIn("search-command", {tool["name"] for tool in tools})
+        system = str(messages[0]["content"])
+        self.assertIn("别叫对方自己去搜", system)
+        self.assertIn("要不要你帮他搜搜看", system)
+
+        # Joining the group's talk unasked, she only gets what the wording points at.
+        event = _private("影之刃零评价怎么样")
+        session = self.service.memory.save_user_event(event, character_id=self.service._active_character_id())
+        context = self.service.tool_orchestrator.exposure_context(
+            event, session, latest_message="影之刃零评价怎么样", address="tester", assistant_name="极光", spontaneous=True
+        )
+        self.assertNotIn("search-command", {str(item["name"]) for item in self.service.tools.model_schemas(context)})
 
     def test_a_copied_reply_is_written_again_once(self) -> None:
         client = self._use(_ChatClient("问这个干嘛，又不是给你讲故事的。", "问这个干嘛，又不是给你讲故事的。", "好吧，我叫极光。"))

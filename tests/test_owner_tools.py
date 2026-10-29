@@ -78,6 +78,7 @@ class SharedFolderTests(unittest.TestCase):
 
     def test_the_model_gets_the_file_tools_only_for_the_owner(self) -> None:
         self.service.config.llm.enabled = True
+        self.service.config.always_offered_tool_ids = []  # only what the wording brings
 
         def offered(sender: str, text: str) -> list[str]:
             event = InboundEvent(sender, "person", sender, "tester", [MessageSegment(kind="text", text=text)])

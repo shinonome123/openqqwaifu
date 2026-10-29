@@ -74,6 +74,9 @@ class ConfigManager:
             group_reply_requires_mention=bool(raw.get("group_reply_requires_mention", True)),
             skills_enabled=bool(raw.get("skills_enabled", True)),
             tools_on_demand=bool(raw.get("tools_on_demand", True)),
+            always_offered_tool_ids=_load_str_list(
+                raw.get("always_offered_tool_ids"), AppConfig().always_offered_tool_ids
+            ),
             max_active_skills=int(raw.get("max_active_skills", 3)),
             search_enabled=bool(raw.get("search_enabled", True)),
             search_result_limit=int(raw.get("search_result_limit", 3)),
