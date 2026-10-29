@@ -5,7 +5,7 @@ from typing import Literal
 
 
 LauncherType = Literal["group", "person"]
-MessageKind = Literal["text", "image", "mention", "file"]
+MessageKind = Literal["text", "image", "mention", "file", "reply"]
 
 
 @dataclass(slots=True)
@@ -24,6 +24,8 @@ class MessageSegment:
     file_id: str = ""
     file_url: str = ""
     file_size: int = 0
+    # A quote-reply (QQ's 回复): the id of the message it quotes.
+    reply_to_id: str = ""
 
 
 @dataclass(slots=True)
@@ -45,6 +47,11 @@ class InboundEvent:
     @property
     def image_count(self) -> int:
         return sum(1 for segment in self.segments if segment.kind == "image")
+
+    @property
+    def reply_to_id(self) -> str:
+        """The id of the message this one quote-replies to, if it does."""
+        return next((segment.reply_to_id for segment in self.segments if segment.kind == "reply"), "")
 
     @property
     def files(self) -> list[MessageSegment]:

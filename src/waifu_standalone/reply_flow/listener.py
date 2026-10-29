@@ -55,6 +55,7 @@ CHIME_IN_HINT = (
 TALK_ON_HINT = (
     "[接着刚才的话]\n"
     "对方没有 @ 你，只是接着刚才的话在说；回一句就好，不超过三十个字，不点名。"
+    "但对方是在接着问要你查的事，就照常去查，把查到的结论说完整，不受三十个字限制。"
     f"要是这句其实是对别人说的，或者用不着你接，就只输出「{SILENCE}」。"
 )
 # A reply that nobody @-ed asks for one sentence; past this many characters it is cut there.
@@ -209,9 +210,18 @@ class Listener:
                 self._last_said[event.launcher_id] = (said, now)
 
     def explicitly_addressed(self, event: InboundEvent) -> bool:
-        """An @ of the bot, or its name or call name: not just a line in an ongoing talk."""
+        """An @ of the bot, its name or call name, or a quote-reply to her: not just a line in an ongoing talk."""
         bot = str(self._service.config.bot_account_id or "")
-        return event.launcher_type != "group" or event.has_bot_mention(bot) or self._name_called(event)
+        return (
+            event.launcher_type != "group"
+            or event.has_bot_mention(bot)
+            or self._name_called(event)
+            or self.replies_to_her(event)
+        )
+
+    def replies_to_her(self, event: InboundEvent) -> bool:
+        """A quote-reply (QQ's 回复) to something she said: as much for her as an @."""
+        return self._service.emitter.sent_by_her(event.reply_to_id)
 
     def asks_for_quiet(self, event: InboundEvent) -> bool:
         """"你别说话了", "闭嘴": in a group she then keeps quiet for ``listen.quiet_minutes``.
@@ -260,7 +270,7 @@ class Listener:
 
     def addresses_bot(self, event: InboundEvent) -> bool:
         """Whether a group message without an @ is still for the character: its name, or its conversation."""
-        if self._name_called(event):
+        if self._name_called(event) or self.replies_to_her(event):
             return True
         if self.keeping_quiet(event.launcher_id):
             return False

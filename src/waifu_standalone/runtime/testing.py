@@ -32,8 +32,10 @@ class CapturingOutboundPort:
     # Other OneBot actions (file uploads), as (action, params).
     actions: list[tuple[str, dict[str, object]]] = field(default_factory=list)
 
-    def send(self, message: OutboundMessage) -> None:
+    def send(self, message: OutboundMessage) -> dict[str, object]:
         self.sent.append(message)
+        # As QQ answers a send: the new message's id ("1", "2", … in sending order).
+        return {"status": "ok", "retcode": 0, "data": {"message_id": str(len(self.sent))}}
 
     def call_action(self, action: str, params: dict[str, object]) -> dict[str, object]:
         self.actions.append((action, dict(params)))
