@@ -163,6 +163,7 @@ class ReplyFlowService:
             address=address,
             assistant_name=assistant_name,
             all_tools=bool(free_request),
+            spontaneous=spontaneous,
         )
         if live_runtime and not svc.generator.llm_ready:
             if spontaneous:

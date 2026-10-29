@@ -1221,7 +1221,8 @@ Use summarize for URLs.
 
     def test_tools_follow_the_message_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            service, _ = build_default_service(AppConfig(data_root=tmpdir, max_active_skills=1))
+            # Only what the wording brings; the always-offered lookup tools are off here.
+            service, _ = build_default_service(AppConfig(data_root=tmpdir, max_active_skills=1, always_offered_tool_ids=[]))
             event = InboundEvent(
                 launcher_id="783190298",
                 launcher_type="person",

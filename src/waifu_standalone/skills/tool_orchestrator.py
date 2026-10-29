@@ -84,14 +84,22 @@ class ToolCallingOrchestrator:
         address: str,
         assistant_name: str,
         all_tools: bool = False,
+        spontaneous: bool = False,
     ) -> ToolExposureContext:
-        """The tools the model may call this turn; ``all_tools`` for an explicit "/skill" request."""
+        """The tools the model may call this turn; ``all_tools`` for an explicit "/skill" request.
+
+        Someone talking to her also gets ``always_offered_tool_ids`` whatever the wording: the
+        model judges from the conversation whether to look something up. Joining in unasked
+        (``spontaneous``) she only gets what the wording points at.
+        """
         svc = self._service
         allowed = self._allowed_tool_ids(event)
         manifests = svc.skills.exposed_manifests(latest_message) if svc.config.skills_enabled else []
         if svc.config.tools_on_demand:
             # Only tools the wording points at, plus skills whose own keywords match.
             wanted = set(allowed) if all_tools else relevant_tool_ids(latest_message, has_images=event.image_count > 0)
+            if not spontaneous:
+                wanted.update(str(tool_id) for tool_id in svc.config.always_offered_tool_ids)
             if self._just_asked_for_name(event, session):
                 # A bare "luna" right after the bot asked for a name is an answer.
                 wanted.update(NAMING_TOOL_IDS)
