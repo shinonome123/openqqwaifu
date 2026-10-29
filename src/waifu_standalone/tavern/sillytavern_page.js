@@ -3,7 +3,7 @@
 // needs from SillyTavern goes through its own functions, so a card is played exactly as
 // SillyTavern plays it: its prompt order, lorebook, regex scripts, preset and API settings.
 (() => {
-    const VERSION = 3;
+    const VERSION = 4;
     if (window.openqqwaifu && window.openqqwaifu.version === VERSION) {
         return;
     }
@@ -222,6 +222,8 @@
                 first_mes: data.first_mes ?? c.first_mes ?? '',
                 alternate_greetings: Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [],
                 system_prompt: data.system_prompt ?? '',
+                post_history_instructions: data.post_history_instructions ?? '',
+                mes_example: data.mes_example ?? c.mes_example ?? '',
                 creator_notes: data.creator_notes ?? c.creatorcomment ?? '',
                 tags: data.tags ?? c.tags ?? [],
                 extensions: data.extensions ?? {},

@@ -49,8 +49,8 @@ class TavernSession:
     # People outside the game already told that one is running.
     hinted: list[str] = field(default_factory=list)
     rounds: int = 0
-    # Opened in a private chat with someone in ``tavern.adult_user_ids``: adult scenarios
-    # are on the menu and intimate scenes need not fade out. Never true in a group.
+    # Opted in by an authorized adult host, in private or with ``adult_in_groups`` enabled.
+    # Host/chat authorization is rechecked for content, and minors are always excluded.
     adult: bool = False
     started_at: float = field(default_factory=time.time)
     last_activity_at: float = field(default_factory=time.time)

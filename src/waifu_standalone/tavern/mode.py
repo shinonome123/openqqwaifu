@@ -108,9 +108,9 @@ _FENCE_LINE = re.compile(r"^[ \t]*```[\w-]*[ \t]*$", re.MULTILINE)
 _SAFE_CONTENT = "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。"
 # A story with someone under 18 in it (``Scenario.minors``), in any chat.
 _MINORS_CONTENT = "故事里有未成年人：对任何人都不写性感、暧昧或带性意味的描写，不写露骨内容和血腥细节；剧情走到那里就转场。"
-# Only for a game opened in a private chat with someone in tavern.adult_user_ids.
+# Authorized adult hosts, in private or in explicitly enabled adult groups; minors remain excluded.
 _ADULT_CONTENT = (
-    "这是和确认成年的用户的一对一私聊：亲密情节可以按角色卡的设定写，不用一笔带过；"
+    "这是已开启成人模式的虚构故事：亲密情节可以按角色卡的设定写，不用一笔带过；"
     "所有角色都必须是成年人，必须双方自愿，对方犹豫、拒绝或说停就立刻停下；"
     "不写涉及未成年人、非自愿或真实人物的内容，也不写血腥细节。"
 )
@@ -391,6 +391,8 @@ class TavernMode:
             )
         else:
             rules = f"{head}{how}，括号（…）里是场外话；掷骰用 .r d20；说「退出酒馆模式」结束。"
+        if self._adult_content(session, scenario) and session.launcher_type == "group":
+            rules += "（本局已开启成人模式，仅限成年且同意接收此类内容的成员；不适请随时叫停。）"
         if session.adult and scenario.minors:
             _LOGGER.info("tavern card %s has someone under 18; no adult content", scenario.scenario_id)
             rules += "（卡里有人未满 18 岁，这一局不写成人内容。）"
@@ -709,10 +711,12 @@ class TavernMode:
     def _render(scenario: Scenario, text: str) -> str:
         return _SPEAKER_PREFIX.sub("", render_card(_THINKING.sub("", text), stat=scenario.stat), count=1).strip()
 
-    @staticmethod
-    def _adult_content(session: TavernSession, scenario: Scenario) -> bool:
-        """A private game opened by someone in ``tavern.adult_user_ids``, with nobody under 18 in it."""
-        return session.adult and session.launcher_type == "person" and not scenario.minors
+    def _adult_content(self, session: TavernSession, scenario: Scenario) -> bool:
+        """Adult-only content requires an opted-in session and current host/chat authorization."""
+        return (
+            session.adult and not scenario.minors
+            and self._adult_chat_allowed(session.launcher_type, session.host_id)
+        )
 
     def _content_rule(self, session: TavernSession, scenario: Scenario) -> str:
         if self._adult_content(session, scenario):
@@ -837,10 +841,16 @@ class TavernMode:
             "有人想玩或者问起来，就告诉他这么开，别说你不会、不肯开。"
         )
 
+    def _adult_chat_allowed(self, launcher_type: str, host_id: str) -> bool:
+        settings = self._service.config.tavern
+        allowed = {str(uid).strip() for uid in settings.adult_user_ids if str(uid).strip()}
+        return str(host_id).strip() in allowed and (
+            launcher_type == "person" or (launcher_type == "group" and settings.adult_in_groups)
+        )
+
     def _adult_allowed(self, event: InboundEvent) -> bool:
-        """A private chat with someone in ``tavern.adult_user_ids``; never a group."""
-        allowed = {str(uid).strip() for uid in self._service.config.tavern.adult_user_ids if str(uid).strip()}
-        return event.launcher_type == "person" and str(event.sender_id).strip() in allowed
+        """Listed adult hosts may open group games only when explicitly enabled."""
+        return self._adult_chat_allowed(event.launcher_type, event.sender_id)
 
     def _addressed(self, event: InboundEvent) -> bool:
         """A private chat, an @, or (with listen on) her name or the person she is talking to."""

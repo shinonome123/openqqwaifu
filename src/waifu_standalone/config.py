@@ -216,9 +216,10 @@ class TavernConfig:
     starter_user_ids: list[str] = field(default_factory=list)
     # 除了房主，还能强制结束的 QQ 号；tool_policy.authorized_user_ids 里的人也能。
     admin_user_ids: list[str] = field(default_factory=list)
-    # 成人模式：这些 QQ 号在私聊里开局时，菜单里多出成人卡（tavern/adult/ 里的，和标了 NSFW 或写得露骨的卡），
-    # 亲密情节按卡的设定写、不一笔带过（角色都是成年人、双方自愿、说停就停）。群里永远不开。空表示谁都不行。
+    # 成人模式：这些 QQ 号可开启成人卡（角色必须成年、双方自愿、说停就停）。空表示不允许任何房主开启。
     adult_user_ids: list[str] = field(default_factory=list)
+    # 默认仅私聊；群成员确认成年且同意接收后可开启所有群，房主仍须在 adult_user_ids 中。
+    adult_in_groups: bool = False
     # 酒馆用的模型（OpenAI 兼容接口）：三项都填了就把它设成 SillyTavern 的连接，否则用 llm 那个（Dify 不行）；
     # 改了才会重新写进 SillyTavern。timeout 是等 SillyTavern 写完一轮的时间。
     llm_base_url: str = ""
