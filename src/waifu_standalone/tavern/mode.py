@@ -11,7 +11,7 @@ result on; "酒馆状态" says who plays. Only the host, ``tavern.admin_user_ids
 ``tavern.idle_timeout_seconds`` without a word.
 
 SillyTavern plays the card (``sillytavern.py``): each game is a chat of that character in
-SillyTavern, and the prompt, its lorebook, regex scripts, preset and the model call are
+SillyTavern (named the way SillyTavern names a new chat), and the prompt, its lorebook, regex scripts, preset and the model call are
 SillyTavern's own. The tavern adds one system note at the end of the chat: who plays,
 when there are several, the content rule, and for a bundled story how far along it is.
 A bundled story ends by itself when its finale line ("（全剧终）") comes.
@@ -44,7 +44,7 @@ from .cards import CardIntake
 from .dice import DiceError, parse_roll
 from .scenarios import EXPLICIT, Scenario, card_picture, scenario_from_character
 from .session import PendingAction, SessionFiles, TavernSession
-from .sillytavern import BridgeError, SillyTavernBridge, chat_name
+from .sillytavern import BridgeError, SillyTavernBridge
 
 if TYPE_CHECKING:
     from ..app import WaifuService
@@ -102,6 +102,9 @@ _SKIPPED = "（这一段跳过。）"
 _HTML_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
 _HTML_BLOCK = re.compile(r"<(?:br|hr)\s*/?>|</?(?:div|p|h[1-6]|li|ul|ol|details|summary|center|table|tr)(?:\s[^<>]*)?>", re.IGNORECASE)
 _THINKING = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+# What a page drawn from a reply (酒馆助手 cards send a whole ```html page) keeps out of sight.
+_UNSEEN = re.compile(r"<(style|script|head)\b[^>]*>[\s\S]*?</\1\s*>|<!--[\s\S]*?-->|<!doctype[^>]*>", re.IGNORECASE)
+_FENCE_LINE = re.compile(r"^[ \t]*```[\w-]*[ \t]*$", re.MULTILINE)
 _SAFE_CONTENT = "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。"
 # A story with someone under 18 in it (``Scenario.minors``), in any chat.
 _MINORS_CONTENT = "故事里有未成年人：对任何人都不写性感、暧昧或带性意味的描写，不写露骨内容和血腥细节；剧情走到那里就转场。"
@@ -350,12 +353,7 @@ class TavernMode:
         session.started_at = time.time()
         session.touch()
         try:
-            opened = await self.bridge.start(
-                scenario.scenario_id,
-                user=self._user_name(session),
-                chat=chat_name(session.launcher_type, session.launcher_id, session.started_at),
-                greeting=scenario.greeting,
-            )
+            opened = await self.bridge.start(scenario.scenario_id, user=self._user_name(session), greeting=scenario.greeting)
         except _UNREACHABLE as exc:
             _LOGGER.warning("tavern start failed chat=%s:%s card=%s: %s", *session.key, scenario.scenario_id, exc)
             return await self._end(session, reason="failed", notice="SillyTavern 没能开这一局，过一会儿再试试。", event=event)
@@ -943,7 +941,8 @@ def _status_bar(parts: list[str], stat: str) -> str:
 
 def _plain(text: str) -> str:
     """Text without HTML (cards decorate with it) or Markdown asterisks, as QQ shows plain text."""
-    text = _HTML_BLOCK.sub("\n", str(text or ""))  # a block ends a line
+    text = _FENCE_LINE.sub("", _UNSEEN.sub("", str(text or "")))
+    text = _HTML_BLOCK.sub("\n", text)  # a block ends a line
     text = html.unescape(_HTML_TAG.sub("", text)).replace(" ", " ")
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"\*([^*\n]+)\*", r"\1", text)

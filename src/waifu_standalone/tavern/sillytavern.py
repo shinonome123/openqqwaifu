@@ -12,6 +12,10 @@ The first call sets SillyTavern up (``_setup``):
   OpenAI-compatible ``llm``), sent again only when that changes, so a preset or sampler
   changed in SillyTavern's own page stays; once, its reasoning "Auto-Parse" is turned on,
   so a model's <think> block stays out of the reply and the history;
+- the extensions in ``tavern.sillytavern_extensions`` ("<git url>@<tag>", 酒馆助手 by default)
+  are installed the way SillyTavern's own "Install extension" does, again when the tag changes;
+  酒馆助手's "最大化预设上下文长度" is turned off, so a long game is still cut to the model's
+  window, and a card's 酒馆助手 scripts run (``sillytavern_page.js`` says yes when it asks);
 - the bundled cards (``templates/tavern/*.json``) and the card files in
   ``<data_root>/tavern/scenarios/`` and ``adult/`` are imported, again when a file changes;
 - games saved before SillyTavern played them become SillyTavern chats.
@@ -43,7 +47,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 PAGE_SCRIPT = (Path(__file__).with_name("sillytavern_page.js")).read_text(encoding="utf-8")
-_PAGE_VERSION = 2
+_PAGE_VERSION = 3
 _MISSING = "__openqqwaifu_missing__"
 BUNDLED_DIR = Path(__file__).resolve().parents[1] / "templates" / "tavern"
 _CARD_SUFFIXES = (".png", ".json")
@@ -53,6 +57,10 @@ _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
 _LOAD_SECONDS = 90.0
 _CALL_SECONDS = 60.0
 _SETUP_RETRY_SECONDS = 300.0
+# A git clone of an extension, from inside SillyTavern's container.
+_INSTALL_SECONDS = 300.0
+# 酒馆助手 (JS-Slash-Runner), whose 2M-token context default the tavern turns off.
+_TAVERN_HELPER = "JS-Slash-Runner"
 
 
 class BridgeError(RuntimeError):
@@ -180,9 +188,9 @@ class SillyTavernBridge:
         cards = self._state().get("cards", {})
         return next(({**entry, "key": key} for key, entry in cards.items() if entry.get("avatar") == avatar), {})
 
-    async def start(self, avatar: str, *, user: str, chat: str, greeting: int = 0) -> dict[str, str]:
+    async def start(self, avatar: str, *, user: str, greeting: int = 0) -> dict[str, str]:
         """A new chat with the card; its file name (``chat``) and the greeting it opens with."""
-        return dict(await self._call("start", {"avatar": avatar, "user": user, "chat": chat, "greeting": greeting}))
+        return dict(await self._call("start", {"avatar": avatar, "user": user, "greeting": greeting}))
 
     async def resume(self, avatar: str, chat: str) -> str:
         return str((await self._call("resume", {"avatar": avatar, "chat": chat}) or {}).get("last", ""))
@@ -273,31 +281,40 @@ class SillyTavernBridge:
             self._tab = await _Tab.open(str(settings.browser_url).strip(), page_url)
             self._loaded = False
         if not self._loaded:
-            tab = self._tab
-            href = await tab.evaluate("location.href", 10)
-            fresh = not str(href).startswith(_origin(page_url))
-            if not fresh:
-                # A page SillyTavern restarted under answers with stale tokens; load it again.
-                fresh = not await tab.evaluate("typeof window.SillyTavern === 'object'", 10)
-            await tab.send("Page.navigate", 15, url=page_url) if fresh else await tab.send("Page.reload", 15)
-            await self._wait_for_page(tab)
-            await tab.evaluate(PAGE_SCRIPT, 10)
-            await tab.evaluate("window.openqqwaifu.ready()", _LOAD_SECONDS)
-            self._loaded = True
-            _LOGGER.info("sillytavern page loaded url=%s", page_url)
+            await self._load()
         if time.monotonic() >= self._setup_due:
             self._setup_due = float("inf")
             if not await self._setup():
                 self._setup_due = time.monotonic() + _SETUP_RETRY_SECONDS
 
+    async def _load(self) -> None:
+        """SillyTavern's page loaded (again) in the tab, with ``sillytavern_page.js`` in it."""
+        assert self._tab is not None
+        tab, page_url = self._tab, str(self._service.config.tavern.sillytavern_url).strip()
+        self._loaded = False
+        href = await tab.evaluate("location.href", 10)
+        fresh = not str(href).startswith(_origin(page_url))
+        if not fresh:
+            # A page SillyTavern restarted under answers with stale tokens; load it again.
+            fresh = not await tab.evaluate("typeof window.SillyTavern === 'object'", 10)
+        # The document being replaced is marked, so it is not taken for the new one.
+        await tab.evaluate("window.__openqqwaifuOld = true", 10)
+        await tab.send("Page.navigate", 15, url=page_url) if fresh else await tab.send("Page.reload", 15)
+        await self._wait_for_page(tab)
+        await tab.evaluate(PAGE_SCRIPT, 10)
+        await tab.evaluate("window.openqqwaifu.ready()", _LOAD_SECONDS)
+        self._loaded = True
+        _LOGGER.info("sillytavern page loaded url=%s", page_url)
+
     @staticmethod
     async def _wait_for_page(tab: _Tab) -> None:
         deadline = time.monotonic() + _LOAD_SECONDS
-        await asyncio.sleep(0.5)
         while time.monotonic() < deadline:
             try:
                 if await tab.evaluate(
-                    "document.readyState === 'complete' && typeof window.SillyTavern?.getContext === 'function'", 10
+                    "!window.__openqqwaifuOld && document.readyState === 'complete'"
+                    " && typeof window.SillyTavern?.getContext === 'function'",
+                    10,
                 ):
                     return
             except BridgeError:
@@ -320,7 +337,7 @@ class SillyTavernBridge:
     # ------------------------------------------------------------------
     async def _setup(self) -> bool:
         done = True
-        for step in (self._connect, self._parse_reasoning, self._sync_cards, self._move_saves):
+        for step in (self._connect, self._parse_reasoning, self._install_extensions, self._sync_cards, self._move_saves):
             try:
                 await step()
             except (BridgeError, asyncio.TimeoutError, OSError, ValueError, KeyError) as exc:
@@ -374,6 +391,38 @@ class SillyTavernBridge:
         state["reasoning_parsed"] = True
         self._save_state(state)
         _LOGGER.info("sillytavern parses reasoning out of replies now")
+
+    async def _install_extensions(self) -> None:
+        """The extensions SillyTavern should have, each at its tag; one installed by hand stays as it is."""
+        wanted = [_extension(item) for item in self._service.config.tavern.sillytavern_extensions if str(item).strip()]
+        if not wanted:
+            return
+        present = set(await self._run("extensions", {}, _CALL_SECONDS) or [])
+        changed = False
+        for url, tag, name in wanted:
+            state = self._state()
+            ours = state.get("extensions", {}).get(name)
+            if f"third-party/{name}" in present:
+                if ours is None or ours == tag:
+                    continue
+                await self._run("deleteExtension", {"name": name}, _CALL_SECONDS)
+            await self._run("installExtension", {"url": url, "branch": tag}, _INSTALL_SECONDS)
+            state = self._state()
+            state.setdefault("extensions", {})[name] = tag
+            self._save_state(state)
+            changed = True
+            _LOGGER.info("sillytavern extension installed name=%s tag=%s", name, tag or "(default branch)")
+        if changed:
+            await self._load()  # SillyTavern starts an extension when its page loads
+        if any(name == _TAVERN_HELPER for _url, _tag, name in wanted) and not self._state().get("helper_context_kept"):
+            context = int(self._service.config.tavern.context_tokens)
+            await self._run("keepContext", {"contextTokens": context}, _CALL_SECONDS)
+            await self._load()
+            result = await self._run("keepContext", {"contextTokens": context}, _CALL_SECONDS) or {}
+            state = self._state()
+            state["helper_context_kept"] = True
+            self._save_state(state)
+            _LOGGER.info("sillytavern keeps its context at %s tokens with 酒馆助手", result.get("context"))
 
     async def _sync_cards(self) -> None:
         """Bundled cards, then the card folders; each imported once, and again when its file changes."""
@@ -487,7 +536,8 @@ class SillyTavernBridge:
 
 
 def chat_name(launcher_type: str, launcher_id: str, started_at: float) -> str:
-    """The SillyTavern chat a game is played in: "QQ群123456 1029-193005"."""
+    """The SillyTavern chat an old save becomes: "QQ群123456 1029-193005". (A new game keeps
+    SillyTavern's own name for its chat.)"""
     place = "QQ群" if launcher_type == "group" else "QQ私聊"
     return f"{place}{launcher_id} {time.strftime('%m%d-%H%M%S', time.localtime(started_at))}"
 
@@ -502,6 +552,13 @@ def _old_scenario_avatar(scenario_id: str, cards: dict[str, Any]) -> str:
         if f"{folder}/" in folders and Path(name).stem == stem:
             return str(entry.get("avatar", ""))
     return ""
+
+
+def _extension(item: str) -> tuple[str, str, str]:
+    """(git url, tag or branch, folder name) from "https://github.com/N0VI028/JS-Slash-Runner@4.11.3"."""
+    url, _, tag = str(item).strip().rpartition("@") if "@" in str(item).rsplit("/", 1)[-1] else (str(item).strip(), "", "")
+    name = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    return url, tag, name
 
 
 def _card_files(folder: Path) -> list[Path]:
