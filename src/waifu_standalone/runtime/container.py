@@ -21,8 +21,9 @@ from ..infra import (
     set_active_metrics_registry,
 )
 from ..memory import FileMemoryStore, InMemoryStore, Memory
-from ..models import SessionMemory
+from ..models import OutboundMessage, SessionMemory
 from ..organs.memory_graph import MemoryGraphBuilder
+from ..reply_flow.companion import REMINDER_TOOL_DESCRIPTION, REMINDER_TOOL_PARAMETERS
 from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
 from ..repositories import InMemoryRuntimeStateStore, SqliteRuntimeStateStore
@@ -326,6 +327,18 @@ def _build_service(
         },
         model_handler=service.dispatcher.use_weather_tool,
         async_model_handler=service.dispatcher.ause_weather_tool,
+        risk_level="safe",
+    )
+    tools.register(
+        "reminder",
+        name="提醒和回头跟进",
+        description=REMINDER_TOOL_DESCRIPTION,
+        handler=lambda invocation: OutboundMessage(
+            invocation.event.launcher_id, invocation.event.launcher_type, service.companion.use_tool(invocation).text
+        ),
+        parameters=REMINDER_TOOL_PARAMETERS,
+        model_handler=service.companion.use_tool,
+        async_model_handler=service.companion.ause_tool,
         risk_level="safe",
     )
     tools.register(

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 from weakref import WeakValueDictionary
 
 from ..character import CardManager, CharacterService, CharacterSwitcher
@@ -38,6 +38,7 @@ from ..models import EmotionState, InboundEvent, MessageSegment, OutboundMessage
 from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
 from ..reply_flow import Generator, OutboundEmitter, PENDING_SEARCH_METADATA_KEY, ReplyFlowService, ReplyGate, StickerLibrary
+from ..reply_flow.companion import Companion
 from ..reply_flow.listener import Listener
 from ..repositories import (
     InMemoryRuntimeStateStore,
@@ -85,6 +86,7 @@ from ..runtime_v2.contracts import Admission
 _MASK_SENTINEL = "..."
 _BACKGROUND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="openqqwaifu-bg")
 _ASYNC_RUNTIME = AsyncRuntime()
+T = TypeVar("T")
 _LOGGER = logging.getLogger(__name__)
 
 def _mask_key(key: str) -> str:
@@ -184,6 +186,7 @@ class WaifuService:
     tavern: TavernMode = field(init=False, repr=False)
     soup: TurtleSoup = field(init=False, repr=False)
     listener: Listener = field(init=False, repr=False)
+    companion: Companion = field(init=False, repr=False)
     member_service: MemberService = field(init=False, repr=False)
     memory_admin_service: MemoryAdminService = field(init=False, repr=False)
     skills_admin_service: SkillsAdminService = field(init=False, repr=False)
@@ -220,6 +223,7 @@ class WaifuService:
         self.tavern = TavernMode(self)
         self.soup = TurtleSoup(self)
         self.listener = Listener(self)
+        self.companion = Companion(self)
         self.member_service = MemberService(self)
         self.memory_admin_service = MemoryAdminService(self)
         self.skills_admin_service = SkillsAdminService(self)
@@ -282,6 +286,7 @@ class WaifuService:
         # Before waiting on the chat's lock: a reply in progress must see newer messages.
         self.emitter.note_inbound(event)
         self.listener.note_inbound(event)
+        self.companion.note_inbound(event)
         # A pending card switch goes first; this message is then answered by the new card.
         await self.character_switcher.wait_for_switch()
         if self.private_runtime is not None and self.private_runtime.routes(event):
@@ -357,6 +362,29 @@ class WaifuService:
             if cancelled:
                 raise asyncio.CancelledError
             return result
+        finally:
+            if acquired:
+                lock.release()
+            with self._runtime_guard:
+                self._active_events -= 1
+
+    async def _process_companion(self, launcher_type: str, launcher_id: str, work: Callable[[], Awaitable[T]]) -> T | None:
+        """Run ``work`` (she speaks first in this chat) as a reply would: holding the chat's lock."""
+        while not self._runtime_guard.acquire(blocking=False):
+            await asyncio.sleep(0.01)
+        try:
+            if self._closing:
+                return None
+            self._ensure_character_scope_bound()
+            self._active_events += 1
+            lock = self._session_lock_for_key(self._active_character_id(), launcher_type, launcher_id)
+        finally:
+            self._runtime_guard.release()
+        acquired = False
+        try:
+            await lock.acquire()
+            acquired = True
+            return await work()
         finally:
             if acquired:
                 lock.release()
@@ -503,6 +531,7 @@ class WaifuService:
         self.begin_shutdown()
         self.tavern.close()
         self.listener.close()
+        self.companion.close()
         if self.private_runtime is not None:
             self.private_runtime.close(timeout=60.0 if timeout is None else timeout)
         with self._runtime_guard:

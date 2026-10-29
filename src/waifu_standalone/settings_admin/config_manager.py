@@ -24,6 +24,7 @@ from ..config import (
     StickerConfig,
     TavernConfig,
     TurtleSoupConfig,
+    CompanionConfig,
     RuntimeV2Config,
     ToolPolicyConfig,
 )
@@ -60,6 +61,7 @@ class ConfigManager:
         stickers = _load_dataclass(StickerConfig, raw.get("stickers"))
         tavern = _load_dataclass(TavernConfig, raw.get("tavern"))
         turtle_soup = _load_dataclass(TurtleSoupConfig, raw.get("turtle_soup"))
+        companion = _load_dataclass(CompanionConfig, raw.get("companion"))
         listen = _load_dataclass(ListenConfig, raw.get("listen"))
         claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
@@ -129,6 +131,7 @@ class ConfigManager:
             stickers=stickers,
             tavern=tavern,
             turtle_soup=turtle_soup,
+            companion=companion,
             listen=listen,
             group_reply_quote=bool(raw.get("group_reply_quote", True)),
             claw_runtime=claw_runtime,

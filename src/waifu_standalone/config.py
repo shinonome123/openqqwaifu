@@ -228,6 +228,34 @@ class TurtleSoupConfig:
 
 
 @dataclass(slots=True)
+class CompanionConfig:
+    # 她先开口：别人让她记着的事到点就说（「明天早上九点叫我」「回头问问我考得怎么样」），
+    # 以及偶尔主动找熟人说句话。都在 reply_flow/companion.py。
+    reminders_enabled: bool = True
+    # 每个聊天最多同时记着几件事。
+    reminders_per_chat: int = 20
+    # 主动找人说话；默认关，打开前先看好下面这些限制。
+    greetings_enabled: bool = False
+    # 只在这几个钟点之间（本地时间，左闭右开）主动开口；提醒不受限，约好几点就几点。
+    greeting_hours: list[int] = field(default_factory=lambda: [10, 22])
+    # 私聊：关系至少到这一步（new / warming / familiar / close / devoted），对方这么多小时没说话。
+    person_min_stage: str = "warming"
+    person_idle_hours: float = 20.0
+    # 群：安静了这么多小时；每个群每天最多几次。
+    group_quiet_hours: float = 3.0
+    group_daily_limit: int = 2
+    # 群里也主动说话；关掉就只在私聊。
+    greet_groups: bool = True
+    # 所有聊天加起来每天最多主动开口几次。
+    daily_limit: int = 5
+    # 上一次主动开口没人理：再等这么多小时；连着这么多次没人理就不再主动，等对方先说话。
+    unanswered_wait_hours: float = 72.0
+    unanswered_stop: int = 2
+    # 只对这些 QQ 号 / 群号主动开口；空表示都可以。
+    only_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class RateLimitConfig:
     # 付费和外部工具的令牌桶：每个用户一个、每个群一个，两个都有余量才放行。
     # image 管生图；network 管搜索、网页抓取、summarize（三者共用一个桶）。
@@ -304,7 +332,7 @@ class AppConfig:
     # 有人在跟她说话时（不是她自己插话），这些查东西的工具总是交给模型，由模型按意思判断要不要用：
     # 「帮我看看影之刃零评价怎么样」没有「搜」字，也该去查。其余工具仍按 tools_on_demand 看措辞。
     always_offered_tool_ids: list[str] = field(
-        default_factory=lambda: ["search", "search-links", "weather", "web-fetch", "summarize"]
+        default_factory=lambda: ["search", "search-links", "weather", "web-fetch", "summarize", "reminder"]
     )
     max_active_skills: int = 3
     search_enabled: bool = True
@@ -367,6 +395,7 @@ class AppConfig:
     stickers: StickerConfig = field(default_factory=StickerConfig)
     tavern: TavernConfig = field(default_factory=TavernConfig)
     turtle_soup: TurtleSoupConfig = field(default_factory=TurtleSoupConfig)
+    companion: CompanionConfig = field(default_factory=CompanionConfig)
     listen: ListenConfig = field(default_factory=ListenConfig)
     # 群里回复时，如果那条消息之后又有人说过话，就引用它（QQ 里显示为「回复 xx」），
     # 看得出在回谁；紧接着回的不引用，跟真人一样。
