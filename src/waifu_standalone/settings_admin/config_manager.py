@@ -23,6 +23,7 @@ from ..config import (
     ListenConfig,
     StickerConfig,
     TavernConfig,
+    TurtleSoupConfig,
     RuntimeV2Config,
     ToolPolicyConfig,
 )
@@ -58,6 +59,7 @@ class ConfigManager:
         segmented_reply = _load_dataclass(SegmentedReplyConfig, raw.get("segmented_reply"))
         stickers = _load_dataclass(StickerConfig, raw.get("stickers"))
         tavern = _load_dataclass(TavernConfig, raw.get("tavern"))
+        turtle_soup = _load_dataclass(TurtleSoupConfig, raw.get("turtle_soup"))
         listen = _load_dataclass(ListenConfig, raw.get("listen"))
         claw_runtime = _load_claw_runtime(raw.get("claw_runtime"), config_path=self.path)
         plugins = _load_plugins(raw.get("plugins"))
@@ -123,6 +125,7 @@ class ConfigManager:
             segmented_reply=segmented_reply,
             stickers=stickers,
             tavern=tavern,
+            turtle_soup=turtle_soup,
             listen=listen,
             group_reply_quote=bool(raw.get("group_reply_quote", True)),
             claw_runtime=claw_runtime,

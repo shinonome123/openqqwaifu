@@ -199,6 +199,8 @@ class TavernMode:
         compact = _IGNORED_CHARS.sub("", stripped)
         session = self._session(event)
         if session is None:
+            if svc.soup.running(event.launcher_type, event.launcher_id):
+                return False, None  # a bowl of 海龟汤 is out; it takes this chat's games for now
             if self._addressed(event) and _RESUME.match(compact):
                 return True, await self._open_saves(event)
             if self._addressed(event) and _wants_start(compact):
