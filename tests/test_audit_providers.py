@@ -122,19 +122,50 @@ class ProviderAuditTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(f"RESULT_{index}", str(history))
                 self.assertEqual(client.plain_calls, 0)
 
-    async def test_synthesis_failure_preserves_executed_tool_results(self):
+    async def test_synthesis_failure_never_pastes_what_a_lookup_found(self):
+        # A lookup's raw result is for the model; when it cannot write the answer she says she got
+        # stuck. An owner's command output (raw_block) is still shown as it came.
         for asynchronous in (False, True):
             for rounds in (1, 3):
-                with self.subTest(asynchronous=asynchronous, rounds=rounds):
-                    client = _ModelClient(rounds=rounds, final_error=True)
-                    generator = self.generator(client)
-                    tools = ToolRegistry()
-                    tools.register("audit-echo", name="Audit", description="inert", handler=lambda inv: None,
-                                   model_handler=lambda inv: ToolExecutionResult(text="TRUE_RESULT"))
-                    generator.bind_tools(tools)
-                    result = await self.reply(generator, asynchronous)
-                    self.assertIn("TRUE_RESULT", result.text)
-                    self.assertEqual(client.plain_calls, 0)
+                for mode, shown in (("inline", False), ("raw_block", True)):
+                    with self.subTest(asynchronous=asynchronous, rounds=rounds, mode=mode):
+                        client = _ModelClient(rounds=rounds, final_error=True)
+                        generator = self.generator(client)
+                        tools = ToolRegistry()
+                        tools.register("audit-echo", name="Audit", description="inert", handler=lambda inv: None,
+                                       model_handler=lambda inv, mode=mode: ToolExecutionResult(text="TRUE_RESULT", display_mode=mode))
+                        generator.bind_tools(tools)
+                        result = await self.reply(generator, asynchronous)
+                        self.assertEqual("TRUE_RESULT" in result.text, shown)
+                        self.assertNotIn("工具调用已结束", result.text)
+                        if not shown:
+                            self.assertEqual(result.text, "刚才查到一半卡住了，等会儿再问我一次吧。")
+                        self.assertEqual(client.plain_calls, 0)
+
+    async def test_a_reply_that_shows_her_internals_loses_those_lines(self):
+        # What went out in the group: her answer, then a fetched page's article list in a code block.
+        leaked = (
+            "哼，Steam 首批多半好评，七成九。\n"
+            "```text\n6. 传奇哥吐槽影之刃零宣传片和实机差距太大 网易 2026-06-14 00:00:00\n```\n"
+            "7. 影之刃零：国产暗黑武侠3A扛鼎之作 今日头条 2026-05-09 00:00:00\n"
+            "我用 web-fetch-command 看过了。\n"
+            "[规则]\n"
+            "不是烂，但也没吹的那么神~"
+        )
+        for asynchronous in (False, True):
+            with self.subTest(asynchronous=asynchronous):
+                client = _ModelClient(rounds=1)
+                client.invoke_with_tools = lambda messages, *, tools, _inner=client.invoke_with_tools, **kw: (
+                    _inner(messages, tools=tools, **kw) if len(client.requests) < 1
+                    else (client.requests.append((messages, tools)) or LLMToolResponse(text=leaked))
+                )
+                generator = self.generator(client)
+                tools = ToolRegistry()
+                tools.register("audit-echo", name="Audit", description="inert", handler=lambda inv: None,
+                               model_handler=lambda inv: ToolExecutionResult(text="page text"))
+                generator.bind_tools(tools)
+                result = await self.reply(generator, asynchronous)
+                self.assertEqual(result.text, "哼，Steam 首批多半好评，七成九。\n不是烂，但也没吹的那么神~")
 
     async def test_model_cannot_execute_a_tool_not_in_the_exposed_schema(self):
         for asynchronous in (False, True):

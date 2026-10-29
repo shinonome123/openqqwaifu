@@ -18,6 +18,7 @@ from ..infra.image_clients import ImageClientError
 from ..infra.image_inputs import ImageInputError, prepare_image_input
 from ..infra.llm_clients import LLMClientError, LLMToolResponse
 from ..memory import ROLLING_SUMMARY_KEY, clip_rolling_summary
+from . import leak_guard
 from ..skills import SkillSpec, ToolExecutionResult, ToolExposureContext, ToolInvocation, ToolRegistry
 
 
@@ -34,6 +35,8 @@ _TOOL_CALLING_SYSTEM_PROMPT = (
     "凡是涉及保存、修改、记住称呼、用户称呼、机器人别名、偏好或长期状态的请求，"
     "必须先调用对应工具；工具未调用成功前，不得说“我记住了”“以后就叫我”“以后我叫你”或类似承诺。"
 )
+# Said when the model fails after looking something up: what it found is never pasted instead.
+_TOOL_STUCK_REPLY = "刚才查到一半卡住了，等会儿再问我一次吧。"
 # Characters ignored when comparing a reply with the bot's earlier messages.
 _REPEAT_IGNORED_CHARS = set(" \t\r\n，。！？、；：,.!?;:…~～—-“”\"'‘’（）()「」《》")
 # How many of the bot's latest messages a new reply is compared with.
@@ -792,19 +795,30 @@ class Generator:
         return [dict(said), {"role": "user", "content": _EXPLICIT_TOOL_NUDGE}]
 
     def _failed_tool_reply(self, results: list[ToolExecutionResult], images: list[str]) -> GeneratedReply:
-        return GeneratedReply(
-            text=self._append_raw_tool_blocks("工具调用已结束，但未能生成最终总结。以下是真实执行结果：", results),
-            images=images,
-        )
+        """The model failed after a tool ran. What a lookup found is never pasted for it: she says
+        she got stuck. Only an owner's command or file output (``raw_block``) is shown as it came."""
+        shown = [result for result in results if result.display_mode == "raw_block"]
+        if shown:
+            return GeneratedReply(text=self._append_raw_tool_blocks("结果在这里：", shown), images=images, used_tools=True)
+        return GeneratedReply(text=_TOOL_STUCK_REPLY, images=images, used_tools=True)
+
+    @staticmethod
+    def _scrub(text: str, messages: list[dict[str, object]]) -> str:
+        """``text`` without lines that show her instructions, tools or raw tool output (``leak_guard``)."""
+        system = next((str(message.get("content") or "") for message in messages if message.get("role") == "system"), "")
+        cleaned = leak_guard.scrub(text, system)
+        if cleaned != str(text or "").strip():
+            _LOGGER.warning("reply showed internals; dropped %s chars of it", len(str(text or "")) - len(cleaned))
+        return cleaned
 
     def _generate_model_reply_message(self, prompt: str, *, event: InboundEvent, user: str) -> GeneratedReply:
         """Single text prompt, for clients without chat roles (Dify)."""
         response = self._dify_client.invoke(prompt, user=user)
-        return GeneratedReply(text=self._clean_response(response))
+        return GeneratedReply(text=leak_guard.scrub(self._clean_response(response), prompt))
 
     async def _agenerate_model_reply_message(self, prompt: str, *, event: InboundEvent, user: str) -> GeneratedReply:
         response = await self._ainvoke_client(prompt, user=user)
-        return GeneratedReply(text=self._clean_response(response))
+        return GeneratedReply(text=leak_guard.scrub(self._clean_response(response), prompt))
 
     @staticmethod
     def _recent_assistant_texts(messages: list[dict[str, object]]) -> list[str]:
@@ -898,7 +912,7 @@ class Generator:
                 text = self._clean_response(response.text)
                 if text and not all_results:
                     text = self._avoid_repetition(text, messages, user=user)
-                text = self._append_raw_tool_blocks(text, raw_block_results)
+                text = self._append_raw_tool_blocks(self._scrub(text, messages), raw_block_results)
                 if not text and self.config.multimodal_enabled and event.image_count:
                     raise LLMClientError("image model returned no content")
                 return GeneratedReply(text=text, images=images, used_tools=bool(all_results))
@@ -944,7 +958,7 @@ class Generator:
         if response.tool_calls or not response.text.strip():
             return self._failed_tool_reply(all_results, images)
         return GeneratedReply(
-            text=self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results),
+            text=self._append_raw_tool_blocks(self._scrub(self._clean_response(response.text), messages), raw_block_results),
             images=images,
             used_tools=True,
         )
@@ -991,7 +1005,7 @@ class Generator:
                 text = self._clean_response(response.text)
                 if text and not all_results:
                     text = await self._aavoid_repetition(text, messages, user=user)
-                text = self._append_raw_tool_blocks(text, raw_block_results)
+                text = self._append_raw_tool_blocks(self._scrub(text, messages), raw_block_results)
                 if not text and self.config.multimodal_enabled and event.image_count:
                     raise LLMClientError("image model returned no content")
                 return GeneratedReply(text=text, images=images, used_tools=bool(all_results))
@@ -1037,7 +1051,7 @@ class Generator:
         if response.tool_calls or not response.text.strip():
             return self._failed_tool_reply(all_results, images)
         return GeneratedReply(
-            text=self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results),
+            text=self._append_raw_tool_blocks(self._scrub(self._clean_response(response.text), messages), raw_block_results),
             images=images,
             used_tools=True,
         )
@@ -1736,7 +1750,8 @@ class Generator:
                     prompt,
                     user=self._llm_user_key(event, session, purpose=f"tool-render-{invocation.tool_id}"),
                 )
-                cleaned = self._clean_response(response)
+                # The render prompt carries the tool's raw result; only internal markers are dropped.
+                cleaned = leak_guard.scrub(self._clean_response(response))
                 if cleaned:
                     return GeneratedReply(text=cleaned, images=list(result.images))
             except LLMClientError:
@@ -1784,7 +1799,8 @@ class Generator:
                     prompt,
                     user=self._llm_user_key(event, session, purpose=f"tool-render-{invocation.tool_id}"),
                 )
-                cleaned = self._clean_response(response)
+                # The render prompt carries the tool's raw result; only internal markers are dropped.
+                cleaned = leak_guard.scrub(self._clean_response(response))
                 if cleaned:
                     return GeneratedReply(text=cleaned, images=list(result.images))
             except LLMClientError:
@@ -2859,7 +2875,7 @@ class Generator:
         if result.display_mode == "raw_block":
             if result.error:
                 return GeneratedReply(
-                    text=f"{address}，这次没跑成，我把真实结果原样贴给你。",
+                    text=f"{address}，这次没跑成，结果原样贴给你。",
                     images=list(result.images),
                 )
             prefix = f"{address}，我先把结果整理给你。"
@@ -2867,12 +2883,16 @@ class Generator:
                 prefix = f"{address}，我先把现在能用的技能整理给你。"
             return GeneratedReply(text=prefix, images=list(result.images))
         if result.error:
+            # ``text`` is what the tool says to people; ``error`` is an internal code, never shown,
+            # and so is the exception some texts end with ("天气查询失败：ConnectError …").
+            told = str(result.text or "").strip().split("：", 1)[0].strip()
             return GeneratedReply(
-                text=f"{address}，这次没成功，原因是：{result.error or payload}",
+                text=f"{address}，这次没成功：{told}" if told else f"{address}，这次没办成，等会儿再试试吧。",
                 images=list(result.images),
             )
-        if tool_id == "search":
-            return GeneratedReply(text=f"{address}，我帮你查了一下。\n{payload}".strip(), images=list(result.images))
+        if tool_id in {"search", "search-links", "web-fetch"}:
+            # Raw search results and page text are for the model to read, not to paste.
+            return GeneratedReply(text=f"{address}，{_TOOL_STUCK_REPLY}", images=list(result.images))
         if tool_id == "summary":
             return GeneratedReply(text=f"{address}，我先帮你收一下重点：{payload}".strip(), images=list(result.images))
         if tool_id == "weather":

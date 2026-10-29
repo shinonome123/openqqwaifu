@@ -1366,7 +1366,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(lines),
             metadata={"query": query_text, "sources": [{"title": title, "url": url} for title, url in sources[:5]]},
-            display_mode="raw_block",
+            display_mode="inline",
         )
 
     async def ause_search_links_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1398,7 +1398,7 @@ class SkillDispatcher:
         return ToolExecutionResult(
             text="\n".join(lines),
             metadata={"query": query_text, "sources": [{"title": title, "url": url} for title, url in sources[:5]]},
-            display_mode="raw_block",
+            display_mode="inline",
         )
 
     def use_image_caption_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1469,7 +1469,7 @@ class SkillDispatcher:
                 "content_type": response.headers.get("content-type", ""),
                 "truncated": response.truncated,
             },
-            display_mode="raw_block",
+            display_mode="inline",
         )
 
     async def ause_web_fetch_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -1504,7 +1504,7 @@ class SkillDispatcher:
                 "content_type": response.headers.get("content-type", ""),
                 "truncated": response.truncated,
             },
-            display_mode="raw_block",
+            display_mode="inline",
         )
 
     def use_read_file_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
