@@ -692,6 +692,16 @@ class TavernTests(unittest.TestCase):
         self.assertFalse(any(text.startswith("酒馆开张啦") for text in self._texts()))
 
 
+    def test_asking_for_the_tavern_during_a_game_is_not_an_action(self) -> None:
+        self._send(_private("开始酒馆"))
+        self.assertTrue(self._texts()[-1].startswith("酒馆开张啦"))
+        self._send(_private("选3"))
+        for text in ("继续酒馆", "开始酒馆", "启动酒馆", "酒馆状态"):
+            reply = self.service.handle_event(_private(text))
+            self.assertEqual(reply.text, "正在玩《拾荒者号》，已经玩了 0 轮，直接说话就是行动；说「退出酒馆模式」结束。")
+        self.service.tavern.drain()
+        self.assertEqual(self.gm.game_requests(), [])  # nothing was queued as an action
+
     def test_half_an_emoji_does_not_stop_a_game_from_being_saved(self) -> None:
         self.gm.narrate = lambda messages: "雾里传来笑声\ud83d，你听见了吗？"
         self._start()

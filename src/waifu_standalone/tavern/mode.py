@@ -56,9 +56,9 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _IGNORED_CHARS = re.compile(r"[\s，,。.！!？?~～「」『』“”\"'：:、]")
-_START = re.compile(r"^(?:启动|开启|打开|进入|开)酒馆(?:模式)?$|^酒馆(?:模式|菜单)?$")
+_START = re.compile(r"^(?:启动|开启|开始|打开|进入|开)酒馆(?:模式)?$|^酒馆(?:模式|菜单)?$")
 # Said in passing to the character: "我让他开酒馆模式", "来跑团吧", "开一下酒馆".
-_START_INTENT = re.compile(r"(?:启动|开启|打开|进入|开|玩|来)(?:一下|一个|一局|个|下|局)?(?:酒馆|跑团)")
+_START_INTENT = re.compile(r"(?:启动|开启|开始|打开|进入|开|玩|来)(?:一下|一个|一局|个|下|局)?(?:酒馆|跑团)")
 _START_REFUSED = re.compile(r"(?:不|别|没|甭)(?:要|想|用|能|会)?(?:启动|开启|打开|进入|开|玩|来)(?:一下|一个|个|下)?(?:酒馆|跑团)")
 _MENTIONS_TAVERN = re.compile(r"酒馆|跑团")
 # Tags SillyTavern cards ask for, which their web page draws as a status bar and buttons.
@@ -498,7 +498,8 @@ class TavernMode:
             if not self._can_end(session, sender):
                 return True, await self._reply(event, f"只有房主「{session.host_name}」能结束这一局；不想玩了可以说「离开」。")
             return True, await self._end(session, reason="host", notice=self._ending(session), event=event)
-        if _STATUS.match(compact) or (self._addressed(event) and _START.match(compact)):
+        # "继续酒馆" or "开始酒馆" while a game runs asks about the game; it is not something the character does.
+        if _STATUS.match(compact) or _START.match(compact) or _RESUME.match(compact):
             return True, await self._reply(event, self._status(session))
         if event.launcher_type == "group" and _JOIN.match(compact):
             return True, await self._join(event, session)
@@ -578,6 +579,8 @@ class TavernMode:
             what = "选存档" if session.menu and session.menu[0].startswith(_SAVE_PREFIX) else "选本"
             return f"酒馆在等「{session.host_name}」{what}。"
         names = "、".join(session.players.values())
+        if session.launcher_type != "group":
+            return f"正在玩《{session.scenario_title}》，已经玩了 {session.rounds} 轮，直接说话就是行动；说「退出酒馆模式」结束。"
         text = f"正在玩《{session.scenario_title}》，已经玩了 {session.rounds} 轮。房主：{session.host_name}；玩家：{names}。"
         if session.launcher_type == "group":
             text += "想一起玩就说「加入」，不想玩了说「离开」。"
