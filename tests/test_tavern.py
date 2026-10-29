@@ -72,6 +72,11 @@ class _SillyTavern:
         self.connection = {"api": "koboldhorde", "source": "openai", "url": "", "model": ""}
         self.connects: list[dict[str, object]] = []
         self.reasoning_parsed = 0
+        self.extensions: set[str] = set()
+        self.installs: list[dict[str, object]] = []
+        self.deletes: list[str] = []
+        self.kept: list[int] = []
+        self.loads = 0
         self.imports: list[dict[str, object]] = []
         self.turns: list[dict[str, object]] = []
         self.quiet: list[dict[str, object]] = []
@@ -84,6 +89,8 @@ class _SillyTavern:
         self.pictures[avatar] = picture
 
     async def send(self, method: str, timeout: float, **params: object) -> dict[str, object]:
+        if method in {"Page.navigate", "Page.reload"}:
+            self.loads += 1
         return {}
 
     async def evaluate(self, expression: str, timeout: float) -> object:
@@ -112,6 +119,23 @@ class _SillyTavern:
         self.reasoning_parsed += 1
         return True
 
+    def do_extensions(self, options):  # type: ignore[no-untyped-def]
+        return sorted(self.extensions)
+
+    def do_installExtension(self, options):  # type: ignore[no-untyped-def]
+        self.installs.append(options)
+        self.extensions.add("third-party/" + str(options["url"]).rsplit("/", 1)[-1])
+        return True
+
+    def do_deleteExtension(self, options):  # type: ignore[no-untyped-def]
+        self.deletes.append(options["name"])
+        self.extensions.discard("third-party/" + options["name"])
+        return True
+
+    def do_keepContext(self, options):  # type: ignore[no-untyped-def]
+        self.kept.append(options["contextTokens"])
+        return {"context": options["contextTokens"], "helper": True}
+
     def do_characters(self, options):  # type: ignore[no-untyped-def]
         return [{"avatar": avatar, **data, "lore": ""} for avatar, data in self.characters.items()]
 
@@ -133,9 +157,10 @@ class _SillyTavern:
 
     def do_start(self, options):  # type: ignore[no-untyped-def]
         greeting = self._greeting(options["avatar"], options["user"], options["greeting"])
-        chat = [{"user": False, "text": greeting}] if greeting else []
-        self.chats.setdefault(options["avatar"], {})[options["chat"]] = chat
-        return {"chat": options["chat"], "greeting": greeting}
+        chats = self.chats.setdefault(options["avatar"], {})
+        name = f"{self.characters[options['avatar']]['name']} - {len(chats) + 1}"  # SillyTavern's own name
+        chats[name] = [{"user": False, "text": greeting}] if greeting else []
+        return {"chat": name, "greeting": greeting}
 
     def _chat(self, options):  # type: ignore[no-untyped-def]
         if options["avatar"] not in self.characters:
@@ -282,7 +307,7 @@ class TavernTests(unittest.TestCase):
         self.assertEqual(self.st.turns, [])  # the opening is the card's greeting
         session = self._session()
         self.assertEqual(session["scenario_id"], "午夜便利店.png")
-        self.assertTrue(str(session["chat"]).startswith(f"QQ群{GROUP_ID} "))
+        self.assertEqual(session["chat"], "午夜便利店 - 1")
         self.assertIn(session["chat"], self.st.chats["午夜便利店.png"])
 
     def test_a_start_said_in_passing_opens_the_menu(self) -> None:
@@ -748,6 +773,49 @@ class TavernTests(unittest.TestCase):
         (self.root / "tavern" / "sillytavern.json").unlink()
         self._send(_private("启动酒馆"))
         self.assertEqual(self.st.connects, [])
+
+    def test_sillytavern_gets_its_extensions_at_their_tags(self) -> None:
+        self._send(_group("启动酒馆", mention=True))
+        self.assertEqual(self.st.installs, [{"url": "https://github.com/N0VI028/JS-Slash-Runner", "branch": "4.11.3"}])
+        # 酒馆助手's 2M-token context is turned off, and kept off once its page is loaded again.
+        self.assertEqual(self.st.kept, [32000, 32000])
+        self.assertEqual(self.st.loads, 3)  # the first load, after the install, after the context
+        self.service.tavern.close()
+
+        # The next start leaves it as it is; another tag replaces it.
+        self.service, self.outbound = self._build()
+        self._send(_private("启动酒馆"), _private("退出酒馆模式"))
+        self.assertEqual((len(self.st.installs), len(self.st.kept)), (1, 2))
+        self.service.tavern.close()
+        self.config.tavern.sillytavern_extensions = ["https://github.com/N0VI028/JS-Slash-Runner@4.12.0"]
+        self.service, self.outbound = self._build()
+        self._send(_private("启动酒馆"))
+        self.assertEqual(self.st.deletes, ["JS-Slash-Runner"])
+        self.assertEqual(self.st.installs[-1], {"url": "https://github.com/N0VI028/JS-Slash-Runner", "branch": "4.12.0"})
+        self.assertEqual(len(self.st.kept), 2)
+
+    def test_an_extension_installed_by_hand_is_left_as_it_is(self) -> None:
+        self.st.extensions.add("third-party/JS-Slash-Runner")
+        self._send(_group("启动酒馆", mention=True))
+        self.assertEqual((self.st.installs, self.st.deletes), ([], []))
+        self.assertEqual(self.st.kept, [32000, 32000])  # its context default is still turned off
+
+        self.service.tavern.close()
+        (self.root / "tavern" / "sillytavern.json").unlink()
+        self.st.extensions.clear()
+        self.config.tavern.sillytavern_extensions = []
+        self.service, self.outbound = self._build()
+        self._send(_private("启动酒馆"))
+        self.assertEqual((self.st.installs, len(self.st.kept)), ([], 2))
+
+    def test_a_page_drawn_from_a_reply_reaches_qq_as_its_words(self) -> None:
+        self._card("rain.json", {"name": "雨夜", "first_mes": "雨下着。"})
+        self.st.narrate = lambda options: (
+            "雨还在下。\n```html\n<!DOCTYPE html><html><head><title>状态</title><style>.a{color:red}</style></head>"
+            "<body><div class=a>好感 30</div><script>console.log(1)</script></body></html>\n```\n<!-- 注释 -->她转身走了。"
+        )
+        self._send(_group("启动酒馆", mention=True), _group("选雨夜"), _group("我撑开伞"))
+        self.assertEqual(self._texts()[-1], "雨还在下。\n\n好感 30\n\n她转身走了。")
 
     def test_a_bundled_card_that_changed_is_imported_again_in_place(self) -> None:
         self._send(_group("启动酒馆", mention=True))

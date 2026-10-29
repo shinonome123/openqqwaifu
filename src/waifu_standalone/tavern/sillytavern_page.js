@@ -3,7 +3,7 @@
 // needs from SillyTavern goes through its own functions, so a card is played exactly as
 // SillyTavern plays it: its prompt order, lorebook, regex scripts, preset and API settings.
 (() => {
-    const VERSION = 2;
+    const VERSION = 3;
     if (window.openqqwaifu && window.openqqwaifu.version === VERSION) {
         return;
     }
@@ -31,7 +31,14 @@
 
     // Nobody is there to answer SillyTavern's popups ("import the lorebook?"): each is cancelled.
     // The welcome page of a first start is saved as it is, since SillyTavern waits on it to start.
+    // 酒馆助手 (JS-Slash-Runner) asks once per card or preset whether to run the scripts it carries:
+    // yes, as for a card's regex scripts.
     function closePopups() {
+        document.querySelectorAll('.TH-popup[role="dialog"]').forEach((popup) => {
+            if (/嵌入式脚本/.test(popup.textContent || '')) {
+                popup.querySelector('.popup-button-ok')?.click();
+            }
+        });
         document.querySelectorAll('dialog[open]').forEach((dialog) => {
             const answer = dialog.querySelector('.onboarding') ? '.popup-button-ok' : '.popup-button-cancel, .popup-button-close';
             const button = dialog.querySelector(answer);
@@ -57,6 +64,10 @@
             };
             tick();
         });
+    }
+
+    function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     function errorToasts() {
@@ -136,6 +147,66 @@
         return s.online_status;
     }
 
+    async function extensions() {
+        const { s } = await st();
+        const response = await fetch('/api/extensions/discover', { headers: s.getRequestHeaders() });
+        const listed = response.ok ? await response.json() : [];
+        return listed.map((item) => item.name);
+    }
+
+    // Installed the way SillyTavern's "Install extension" does: a git clone for this user.
+    async function installExtension(options) {
+        const { s } = await st();
+        const response = await fetch('/api/extensions/install', {
+            method: 'POST',
+            headers: s.getRequestHeaders(),
+            body: JSON.stringify({ url: options.url, branch: options.branch || undefined, global: false }),
+        });
+        if (!response.ok) {
+            throw new Error(`SillyTavern did not install ${options.url} (${response.status}: ${(await response.text()).slice(0, 200)})`);
+        }
+        return true;
+    }
+
+    async function deleteExtension(options) {
+        const { s } = await st();
+        const response = await fetch('/api/extensions/delete', {
+            method: 'POST',
+            headers: s.getRequestHeaders(),
+            body: JSON.stringify({ extensionName: options.name, global: false }),
+        });
+        if (!response.ok) {
+            throw new Error(`SillyTavern did not remove ${options.name} (${response.status})`);
+        }
+        return true;
+    }
+
+    // 酒馆助手 raises the context to 2M tokens by default ("最大化预设上下文长度"), so SillyTavern
+    // would never cut a long game down to the model's window. That one is turned off in its own
+    // settings store (it keeps a copy of what it saved, and raises the context again on every save).
+    async function keepContext(options) {
+        const { s, oai, ext } = await st();
+        const pinia = document.getElementById('tavern_helper')?.__vue_app__?.config?.globalProperties?.$pinia;
+        const store = pinia?._s?.get('global_settings');
+        let helper = 'none';
+        if (store?.settings?.optimize) {
+            store.settings.optimize.maximize_preset_context_length = false;
+            helper = 'store';
+            await sleep(200); // its watcher writes the change back to SillyTavern's settings
+        } else if (ext.extension_settings.tavern_helper) {
+            ext.extension_settings.tavern_helper.optimize = {
+                ...(ext.extension_settings.tavern_helper.optimize || {}), maximize_preset_context_length: false,
+            };
+            helper = 'settings';
+        }
+        oai.oai_settings.openai_max_context = options.contextTokens;
+        $('#openai_max_context').val(options.contextTokens);
+        $('#openai_max_context_counter').val(options.contextTokens);
+        await s.saveSettings();
+        await sleep(200);
+        return { context: oai.oai_settings.openai_max_context, helper };
+    }
+
     async function characters() {
         const { s } = await st();
         await s.getCharacters();
@@ -179,7 +250,60 @@
         if (String(s.this_chid) !== String(id) || (chat && s.getCurrentChatId() !== chat)) {
             throw new Error(`could not open ${avatar} / ${chat}`);
         }
+        if (helperScripts(s.characters[id])) {
+            await enableHelperScripts(avatar);
+        }
         return id;
+    }
+
+    // The scripts a card carries for 酒馆助手, when that extension is there to run them.
+    function helperScripts(character) {
+        if (!window.TavernHelper) {
+            return false;
+        }
+        let helper = character?.data?.extensions?.tavern_helper;
+        if (Array.isArray(helper)) {
+            helper = Object.fromEntries(helper); // its older format
+        }
+        return Array.isArray(helper?.scripts) && helper.scripts.length > 0;
+    }
+
+    // 酒馆助手 asks whether to run them once the card is open; wait for that and say yes.
+    async function enableHelperScripts(avatar) {
+        const { ext } = await st();
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+            const script = ext.extension_settings.tavern_helper?.script;
+            if (script?.enabled?.characters?.includes(avatar)) {
+                return;
+            }
+            const asking = document.querySelector('.TH-popup[role="dialog"]');
+            if (!asking && script?.popuped?.characters?.includes(avatar)) {
+                return; // asked before, and turned down in SillyTavern's own page
+            }
+            closePopups();
+            await sleep(200);
+        }
+    }
+
+    // A card's scripts may still be rewriting the reply (酒馆助手's MESSAGE_RECEIVED handlers).
+    // In a new chat they are still loading, so the first change may take up to ``patienceMs``.
+    async function settled(s, patienceMs = 0) {
+        const latest = () => s.chat[s.chat.length - 1]?.mes;
+        let text = latest();
+        const started = Date.now();
+        while (Date.now() - started < patienceMs && latest() === text) {
+            await sleep(200);
+        }
+        text = latest();
+        for (let i = 0; i < 10; i++) {
+            await sleep(300);
+            const now = latest();
+            if (now === text) {
+                return;
+            }
+            text = now;
+        }
     }
 
     // What SillyTavern's "Yes" to "import the embedded lorebook?" does, without the editor.
@@ -246,14 +370,11 @@
         const id = await open(options.avatar);
         await linkLore(id, false);
         await allowScripts(id);
-        // The greeting's {{user}} is the players.
+        // The greeting's {{user}} is the players. The chat keeps SillyTavern's own name: renaming it
+        // would load it again, and a card's 酒馆助手 scripts would take its greeting a second time.
         s.setUserName(options.user, { toastPersonaNameChange: false });
         await s.doNewChat();
-        let chat = s.getCurrentChatId();
-        if (options.chat && options.chat !== chat) {
-            await s.renameGroupOrCharacterChat({ characterId: String(id), oldFileName: chat, newFileName: options.chat, loader: false });
-            chat = s.getCurrentChatId();
-        }
+        const chat = s.getCurrentChatId();
         const greeting = s.chat.find((m) => !m.is_user && !m.is_system);
         // A card that opens with a credits page tells its story in another greeting: swipe to it.
         const index = Number(options.greeting) || 0;
@@ -262,6 +383,11 @@
             greeting.mes = greeting.swipes[index];
             s.updateMessageBlock(s.chat.indexOf(greeting), greeting);
             await s.saveChatConditional();
+            const { events } = await st();
+            await events.eventSource.emit(events.event_types.MESSAGE_SWIPED, s.chat.indexOf(greeting));
+        }
+        if (helperScripts(s.characters[id])) {
+            await settled(s, 3000);
         }
         return { chat, greeting: greeting ? greeting.mes : '' };
     }
@@ -299,6 +425,9 @@
             await s.Generate('normal');
         } catch (error) {
             failure = error; // the endpoint answered with an error
+        }
+        if (!failure && helperScripts(s.characters[s.this_chid])) {
+            await settled(s);
         }
         const last = s.chat[s.chat.length - 1];
         if (failure || !last || last.is_user || s.chat.length <= before + 1) {
@@ -396,6 +525,6 @@
     }
 
     window.openqqwaifu = {
-        version: VERSION, ready, connection, connect, parseReasoning, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
+        version: VERSION, ready, connection, connect, parseReasoning, extensions, installExtension, deleteExtension, keepContext, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
     };
 })();
