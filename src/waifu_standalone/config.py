@@ -228,6 +228,17 @@ class TurtleSoupConfig:
 
 
 @dataclass(slots=True)
+class TaskConfig:
+    # 要好几步的事（「把这周群里聊的游戏整理成文件」）交给后台做，做完把结果发回聊天；在 reply_flow/tasks.py。
+    enabled: bool = True
+    # 后台最多调用几次模型（每次可以用一批工具）、最多做多久。
+    max_rounds: int = 8
+    timeout_seconds: float = 600.0
+    # 所有聊天加起来同时最多做几件；每个聊天同时只做一件。
+    max_running: int = 3
+
+
+@dataclass(slots=True)
 class CompanionConfig:
     # 她先开口：别人让她记着的事到点就说（「明天早上九点叫我」「回头问问我考得怎么样」），
     # 以及偶尔主动找熟人说句话。都在 reply_flow/companion.py。
@@ -339,7 +350,7 @@ class AppConfig:
     # 有人在跟她说话时（不是她自己插话），这些查东西的工具总是交给模型，由模型按意思判断要不要用：
     # 「帮我看看影之刃零评价怎么样」没有「搜」字，也该去查。其余工具仍按 tools_on_demand 看措辞。
     always_offered_tool_ids: list[str] = field(
-        default_factory=lambda: ["search", "search-links", "weather", "web-fetch", "summarize", "reminder", "watch"]
+        default_factory=lambda: ["search", "search-links", "weather", "web-fetch", "summarize", "reminder", "watch", "chat-log", "start-task"]
     )
     # 私聊里有人跟她说话时，这些也总是交给模型：「这场景要是有张图就好了」没说「画」，也该能画。
     # 群里仍按措辞给，免得她在群里动不动就生图。
@@ -406,6 +417,7 @@ class AppConfig:
     tavern: TavernConfig = field(default_factory=TavernConfig)
     turtle_soup: TurtleSoupConfig = field(default_factory=TurtleSoupConfig)
     companion: CompanionConfig = field(default_factory=CompanionConfig)
+    tasks: TaskConfig = field(default_factory=TaskConfig)
     listen: ListenConfig = field(default_factory=ListenConfig)
     # 群里回复时，如果那条消息之后又有人说过话，就引用它（QQ 里显示为「回复 xx」），
     # 看得出在回谁；紧接着回的不引用，跟真人一样。
