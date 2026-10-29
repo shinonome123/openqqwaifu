@@ -428,6 +428,15 @@ class DifyLLMClient(_BaseHTTPClient):
         return answer
 
 
+def whole_characters(text: str) -> str:
+    """``text`` with surrogate halves joined into the characters they make, and any left alone replaced.
+
+    A stream can split an emoji's escape across two chunks ("\\ud83d" then "\\ude00"); each
+    decodes to half a character, and a string holding halves cannot be written as UTF-8.
+    """
+    return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
 def _unstream(raw: str) -> str:
     """A chat completion sent as server-sent events, as one completion's JSON.
 
@@ -476,7 +485,7 @@ def _unstream(raw: str) -> str:
             assert isinstance(target, dict)
             target["name"] = function.get("name") or target["name"]
             target["arguments"] = str(target["arguments"]) + str(function.get("arguments") or "")
-    message: dict[str, object] = {"role": "assistant", "content": "".join(content)}
+    message: dict[str, object] = {"role": "assistant", "content": whole_characters("".join(content))}
     if calls:
         message["tool_calls"] = [calls[index] for index in sorted(calls)]
     completion: dict[str, object] = {"choices": [{"message": message, "finish_reason": finish_reason or "stop", "index": 0}]}
