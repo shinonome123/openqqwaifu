@@ -103,9 +103,9 @@ class ChatMessageTests(unittest.TestCase):
         system = str(messages[0]["content"])
         self.assertTrue(system.startswith(f"你是{self.card_name}"))
         self.assertIn("[规则]", system)
-        # Talking to her, she always has the lookup tools; nothing else for ordinary chat.
+        # Talking to her, she always has the lookup tools (and in private, drawing); nothing else for ordinary chat.
         self.assertIn("[工具]", system)
-        self.assertTrue({tool["name"] for tool in tools} <= {"search-command", "search-links-command", "weather-command", "summarize-command", "web-fetch-command", "reminder"})
+        self.assertTrue({tool["name"] for tool in tools} <= {"search-command", "search-links-command", "weather-command", "summarize-command", "web-fetch-command", "reminder", "watch", "image-command"})
         self.assertEqual(
             [(message["role"], message["content"]) for message in messages[1:]],
             [("user", "你好"), ("assistant", "你好呀"), ("user", "今天怎么样"),

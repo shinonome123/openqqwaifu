@@ -17,6 +17,7 @@ from waifu_standalone.models import InboundEvent, MessageSegment
 from waifu_standalone.reply_flow.companion import Companion
 from waifu_standalone.runtime.service import _ASYNC_RUNTIME
 from waifu_standalone.skills.tool_registry import ToolInvocation
+from waifu_standalone.systems.searching import SearchContext, SearchResult
 
 BOT_ID = "3956638110"
 GROUP_ID = "612475113"
@@ -45,10 +46,14 @@ class _Model:
     def __init__(self) -> None:
         self.requests: list[list[dict[str, object]]] = []
         self.answer = "嗯嗯。"
+        # Answers for the watch judge, in order.
+        self.verdicts: list[str] = []
 
     def _answer(self, messages):  # type: ignore[no-untyped-def]
         self.requests.append([dict(message) for message in messages])
-        return LLMToolResponse(text=self.answer, assistant_message={"role": "assistant", "content": self.answer})
+        judging = str(messages[0]["content"]).startswith("你在帮一个人长期盯着")
+        text = (self.verdicts.pop(0) if self.verdicts else "{}") if judging else self.answer
+        return LLMToolResponse(text=text, assistant_message={"role": "assistant", "content": text})
 
     def invoke_with_tools(self, messages, *, tools, user=""):  # type: ignore[no-untyped-def]
         return self._answer(messages)
@@ -89,6 +94,11 @@ class CompanionTests(unittest.TestCase):
         session = self.service.memory.load(event.launcher_id, event.launcher_type)
         invocation = ToolInvocation("reminder", "", event, session, address="闵闵", arguments=dict(arguments))
         return self.service.companion.use_tool(invocation)
+
+    def _watch(self, event: InboundEvent, **arguments: object):  # type: ignore[no-untyped-def]
+        session = self.service.memory.load(event.launcher_id, event.launcher_type)
+        invocation = ToolInvocation("watch", "", event, session, address="闵闵", arguments=dict(arguments))
+        return self.service.companion.use_watch_tool(invocation)
 
     def _sent(self) -> list[str]:
         return [message.text for message in self.outbound.sent]
@@ -266,6 +276,92 @@ class CompanionTests(unittest.TestCase):
         self.service.companion = again
         self._tick(time.time() + 22 * HOUR)
         self.assertEqual(len(self._sent()), 1)
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
+    def test_drawing_is_offered_in_private_but_in_groups_only_when_asked(self) -> None:
+        def offered(event: InboundEvent, text: str, *, spontaneous: bool = False) -> set[str]:
+            session = self.service.memory.load(event.launcher_id, event.launcher_type)
+            return self.service.tool_orchestrator.exposure_context(
+                event, session, latest_message=text, address="闵闵", assistant_name="小葵", spontaneous=spontaneous
+            ).allowed_tool_ids
+
+        self.assertIn("image", offered(_private("这场景要是能看看就好了"), "这场景要是能看看就好了"))
+        self.assertNotIn("image", offered(_group("这场景要是能看看就好了"), "这场景要是能看看就好了"))
+        self.assertIn("image", offered(_group("帮我画张猫"), "帮我画张猫"))
+        self.assertNotIn("image", offered(_private("今天好热"), "今天好热", spontaneous=True))
+
+    # ------------------------------------------------------------------
+    # Watches
+    # ------------------------------------------------------------------
+    def _searching(self, *snippets: str) -> list[str]:
+        queries: list[str] = []
+        answers = list(snippets)
+
+        async def search(query: str, *, reason: str = "manual") -> SearchContext:
+            queries.append(query)
+            snippet = answers.pop(0) if answers else "没有新消息"
+            return SearchContext(query=query, results=[SearchResult(title="新闻", url="https://example.com/a", snippet=snippet)])
+
+        self.service.search.asearch_query = search  # type: ignore[method-assign]
+        return queries
+
+    def test_a_watch_learns_first_then_tells_only_news(self) -> None:
+        queries = self._searching("预计明年发售", "还是预计明年", "官宣 2027 年 3 月 1 日发售")
+        result = self._watch(_private("帮我盯着影之刃零的发售日"), action="add", topic="影之刃零的发售日", query="影之刃零 发售日")
+        self.assertIn("开始盯了", result.text)
+        self.assertIn("已经在盯了", self._watch(_private("x"), action="add", topic="影之刃零的发售日", query="影之刃零 发售日").text)
+        self.assertEqual(len(self.service.companion.watches()), 1)
+        start = time.time()
+
+        # The first search only learns what is out there, even if the judge calls it news.
+        self.model.verdicts.append('{"news": true, "what": "预计明年发售", "known": "预计明年发售"}')
+        self._tick(start + 6 * 60)
+        self.assertEqual(self._sent(), [])
+        self.assertEqual(self.service.companion.watches()[0].known, "预计明年发售")
+
+        self.model.verdicts.append('{"news": false, "what": "", "known": "预计明年发售"}')
+        self._tick(start + 13 * HOUR)
+        self.assertEqual(self._sent(), [])
+
+        self.model.verdicts.append('{"news": true, "what": "官宣 2027 年 3 月 1 日发售", "source": "https://example.com/a", "known": "2027-03-01 发售"}')
+        self.model.answer = "影之刃零定档了，2027 年 3 月 1 日！"
+        self._tick(start + 26 * HOUR)
+        self.assertEqual(self._sent(), ["影之刃零定档了，2027 年 3 月 1 日！"])
+        system = str(self.model.requests[-1][0]["content"])
+        self.assertIn("[盯着的事有消息了]", system)
+        self.assertIn("https://example.com/a", system)
+        judge = [r for r in self.model.requests if str(r[0]["content"]).startswith("你在帮一个人长期盯着")][-1]
+        self.assertIn("之前知道的情况：预计明年发售", str(judge[-1]["content"]))
+        self.assertEqual(queries, ["影之刃零 发售日"] * 3)
+
+        # Checked no sooner than every_hours, and not at all at night.
+        self._tick(start + 27 * HOUR)
+        self.assertEqual(len(queries), 3)
+        self.config.companion.greeting_hours = [10, 22]
+        self.service.companion.watches()[0].next_at = 0.0
+        self._tick(self._at(3))
+        self.assertEqual(len(queries), 3)
+
+    def test_watches_are_per_chat_bounded_and_end(self) -> None:
+        self._searching()
+        result = self._watch(_private("盯着 RTX 6090 价格"), action="add", topic="RTX 6090 价格", every_hours=1, days=999)
+        watch = self.service.companion.watches()[0]
+        self.assertEqual(watch.every_seconds, 6 * HOUR)  # at least watch_min_hours
+        self.assertLessEqual(watch.until - time.time(), 60 * 86400.0 + 5)
+        self.assertIn(watch.id, self._watch(_private("在盯啥"), action="list").text)
+        other = InboundEvent("42", "person", "42", "路人", [MessageSegment(kind="text", text="x")])
+        self.assertEqual(self._watch(other, action="cancel", id=watch.id).error, "not found")
+        self.assertEqual(self._watch(_private("x"), action="add", topic=" ").error, "missing topic")
+
+        self.service.companion.close()
+        again = Companion(self.service)
+        again.autostart = False
+        self.service.companion = again
+        self.assertEqual([item.topic for item in again.watches()], ["RTX 6090 价格"])
+        self._tick(watch.until + 1)
+        self.assertEqual(again.watches(), [])
 
 
 if __name__ == "__main__":

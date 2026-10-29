@@ -5,6 +5,12 @@ becomes a note with a time, in this chat. When it is due she says it in her own 
 that time, whatever the hour: the person chose it. A chat keeps at most
 ``companion.reminders_per_chat`` of them.
 
+Watches. The ``watch`` tool keeps an eye on something for someone ("帮我盯着影之刃零的
+发售日"): every few hours, within ``greeting_hours``, she searches for it, the chat model
+compares what came up with what she already knew, and only real news is told in the chat.
+The first search only learns what is already known. A watch ends after the days it was
+set for (at most ``watch_max_days``).
+
 Greetings (``companion.greetings_enabled``). Every few minutes she looks for one chat to
 open herself, and keeps to these rules:
 
@@ -93,6 +99,60 @@ REMINDER_TOOL_DESCRIPTION = (
 )
 
 
+WATCH_TOOL_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["add", "list", "cancel"],
+            "description": "add 开始帮对方盯一件事；list 看这个聊天里在盯的；cancel 不盯了。",
+        },
+        "topic": {"type": "string", "description": "add 时要盯的事和对方关心什么，例如「影之刃零的发售日和首发评价」。"},
+        "query": {"type": "string", "description": "add 时用来搜索的关键词，例如「影之刃零 发售日」。"},
+        "every_hours": {"type": "number", "description": "add 时隔几个小时查一次，默认 12。"},
+        "days": {"type": "integer", "description": "add 时盯几天，默认 14。"},
+        "id": {"type": "string", "description": "cancel 时要停掉的那件事的编号（list 里能看到）。"},
+    },
+    "required": ["action"],
+}
+WATCH_TOOL_DESCRIPTION = (
+    "帮对方长期盯着一件会变的事（发售日、比赛结果、某个新闻的进展、价格），你会隔一阵自己去查，"
+    "有新消息才在这个聊天里告诉对方。对方说「帮我盯着」「有消息告诉我」「出了通知我」时用；"
+    "只是现在想知道的事直接搜，不用它。"
+)
+_WATCH_DEFAULT_HOURS = 12.0
+_WATCH_DEFAULT_DAYS = 14
+# The first search of a watch, soon after it is set, only learns what is already out there.
+_WATCH_FIRST_CHECK_SECONDS = 300.0
+_WATCHES_PER_TICK = 2
+_JSON_OBJECT = re.compile(r"\{.*\}", re.S)
+_WATCH_JUDGE = (
+    "你在帮一个人长期盯着一件事，判断这次搜到的内容里有没有对方不知道的新消息。\n"
+    "只有确实是新的、和这件事有关的进展才算（新的日期、结果、公告、数字变化）；"
+    "旧闻、重复的说法、无关的内容、猜测和营销都不算。\n"
+    "只回一个 JSON：{\"news\": true 或 false, \"what\": \"新消息是什么，一两句话，没有就空\", "
+    "\"source\": \"新消息出处的链接，没有就空\", \"known\": \"到目前为止知道的情况，200 字以内\"}"
+)
+
+
+@dataclass(slots=True)
+class Watch:
+    id: str
+    launcher_type: str
+    launcher_id: str
+    user_id: str
+    user_name: str
+    topic: str
+    query: str
+    every_seconds: float
+    next_at: float
+    until: float
+    # What she knows about it so far; empty until the first search.
+    known: str = ""
+    created_at: float = field(default_factory=time.time)
+    asked: str = ""
+
+
 @dataclass(slots=True)
 class Reminder:
     id: str
@@ -126,6 +186,7 @@ class Companion:
         self._rng = rng or random.Random()
         self._path = Path(service.config.data_root) / "companion" / "state.json"
         self._reminders: list[Reminder] = []
+        self._watches: list[Watch] = []
         self._chats: dict[str, ChatState] = {}
         self._dirty = False
         self._task: asyncio.Task[None] | None = None
@@ -175,6 +236,8 @@ class Companion:
         if self.settings.reminders_enabled:
             for reminder in self._due(now):
                 await self._remind(reminder, now)
+        if self.settings.watches_enabled:
+            await self._check_watches(now)
         if self.settings.greetings_enabled:
             await self._maybe_greet(now)
         self._save()
@@ -272,6 +335,141 @@ class Companion:
 
     def reminders(self) -> list[Reminder]:
         return list(self._reminders)
+
+    # ------------------------------------------------------------------
+    # The watch tool
+    # ------------------------------------------------------------------
+    async def ause_watch_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        return self.use_watch_tool(invocation)
+
+    def use_watch_tool(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        settings = self.settings
+        if not settings.watches_enabled:
+            return ToolExecutionResult(error="disabled", text="盯事情的功能没开。")
+        event = invocation.event
+        action = str(invocation.argument("action", "add") or "add").strip().lower()
+        mine = [item for item in self._watches if (item.launcher_type, item.launcher_id) == (event.launcher_type, event.launcher_id)]
+        if action == "list":
+            if not mine:
+                return ToolExecutionResult(text="这个聊天里现在没有在盯的事。")
+            lines = [
+                f"{item.id}：{item.topic}（每 {item.every_seconds / 3600:g} 小时查一次，盯到 {self._format_time(item.until)}）"
+                + (f"\n  目前知道：{item.known}" if item.known else "")
+                for item in mine
+            ]
+            return ToolExecutionResult(text="在盯的事：\n" + "\n".join(lines))
+        if action == "cancel":
+            wanted = str(invocation.argument("id", "") or "").strip()
+            target = next((item for item in mine if item.id == wanted), None)
+            if target is None:
+                return ToolExecutionResult(error="not found", text="没找到这件事，可以先 list 看看编号。")
+            self._watches.remove(target)
+            self._dirty = True
+            self._save()
+            return ToolExecutionResult(text=f"不盯了：{target.topic}")
+        topic = re.sub(r"\s+", " ", str(invocation.argument("topic", "") or "")).strip()[:120]
+        query = re.sub(r"\s+", " ", str(invocation.argument("query", "") or "")).strip()[:80] or topic[:80]
+        if not topic:
+            return ToolExecutionResult(error="missing topic", text="要盯什么事？topic 不能空着。")
+        same = next((item for item in mine if item.query == query or item.topic == topic), None)
+        if same is not None:
+            return ToolExecutionResult(text=f"已经在盯了（编号 {same.id}）：{same.topic}。自然地答应对方就好。")
+        if len(mine) >= max(1, int(settings.watches_per_chat)):
+            return ToolExecutionResult(error="full", text="这个聊天在盯的事太多了，先停掉几件再加。")
+        hours = self._number(invocation.argument("every_hours"), _WATCH_DEFAULT_HOURS)
+        hours = min(72.0, max(float(settings.watch_min_hours), hours))
+        days = int(min(float(settings.watch_max_days), max(1.0, self._number(invocation.argument("days"), _WATCH_DEFAULT_DAYS))))
+        now = time.time()
+        watch = Watch(
+            id=uuid.uuid4().hex[:6],
+            launcher_type=event.launcher_type,
+            launcher_id=event.launcher_id,
+            user_id=str(event.sender_id),
+            user_name=str(invocation.address or event.sender_name or ""),
+            topic=topic,
+            query=query,
+            every_seconds=hours * 3600.0,
+            next_at=now + _WATCH_FIRST_CHECK_SECONDS,
+            until=now + days * 86400.0,
+            asked=event.command_text(self._service.config.bot_account_id).strip()[:200],
+        )
+        self._watches.append(watch)
+        self._dirty = True
+        self._save()
+        _LOGGER.info("watch set chat=%s:%s query=%s", event.launcher_type, event.launcher_id, query)
+        return ToolExecutionResult(
+            text=f"开始盯了（编号 {watch.id}）：{topic}，每 {hours:g} 小时查一次，盯 {days} 天，有新消息你会在这里说。现在只要自然地答应对方。"
+        )
+
+    def watches(self) -> list[Watch]:
+        return list(self._watches)
+
+    @staticmethod
+    def _number(value: object, default: float) -> float:
+        try:
+            return float(value) if value not in (None, "") else default
+        except (TypeError, ValueError):
+            return default
+
+    async def _check_watches(self, now: float) -> None:
+        expired = [item for item in self._watches if item.until <= now]
+        if expired:
+            self._watches = [item for item in self._watches if item.until > now]
+            self._dirty = True
+        if not self._greeting_hour(now):
+            return
+        due = sorted((item for item in self._watches if item.next_at <= now), key=lambda item: item.next_at)
+        for watch in due[:_WATCHES_PER_TICK]:
+            watch.next_at = now + watch.every_seconds
+            self._dirty = True
+            try:
+                await self._check(watch, now)
+            except Exception:
+                _LOGGER.exception("watch check failed id=%s", watch.id)
+
+    async def _check(self, watch: Watch, now: float) -> None:
+        svc = self._service
+        found = await svc.search.asearch_query(watch.query, reason="watch")
+        if not found.active:
+            return
+        results = "\n".join(
+            f"- {result.title}（{result.url}）：{result.snippet}" for result in found.results[:6]
+        )
+        messages = [
+            {"role": "system", "content": _WATCH_JUDGE},
+            {
+                "role": "user",
+                "content": (
+                    f"要盯的事：{watch.topic}\n"
+                    f"之前知道的情况：{watch.known or '（这是第一次查，还什么都不知道）'}\n"
+                    f"现在是 {self._format_time(now)}，这次搜「{watch.query}」搜到：\n{results}"
+                ),
+            },
+        ]
+        raw = await svc.generator.acomplete_chat(messages, user=f"watch:{watch.launcher_type}:{watch.launcher_id}")
+        match = _JSON_OBJECT.search(raw or "")
+        try:
+            verdict = json.loads(match.group(0)) if match else {}
+        except ValueError:
+            verdict = {}
+        if not isinstance(verdict, dict):
+            return
+        first = not watch.known
+        known = str(verdict.get("known", "") or "").strip()[:300]
+        if known:
+            watch.known = known
+        what = str(verdict.get("what", "") or "").strip()[:300]
+        if first or not verdict.get("news") or not what:
+            return  # the first search only learns what is already known
+        source = str(verdict.get("source", "") or "").strip()
+        link = f"出处：{source}（可以附上）。" if source.startswith("http") else ""
+        hint = (
+            "[盯着的事有消息了]\n"
+            f"你之前答应{watch.user_name or '对方'}帮忙盯着：{watch.topic}。刚查到的新消息：{what}。{link}\n"
+            f"现在你主动告诉{watch.user_name or '对方'}：照你平时的语气，先说清楚是什么消息，一两句话。"
+            "不要说你在执行监控、定时搜索之类的话。"
+        )
+        await self._speak(watch.launcher_type, watch.launcher_id, watch.user_id, watch.user_name, hint, reason="watch")
 
     # ------------------------------------------------------------------
     # Saying it
@@ -507,6 +705,12 @@ class Companion:
                     self._reminders.append(Reminder(**{name: item[name] for name in fields if name in item}))
                 except (TypeError, ValueError):
                     continue
+        for item in payload.get("watches", []) if isinstance(payload, dict) else []:
+            if isinstance(item, dict):
+                try:
+                    self._watches.append(Watch(**{name: item[name] for name in Watch.__dataclass_fields__ if name in item}))
+                except (TypeError, ValueError):
+                    continue
         for key, item in (payload.get("chats", {}) if isinstance(payload, dict) else {}).items():
             if isinstance(item, dict):
                 self._chats[str(key)] = ChatState(**{name: item[name] for name in ChatState.__dataclass_fields__ if name in item})
@@ -518,6 +722,7 @@ class Companion:
         payload = {
             "version": 1,
             "reminders": [asdict(item) for item in self._reminders],
+            "watches": [asdict(item) for item in self._watches],
             "chats": {key: asdict(state) for key, state in self._chats.items()},
         }
         try:

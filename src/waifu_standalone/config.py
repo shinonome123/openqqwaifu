@@ -234,6 +234,13 @@ class CompanionConfig:
     reminders_enabled: bool = True
     # 每个聊天最多同时记着几件事。
     reminders_per_chat: int = 20
+    # 帮人长期盯一件事（「帮我盯着影之刃零的发售日，有消息告诉我」）：隔一阵自己搜一次，
+    # 跟上次知道的比，真有新消息才说；只在 greeting_hours 里查和说。
+    watches_enabled: bool = True
+    watches_per_chat: int = 5
+    # 最短隔几个小时查一次、最多盯几天。
+    watch_min_hours: float = 6.0
+    watch_max_days: int = 60
     # 主动找人说话；默认关，打开前先看好下面这些限制。
     greetings_enabled: bool = False
     # 只在这几个钟点之间（本地时间，左闭右开）主动开口；提醒不受限，约好几点就几点。
@@ -332,8 +339,11 @@ class AppConfig:
     # 有人在跟她说话时（不是她自己插话），这些查东西的工具总是交给模型，由模型按意思判断要不要用：
     # 「帮我看看影之刃零评价怎么样」没有「搜」字，也该去查。其余工具仍按 tools_on_demand 看措辞。
     always_offered_tool_ids: list[str] = field(
-        default_factory=lambda: ["search", "search-links", "weather", "web-fetch", "summarize", "reminder"]
+        default_factory=lambda: ["search", "search-links", "weather", "web-fetch", "summarize", "reminder", "watch"]
     )
+    # 私聊里有人跟她说话时，这些也总是交给模型：「这场景要是有张图就好了」没说「画」，也该能画。
+    # 群里仍按措辞给，免得她在群里动不动就生图。
+    private_offered_tool_ids: list[str] = field(default_factory=lambda: ["image"])
     max_active_skills: int = 3
     search_enabled: bool = True
     search_result_limit: int = 3
