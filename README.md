@@ -84,7 +84,7 @@ WaifuService (app.py)
   - 自带 4 个跑团本（主持人卡），每个都有三幕转折和四个结局，走到结局写完收场就自动收摊。别的卡：管理员私聊把 `.png` / `.json` 卡当文件发给机器人，放进 `data/tavern/scenarios/`，或者直接在 SillyTavern 网页里加，都会出现在菜单里
   - 开局先发卡面图，开场白原样发；卡网页上画的场景卡、状态栏和选项按钮转成文字发到 QQ，回「2」就是点第二个选项
   - 剧情不进角色的聊天记录和记忆
-  - 成人模式只在私聊里、只对 `tavern.adult_user_ids` 里的人生效（成人卡放 `data/tavern/adult/`，或卡本身标了 NSFW）；群里永远不开，卡里写了未满 18 岁的人物也不开
+  - 成人卡（`data/tavern/adult/` 或标了 NSFW）只对 `tavern.adult_user_ids` 中的房主开放；默认仅私聊。确认群成员成年且同意接收后，可设置 `tavern.adult_in_groups: true` 在所有群开启。已有普通局需退出重开；卡里有未成年人时，严格规则和露骨内容改写仍生效，成年人、自愿和叫停要求不变
 - OpenClaw 兼容层
   - `SKILL.md` / bundle 导入
   - native plugin / bundle capability 诊断

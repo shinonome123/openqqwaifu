@@ -630,6 +630,76 @@ class TavernTests(unittest.TestCase):
         self._send(_group("我想想"))
         self.assertEqual(self.st.turns[-1]["text"], "我想想")
 
+    def test_an_age_under_18_anywhere_in_a_card_keeps_it_from_adult_content(self) -> None:
+        card = {"avatar": "仙.png", "name": "仙", "description": "修仙 RPG。", "first_mes": "点击右箭头开始正文内容→"}
+        self.assertFalse(scenario_from_character(card, {}).minors)
+        for field, text in (
+            ("alternate_greetings", ["{{user}}，穿越，16岁，唯一男性。"]),
+            ("mes_example", "<START>\n{{char}}: 她才十五岁。"),
+            ("post_history_instructions", "主角是初中生。"),
+            ("lore", "女主 17 岁。"),
+        ):
+            self.assertTrue(scenario_from_character({**card, field: text}, {}).minors, field)
+
+    def test_adult_group_mode_is_opt_in_and_requires_a_listed_host(self) -> None:
+        self.assertFalse(TavernConfig().adult_in_groups)
+        self.assertTrue(_load_dataclass(TavernConfig, {"adult_in_groups": True}).adult_in_groups)
+        self.config.tavern.adult_in_groups = True
+        self.assertFalse(self.service.tavern._adult_allowed(_group("启动酒馆")))
+        self.config.tavern.adult_user_ids = [" " + HOST + " "]
+        self.assertTrue(self.service.tavern._adult_allowed(_group("启动酒馆")))
+        self.assertFalse(self.service.tavern._adult_allowed(_group("启动酒馆", sender=PLAYER)))
+        self.assertTrue(self.service.tavern._adult_allowed(_private("启动酒馆")))
+
+    def test_adult_group_card_uses_the_adult_note_and_is_not_rewritten(self) -> None:
+        self.config.tavern.adult_user_ids = [HOST]
+        self.config.tavern.adult_in_groups = True
+        self._card("adult-fixture.json", {"name":"成年测试", "description":"所有角色都是成年人。", "first_mes":"山门打开。"}, folder="adult")
+        self.st.narrate = lambda options: "FILTER_SENTINEL"
+        with patch("waifu_standalone.tavern.mode.EXPLICIT", re.compile("FILTER_SENTINEL")):
+            menu = self.service.handle_event(_group("启动酒馆", mention=True)).text
+            self.assertIn("成年测试（成人）", menu)
+            self._send(_group("选成年测试"), _group("我推开门"))
+        self.assertEqual(self._texts()[-1], "FILTER_SENTINEL")
+        self.assertFalse(self.st.quiet)
+        note = str(self.st.turns[-1]["note"])
+        self.assertIn("所有角色都必须是成年人", note)
+        self.assertIn("必须双方自愿", note)
+        self.assertNotIn("一对一私聊", note)
+        self.assertNotIn("一笔带过或转场", note)
+        self.assertTrue(any("本局已开启成人模式" in text for text in self._texts()))
+
+    def test_minor_group_card_keeps_strict_rules_and_rewrite(self) -> None:
+        self.config.tavern.adult_user_ids = [HOST]
+        self.config.tavern.adult_in_groups = True
+        self._card("minor-fixture.json", {"name":"未成年测试", "first_mes":"你今年16岁，抵达山门。"}, folder="adult")
+        self.st.narrate = lambda options: "FILTER_SENTINEL"
+        with patch("waifu_standalone.tavern.mode.EXPLICIT", re.compile("FILTER_SENTINEL")), self.assertLogs(
+            "waifu_standalone.tavern.mode", "WARNING"
+        ):
+            self._send(_group("启动酒馆", mention=True), _group("选未成年测试"), _group("我看看四周"))
+        self.assertEqual(self._texts()[-1], "（这一段跳过。）")
+        self.assertTrue(self.st.quiet)
+        self.assertIn("故事里有未成年人", str(self.st.turns[-1]["note"]))
+        self.assertFalse(any("本局已开启成人模式" in text for text in self._texts()))
+
+    def test_group_adult_authorization_survives_restart_but_can_be_revoked(self) -> None:
+        self.config.tavern.adult_user_ids = [HOST]
+        self.config.tavern.adult_in_groups = True
+        self._card("adult-fixture.json", {"name":"成年测试", "first_mes":"山门打开。"}, folder="adult")
+        self._send(_group("启动酒馆", mention=True), _group("选成年测试"))
+        self.service.tavern.close()
+        self.service, self.outbound = self._build()
+        self._send(_group("我看看四周"))
+        session = self.service.tavern._sessions[("group", GROUP_ID)]
+        scenario = self.service.tavern._playing[session.key]
+        self.assertTrue(self.service.tavern._adult_content(session, scenario))
+        self.config.tavern.adult_user_ids = []
+        self.assertFalse(self.service.tavern._adult_content(session, scenario))
+        self.config.tavern.adult_user_ids = [HOST]
+        self.config.tavern.adult_in_groups = False
+        self.assertFalse(self.service.tavern._adult_content(session, scenario))
+
     def test_adult_cards_and_content_only_in_an_allowed_private_chat(self) -> None:
         self._card("night.json", {"name": "夜色", "description": "成年人的夜晚。", "first_mes": "夜深了。"}, folder="adult")
         self.config.tavern.adult_user_ids = [HOST]

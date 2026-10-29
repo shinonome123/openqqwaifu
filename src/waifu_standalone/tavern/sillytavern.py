@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 PAGE_SCRIPT = (Path(__file__).with_name("sillytavern_page.js")).read_text(encoding="utf-8")
-_PAGE_VERSION = 3
+_PAGE_VERSION = 4
 _MISSING = "__openqqwaifu_missing__"
 BUNDLED_DIR = Path(__file__).resolve().parents[1] / "templates" / "tavern"
 _CARD_SUFFIXES = (".png", ".json")

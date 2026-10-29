@@ -77,7 +77,13 @@ def scenario_from_character(character: dict[str, Any], known: dict[str, Any]) ->
     first = _text(character.get("first_mes"))
     extensions = character.get("extensions") if isinstance(character.get("extensions"), dict) else {}
     own = extensions.get("openqqwaifu") if isinstance(extensions.get("openqqwaifu"), dict) else {}
-    texts = (description, personality, situation, _text(character.get("system_prompt")), first, _text(character.get("lore")))
+    alternates = character.get("alternate_greetings")
+    greetings = [first, *(_text(item) for item in alternates)] if isinstance(alternates, list) else [first]
+    # Every part of the card a story can come from: an age in any greeting counts.
+    texts = (
+        description, personality, situation, *greetings, _text(character.get("lore")),
+        *(_text(character.get(name)) for name in ("system_prompt", "post_history_instructions", "mes_example")),
+    )
     intro = (
         _text(own.get("intro"))
         or _character_sentence(name, description, situation)
@@ -85,7 +91,6 @@ def scenario_from_character(character: dict[str, Any], known: dict[str, Any]) ->
         or description
         or situation
     )
-    alternates = character.get("alternate_greetings")
     return Scenario(
         scenario_id=_text(character.get("avatar")),
         title=name,
@@ -95,7 +100,7 @@ def scenario_from_character(character: dict[str, Any], known: dict[str, Any]) ->
         minors=any(_MINOR.search(text) for text in texts),
         stat=_status_label(extensions),
         rounds=_rounds(own.get("rounds")),
-        greeting=story_greeting([first, *(_text(item) for item in alternates)] if isinstance(alternates, list) else [first]),
+        greeting=story_greeting(greetings),
         picture=bool(known.get("picture", True)) if known else True,
         bundled=bool(known.get("bundled")),
     )
