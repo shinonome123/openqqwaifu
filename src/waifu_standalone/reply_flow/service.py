@@ -272,7 +272,8 @@ class ReplyFlowService:
         if unasked and is_silence(reply_text) and not generated_reply.images:
             _LOGGER.info("%s: the character kept quiet group=%s", "chime-in" if spontaneous else "talk-on", event.launcher_id)
             return None
-        if unasked:
+        if unasked and not (talking_on and generated_reply.used_tools):
+            # A talk-on answer she looked up is said in full; one sentence would cut the finding off.
             reply_text = one_sentence(reply_text, names=(address, event.sender_name))
         if live_runtime and not str(reply_text or "").strip() and not generated_reply.images:
             return None

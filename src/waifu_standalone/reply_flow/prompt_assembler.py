@@ -105,6 +105,8 @@ _KNOWLEDGE_CONTEXT_LINES = 8
 class GeneratedReply:
     text: str = ""
     images: list[str] = field(default_factory=list)
+    # The model called a tool (looked something up) for this reply.
+    used_tools: bool = False
 
 
 class Generator:
@@ -899,7 +901,7 @@ class Generator:
                 text = self._append_raw_tool_blocks(text, raw_block_results)
                 if not text and self.config.multimodal_enabled and event.image_count:
                     raise LLMClientError("image model returned no content")
-                return GeneratedReply(text=text, images=images)
+                return GeneratedReply(text=text, images=images, used_tools=bool(all_results))
             if response.assistant_message:
                 messages.append(response.assistant_message)
             for tool_call in response.tool_calls:
@@ -944,6 +946,7 @@ class Generator:
         return GeneratedReply(
             text=self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results),
             images=images,
+            used_tools=True,
         )
 
     async def _ainvoke_reply_with_tools(
@@ -991,7 +994,7 @@ class Generator:
                 text = self._append_raw_tool_blocks(text, raw_block_results)
                 if not text and self.config.multimodal_enabled and event.image_count:
                     raise LLMClientError("image model returned no content")
-                return GeneratedReply(text=text, images=images)
+                return GeneratedReply(text=text, images=images, used_tools=bool(all_results))
             if response.assistant_message:
                 messages.append(response.assistant_message)
             for tool_call in response.tool_calls:
@@ -1036,6 +1039,7 @@ class Generator:
         return GeneratedReply(
             text=self._append_raw_tool_blocks(self._clean_response(response.text), raw_block_results),
             images=images,
+            used_tools=True,
         )
 
     def generate_reply(

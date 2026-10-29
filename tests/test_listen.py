@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
@@ -19,7 +19,8 @@ from waifu_standalone.config import AppConfig
 from waifu_standalone.infra.llm_clients import LLMToolResponse
 from waifu_standalone.members.onboarding import MemberOnboarding
 from waifu_standalone.models import InboundEvent, MessageSegment
-from waifu_standalone.reply_flow.listener import SILENCE, is_silence
+from waifu_standalone.reply_flow.listener import SILENCE, TALK_ON_HINT, is_silence
+from waifu_standalone.reply_flow.prompt_assembler import GeneratedReply
 from waifu_standalone.runtime.service import _ASYNC_RUNTIME
 
 BOT_ID = "3956638110"
@@ -247,6 +248,36 @@ class ListenTests(unittest.TestCase):
         request = self._chat_requests()[-1]
         self.assertIn("[接着刚才的话]", str(request[0]["content"]))
         self.assertNotIn("[表情包]", str(request[0]["content"]))
+
+    def test_a_quote_reply_to_her_is_for_her(self) -> None:
+        self.config.listen.continuation_seconds = 0.3
+        self.service.handle_event(self._group("帮我看看影之刃零评价怎么样", mention=True))
+        her_id = str(len(self.outbound.sent))
+        time.sleep(0.5)  # past talking on: only the quote says the line is for her
+
+        quoted = self._group("别看媒体，看玩家真实评价")
+        quoted.segments.insert(0, MessageSegment(kind="reply", reply_to_id=her_id))
+        self.assertIsNotNone(self.service.handle_event(quoted))
+        request = self._chat_requests()[-1]
+        self.assertNotIn("[接着刚才的话]", str(request[0]["content"]))  # answered like an @, not cut to a line
+
+        time.sleep(0.5)  # the quote started a talk with her, like an @; let it lapse
+        asked = len(self._chat_requests())
+        elsewhere = self._group("说得对")
+        elsewhere.segments.insert(0, MessageSegment(kind="reply", reply_to_id="999"))  # quoting someone else
+        self.assertIsNone(self.service.handle_event(elsewhere))
+        self.assertEqual(len(self._chat_requests()), asked)
+
+    def test_a_line_she_talks_on_and_looks_up_is_said_in_full(self) -> None:
+        found = "影之刃零玩家主要吐槽三点：怪物清完不刷新，地图后期很空；难度偏低；战斗后半段有点重复。"
+        self.service.handle_event(self._group("在吗", mention=True))
+        with patch.object(
+            type(self.service.generator), "agenerate_reply_message",
+            AsyncMock(return_value=GeneratedReply(text=found, used_tools=True)),
+        ):
+            self.service.handle_event(self._group("那玩家吐槽它什么缺点"))
+        self.assertEqual(self.outbound.sent[-1].text, found)
+        self.assertIn("把查到的结论说完整", TALK_ON_HINT)
 
     def test_commands_bots_and_bare_laughter_never_make_her_join_in(self) -> None:
         self.config.ignore_user_ids = [OTHER_BOT]

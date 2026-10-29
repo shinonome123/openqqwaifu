@@ -22,6 +22,8 @@ from ..models import EmotionState, InboundEvent, OutboundMessage
 from ..runtime.testing import CapturingOutboundPort
 from .stickers import strip_sticker_tags
 
+_SENT_IDS_MAX = 2000
+
 if TYPE_CHECKING:
     from ..app import WaifuService
 
@@ -95,6 +97,8 @@ class OutboundEmitter:
         self._service = service
         # Group id -> id of the newest message seen there, to tell when a reply needs a quote.
         self._latest_group_message: dict[str, str] = {}
+        # Ids QQ gave the messages she sent, newest last: a quote-reply to one of them is to her.
+        self._sent_ids: dict[str, None] = {}
 
     def emit(
         self,
@@ -297,7 +301,7 @@ class OutboundEmitter:
         for index, part in enumerate(self.message_parts(message)):
             if index:
                 time.sleep(self._pause_between_parts())
-            self._service.outbound.send(part)
+            self._note_sent(self._service.outbound.send(part))
 
     async def _asend_parts(self, message: OutboundMessage) -> None:
         send_async = getattr(self._service.outbound, "send_async", None)
@@ -305,9 +309,23 @@ class OutboundEmitter:
             if index:
                 await asyncio.sleep(self._pause_between_parts())
             if callable(send_async):
-                await send_async(part)
+                result = await send_async(part)
             else:
-                await asyncio.to_thread(self._service.outbound.send, part)
+                result = await asyncio.to_thread(self._service.outbound.send, part)
+            self._note_sent(result)
+
+    def _note_sent(self, result: object) -> None:
+        data = result.get("data") if isinstance(result, dict) else None
+        message_id = str(data.get("message_id") or "").strip() if isinstance(data, dict) else ""
+        if not message_id:
+            return
+        self._sent_ids[message_id] = None
+        while len(self._sent_ids) > _SENT_IDS_MAX:
+            del self._sent_ids[next(iter(self._sent_ids))]
+
+    def sent_by_her(self, message_id: str) -> bool:
+        """Whether ``message_id`` is one she sent since the start (the latest few thousand)."""
+        return bool(message_id) and str(message_id).strip() in self._sent_ids
 
     def note_inbound(self, event: InboundEvent) -> None:
         """Remember the newest message in a group; called for every inbound message."""
