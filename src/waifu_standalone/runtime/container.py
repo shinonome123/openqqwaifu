@@ -29,6 +29,7 @@ from ..reply_flow.companion import (
     WATCH_TOOL_DESCRIPTION,
     WATCH_TOOL_PARAMETERS,
 )
+from ..reply_flow.tasks import CHAT_LOG_DESCRIPTION, CHAT_LOG_PARAMETERS, START_TASK_DESCRIPTION, START_TASK_PARAMETERS
 from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
 from ..repositories import InMemoryRuntimeStateStore, SqliteRuntimeStateStore
@@ -359,6 +360,30 @@ def _build_service(
         parameters=WATCH_TOOL_PARAMETERS,
         model_handler=service.companion.use_watch_tool,
         async_model_handler=service.companion.ause_watch_tool,
+        risk_level="safe",
+    )
+    tools.register(
+        "chat-log",
+        name="聊天记录",
+        description=CHAT_LOG_DESCRIPTION,
+        handler=lambda invocation: OutboundMessage(
+            invocation.event.launcher_id, invocation.event.launcher_type, service.tasks.use_chat_log_tool(invocation).text
+        ),
+        parameters=CHAT_LOG_PARAMETERS,
+        model_handler=service.tasks.use_chat_log_tool,
+        async_model_handler=service.tasks.ause_chat_log_tool,
+        risk_level="safe",
+    )
+    tools.register(
+        "start-task",
+        name="后台任务",
+        description=START_TASK_DESCRIPTION,
+        handler=lambda invocation: OutboundMessage(
+            invocation.event.launcher_id, invocation.event.launcher_type, service.tasks.use_tool(invocation).text
+        ),
+        parameters=START_TASK_PARAMETERS,
+        model_handler=service.tasks.use_tool,
+        async_model_handler=service.tasks.ause_tool,
         risk_level="safe",
     )
     tools.register(

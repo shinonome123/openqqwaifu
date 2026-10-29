@@ -14,7 +14,7 @@ import re
 # Section headers of her system prompt and turn hints, tool ids, tool-call vocabulary,
 # and the code fence tool output was once pasted in.
 _MARKERS = re.compile(
-    r"\[(?:人设|擅长|背景|规则|关于对方|当前情况|工具|联网提示|接着刚才的话|这次是你自己想插话|酒馆模式|海龟汤|表情包|记忆|技能|你主动开口|到点了|盯着的事有消息了)\]"
+    r"\[(?:人设|擅长|背景|规则|关于对方|当前情况|工具|联网提示|接着刚才的话|这次是你自己想插话|酒馆模式|海龟汤|表情包|记忆|技能|你主动开口|到点了|盯着的事有消息了|后台任务)\]"
     r"|\b[a-z]+(?:-[a-z]+)*-command\b|display_mode|raw_block|tool_calls?\b|tool_call_id|function_call"
     r"|system prompt|系统提示词|提示词里|工具调用已结束|以下是真实执行结果|```"
     # A search result's timestamp ("网易 2026-06-14 00:00:00") and search-links' "query:" line.

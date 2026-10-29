@@ -892,7 +892,7 @@ class Generator:
         all_results: list[ToolExecutionResult] = []
         tool_turns: list[dict[str, object]] = []
         nudge = bool(tools and tool_context is not None and tool_context.explicit)
-        for _ in range(3):
+        for _ in range(max(1, tool_context.max_rounds) if tool_context is not None else 3):
             try:
                 response = self._llm_client.invoke_with_tools(messages, tools=tools, user=user)
             except LLMClientError:
@@ -946,7 +946,7 @@ class Generator:
                         "role": "tool",
                         "tool_call_id": tool_call.call_id,
                         "name": tool_call.tool_name,
-                        "content": result.format_for_model(limit=4000),
+                        "content": result.format_for_model(limit=max(4000, int(result.metadata.get("model_limit", 0) or 0))),
                     }
                 )
         self._record_tool_turns(session, tool_turns)
@@ -985,7 +985,7 @@ class Generator:
         all_results: list[ToolExecutionResult] = []
         tool_turns: list[dict[str, object]] = []
         nudge = bool(tools and tool_context is not None and tool_context.explicit)
-        for _ in range(3):
+        for _ in range(max(1, tool_context.max_rounds) if tool_context is not None else 3):
             try:
                 response = await self._llm_client.ainvoke_with_tools(messages, tools=tools, user=user)
             except LLMClientError:
@@ -1039,7 +1039,7 @@ class Generator:
                         "role": "tool",
                         "tool_call_id": tool_call.call_id,
                         "name": tool_call.tool_name,
-                        "content": result.format_for_model(limit=4000),
+                        "content": result.format_for_model(limit=max(4000, int(result.metadata.get("model_limit", 0) or 0))),
                     }
                 )
         self._record_tool_turns(session, tool_turns)

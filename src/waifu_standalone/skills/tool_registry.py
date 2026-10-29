@@ -83,6 +83,8 @@ class ToolExposureContext:
     skill_manifests: list[SkillSpec] = field(default_factory=list)
     # A "/skill" request: the person asked outright for the job to be done with tools.
     explicit: bool = False
+    # Model calls that may request tools before the answer is due; a background task gets more.
+    max_rounds: int = 3
 
 
 ToolExposurePolicy = Callable[[ToolExposureContext], bool]

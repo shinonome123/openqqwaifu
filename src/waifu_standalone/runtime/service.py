@@ -38,8 +38,11 @@ from ..models import EmotionState, InboundEvent, MessageSegment, OutboundMessage
 from ..organs.proactive import ProactivePlanner
 from ..organs.thoughts import Thoughts
 from ..reply_flow import Generator, OutboundEmitter, PENDING_SEARCH_METADATA_KEY, ReplyFlowService, ReplyGate, StickerLibrary
+from ..memory.chat_log import ChatLog
 from ..reply_flow.companion import Companion
+from ..reply_flow.tasks import ASSISTANT_SPEAKER, TaskRunner
 from ..reply_flow.listener import Listener
+from ..reply_flow.stickers import strip_sticker_tags
 from ..repositories import (
     InMemoryRuntimeStateStore,
     KnowledgeRepository,
@@ -187,6 +190,8 @@ class WaifuService:
     soup: TurtleSoup = field(init=False, repr=False)
     listener: Listener = field(init=False, repr=False)
     companion: Companion = field(init=False, repr=False)
+    tasks: TaskRunner = field(init=False, repr=False)
+    chat_log: ChatLog = field(init=False, repr=False)
     member_service: MemberService = field(init=False, repr=False)
     memory_admin_service: MemoryAdminService = field(init=False, repr=False)
     skills_admin_service: SkillsAdminService = field(init=False, repr=False)
@@ -224,6 +229,8 @@ class WaifuService:
         self.soup = TurtleSoup(self)
         self.listener = Listener(self)
         self.companion = Companion(self)
+        self.tasks = TaskRunner(self)
+        self.chat_log = ChatLog(Path(self.config.data_root) / "chatlog", timezone=self.config.timezone)
         self.member_service = MemberService(self)
         self.memory_admin_service = MemoryAdminService(self)
         self.skills_admin_service = SkillsAdminService(self)
@@ -287,6 +294,7 @@ class WaifuService:
         self.emitter.note_inbound(event)
         self.listener.note_inbound(event)
         self.companion.note_inbound(event)
+        self._log_inbound(event)
         # A pending card switch goes first; this message is then answered by the new card.
         await self.character_switcher.wait_for_switch()
         if self.private_runtime is not None and self.private_runtime.routes(event):
@@ -532,6 +540,7 @@ class WaifuService:
         self.tavern.close()
         self.listener.close()
         self.companion.close()
+        self.tasks.close()
         if self.private_runtime is not None:
             self.private_runtime.close(timeout=60.0 if timeout is None else timeout)
         with self._runtime_guard:
@@ -979,7 +988,26 @@ class WaifuService:
     def new_skill_template(self) -> dict[str, str]:
         return self.skills_admin_service.new_skill_template()
 
+    def _log_inbound(self, event: InboundEvent) -> None:
+        bot = str(self.config.bot_account_id or "").strip()
+        if bot and str(event.sender_id) == bot:
+            return
+        self.chat_log.append(
+            character_id=self._active_character_id(),
+            launcher_type=event.launcher_type,
+            launcher_id=event.launcher_id,
+            speaker=event.sender_name or event.sender_id,
+            text=event.to_memory_text(bot_account_id=bot),
+        )
+
     def _record_outbound(self, message: OutboundMessage) -> None:
+        self.chat_log.append(
+            character_id=self._active_character_id(),
+            launcher_type=message.launcher_type,
+            launcher_id=message.launcher_id,
+            speaker=ASSISTANT_SPEAKER,
+            text=strip_sticker_tags(message.text) + ("（发了图片）" if message.images else ""),
+        )
         with self._state_lock:
             self._recent_outbound.append(message)
             self._recent_outbound = self._recent_outbound[-24:]

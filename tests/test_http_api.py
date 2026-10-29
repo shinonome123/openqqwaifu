@@ -348,7 +348,7 @@ class HttpApiTests(unittest.TestCase):
     def test_tool_listing_is_available(self) -> None:
         tools = self.api.list_tools()
 
-        self.assertEqual(tools["count"], 20)
+        self.assertEqual(tools["count"], 22)
 
     def test_skills_panel_includes_normalized_capabilities_and_safety(self) -> None:
         panel = self.api.get_skills_panel()
