@@ -3,7 +3,7 @@
 // needs from SillyTavern goes through its own functions, so a card is played exactly as
 // SillyTavern plays it: its prompt order, lorebook, regex scripts, preset and API settings.
 (() => {
-    const VERSION = 1;
+    const VERSION = 2;
     if (window.openqqwaifu && window.openqqwaifu.version === VERSION) {
         return;
     }
@@ -115,6 +115,16 @@
     async function connection() {
         const { s, oai } = await st();
         return { api: s.main_api, source: oai.oai_settings.chat_completion_source, url: oai.oai_settings.custom_url, model: oai.oai_settings.custom_model };
+    }
+
+    // A reasoning model's <think> block becomes the message's reasoning, out of its text and the
+    // history sent back, as SillyTavern's "Auto-Parse" does.
+    async function parseReasoning() {
+        const { s, pu } = await st();
+        pu.power_user.reasoning.auto_parse = true;
+        $('#reasoning_auto_parse').prop('checked', true);
+        await s.saveSettings();
+        return true;
     }
 
     async function online() {
@@ -386,6 +396,6 @@
     }
 
     window.openqqwaifu = {
-        version: VERSION, ready, connection, connect, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
+        version: VERSION, ready, connection, connect, parseReasoning, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
     };
 })();
