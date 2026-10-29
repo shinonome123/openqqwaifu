@@ -241,6 +241,8 @@ class Companion:
         if self.settings.greetings_enabled:
             await self._maybe_greet(now)
         self._save()
+        if self.settings.diary_enabled:
+            await self._service.diary.catch_up(now)
 
     def note_inbound(self, event: InboundEvent) -> None:
         """Someone spoke in a chat: it answers her last opening, and the clock starts."""
