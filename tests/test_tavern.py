@@ -82,6 +82,8 @@ class _SillyTavern:
         self.turns: list[dict[str, object]] = []
         self.quiet: list[dict[str, object]] = []
         self.narrate = lambda options: f"第{len(self.turns)}段剧情。"
+        # What SillyTavern's page hides from a reply (its display-only regex scripts that delete text).
+        self.hide = lambda text: text
         self.down = False
 
     def add(self, avatar: str, data: dict[str, object], picture: bytes = b"") -> None:
@@ -164,7 +166,7 @@ class _SillyTavern:
         chats = self.chats.setdefault(options["avatar"], {})
         name = f"{self.characters[options['avatar']]['name']} - {len(chats) + 1}"  # SillyTavern's own name
         chats[name] = [{"user": False, "text": greeting}] if greeting else []
-        return {"chat": name, "greeting": greeting}
+        return {"chat": name, "greeting": greeting, "shown": self.hide(greeting)}
 
     def _chat(self, options):  # type: ignore[no-untyped-def]
         if options["avatar"] not in self.characters:
@@ -173,14 +175,15 @@ class _SillyTavern:
 
     def do_resume(self, options):  # type: ignore[no-untyped-def]
         chat = self._chat(options)
-        return {"last": next((message["text"] for message in reversed(chat) if not message["user"]), "")}
+        last = next((message["text"] for message in reversed(chat) if not message["user"]), "")
+        return {"last": last, "shown": self.hide(last)}
 
     def do_turn(self, options):  # type: ignore[no-untyped-def]
         chat = self._chat(options)
         self.turns.append({**options, "history": [dict(message) for message in chat]})
         reply = self.narrate(options)  # may raise, as a model that fails does
         chat.extend([{"user": True, "text": options["text"]}, {"user": False, "text": reply}])
-        return {"reply": reply}
+        return {"reply": reply, "shown": self.hide(reply)}
 
     def do_quiet(self, options):  # type: ignore[no-untyped-def]
         self.quiet.append(options)
@@ -188,7 +191,7 @@ class _SillyTavern:
 
     def do_replaceLast(self, options):  # type: ignore[no-untyped-def]
         self._chat(options)[-1]["text"] = options["text"]
-        return True
+        return {"shown": self.hide(options["text"])}
 
     def do_chats(self, options):  # type: ignore[no-untyped-def]
         return list(self.chats.get(options["avatar"], {}))
@@ -553,6 +556,25 @@ class TavernTests(unittest.TestCase):
         self.assertEqual(turn["note"], "不写露骨的性内容，不写血腥细节；剧情走到那里就一笔带过或转场。")  # all we add
         # SillyTavern keeps her reply as she wrote it; only what goes to QQ is plain.
         self.assertEqual(self._session()["last_reply"], "*小咪眯起眼睛*\n喵呜……")
+
+    def test_qq_gets_a_reply_without_what_sillytaverns_page_hides(self) -> None:
+        self._card("mvu.json", {"name": "变量卡", "first_mes": "开场。<UpdateVariable>_.set('好感', 0)</UpdateVariable>"})
+        self.st.hide = lambda text: re.sub(r"<UpdateVariable>[\s\S]*?</UpdateVariable>", "", text)
+        self.st.narrate = lambda options: "她笑了。<UpdateVariable>_.set('好感', 5)</UpdateVariable>\n<选项>点头|摇头</选项>"
+        self._send(_group("启动酒馆", mention=True), _group("选变量卡"))
+        self.assertEqual(self._texts()[-1], "开场。")
+        self._send(_group("我打了个招呼"))
+        self.assertEqual(self._texts()[-1], "她笑了。\n\n① 点头\n② 摇头")
+        # SillyTavern keeps the reply whole; "2" still picks its second option.
+        self.assertIn("<UpdateVariable>", str(self._session()["last_reply"]))
+        self._send(_group("2"))
+        self.assertEqual(self.st.turns[-1]["text"], "摇头")
+
+        # What the page hides is not looked at for the content rule either.
+        self.st.narrate = lambda options: "她点点头。<UpdateVariable>做爱</UpdateVariable>"
+        self._send(_group("我也点头"))
+        self.assertEqual(self._texts()[-1], "她点点头。")
+        self.assertEqual(self.st.quiet, [])
 
     def test_a_card_whose_picture_cannot_be_sent_still_opens(self) -> None:
         scenarios = self.root / "tavern" / "scenarios"

@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 PAGE_SCRIPT = (Path(__file__).with_name("sillytavern_page.js")).read_text(encoding="utf-8")
-_PAGE_VERSION = 5
+_PAGE_VERSION = 6
 _MISSING = "__openqqwaifu_missing__"
 BUNDLED_DIR = Path(__file__).resolve().parents[1] / "templates" / "tavern"
 _CARD_SUFFIXES = (".png", ".json")
@@ -192,20 +192,28 @@ class SillyTavernBridge:
         return next(({**entry, "key": key} for key, entry in cards.items() if entry.get("avatar") == avatar), {})
 
     async def start(self, avatar: str, *, user: str, greeting: int = 0) -> dict[str, str]:
-        """A new chat with the card; its file name (``chat``) and the greeting it opens with."""
-        return dict(await self._call("start", {"avatar": avatar, "user": user, "greeting": greeting}))
+        """A new chat with the card: its file name (``chat``), the greeting it opens with as SillyTavern
+        keeps it (``greeting``) and as QQ gets it (``shown``, without what SillyTavern's page hides)."""
+        result = dict(await self._call("start", {"avatar": avatar, "user": user, "greeting": greeting}))
+        result.setdefault("shown", result.get("greeting", ""))
+        return result
 
-    async def resume(self, avatar: str, chat: str) -> str:
-        return str((await self._call("resume", {"avatar": avatar, "chat": chat}) or {}).get("last", ""))
+    async def resume(self, avatar: str, chat: str) -> tuple[str, str]:
+        """The chat's latest reply, as SillyTavern keeps it and as QQ gets it."""
+        result = await self._call("resume", {"avatar": avatar, "chat": chat}) or {}
+        last = str(result.get("last", ""))
+        return last, str(result.get("shown", last))
 
-    async def turn(self, avatar: str, chat: str, *, user: str, text: str, note: str) -> str:
+    async def turn(self, avatar: str, chat: str, *, user: str, text: str, note: str) -> tuple[str, str]:
+        """The round sent as SillyTavern's own send does; the reply as it keeps it and as QQ gets it."""
         options = {"avatar": avatar, "chat": chat, "user": user, "text": text, "note": note}
         try:
             result = await self._call("turn", options, timeout=self._reply_seconds())
         except asyncio.TimeoutError:
             await self._stop()
             raise BridgeError("SillyTavern took too long to reply") from None
-        return str((result or {}).get("reply", ""))
+        reply = str((result or {}).get("reply", ""))
+        return reply, str((result or {}).get("shown", reply))
 
     async def rewrite(self, avatar: str, chat: str, *, user: str, note: str, instruction: str) -> str:
         """The last reply written again by ``instruction``, without adding to the chat."""
@@ -217,8 +225,10 @@ class SillyTavernBridge:
             raise BridgeError("SillyTavern took too long to reply") from None
         return str((result or {}).get("text", ""))
 
-    async def replace_last(self, avatar: str, chat: str, text: str) -> None:
-        await self._call("replaceLast", {"avatar": avatar, "chat": chat, "text": text})
+    async def replace_last(self, avatar: str, chat: str, text: str) -> str:
+        """The latest reply replaced, as an edit in SillyTavern's page; how QQ gets the new text."""
+        result = await self._call("replaceLast", {"avatar": avatar, "chat": chat, "text": text})
+        return str(result.get("shown", text)) if isinstance(result, dict) else text
 
     async def chats(self, avatar: str) -> list[str]:
         return [str(name) for name in await self._call("chats", {"avatar": avatar}) or []]

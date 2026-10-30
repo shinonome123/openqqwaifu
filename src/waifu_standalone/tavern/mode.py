@@ -11,8 +11,10 @@ result on; "酒馆状态" says who plays. Only the host, ``tavern.admin_user_ids
 ``tavern.idle_timeout_seconds`` without a word.
 
 SillyTavern plays the card (``sillytavern.py``): each game is a chat of that character in
-SillyTavern (named the way SillyTavern names a new chat), and the prompt, its lorebook, regex scripts, preset and the model call are
-SillyTavern's own. The tavern adds one system note at the end of the chat: who plays,
+SillyTavern (named the way SillyTavern names a new chat). A round is sent the way its own send button
+sends a message, so the prompt, its lorebook, regex scripts, preset, the model call and every
+extension (酒馆助手, 小白X, …) work on it as in SillyTavern's page; the reply is read once they are
+done with it, and QQ gets it without what that page hides. The tavern adds one system note at the end of the chat: who plays,
 when there are several, the content rule, and for a bundled story how far along it is.
 A bundled story ends by itself when its finale line ("（全剧终）") comes.
 
@@ -359,6 +361,7 @@ class TavernMode:
             return await self._end(session, reason="failed", notice="SillyTavern 没能开这一局，过一会儿再试试。", event=event)
         session.chat = str(opened.get("chat", ""))
         opening = str(opened.get("greeting", "")).strip()
+        opening_shown = str(opened.get("shown", opening)).strip()
         session.last_reply = opening
         self._playing[session.key] = scenario
         self.files.save(session)
@@ -376,7 +379,7 @@ class TavernMode:
             except Exception as exc:  # the game goes on without it
                 _LOGGER.warning("tavern picture not sent chat=%s:%s: %s", *session.key, exc)
         if opening:
-            await self._send(session.launcher_type, session.launcher_id, self._render(scenario, opening))
+            await self._send(session.launcher_type, session.launcher_id, self._render(scenario, opening_shown))
         else:
             self._queue(session, PendingAction("", _START_NOTE))
         return message
@@ -477,7 +480,7 @@ class TavernMode:
         game.adult = game.adult and menu.adult
         try:
             scenario = await self._scenario(game)
-            last = await self.bridge.resume(game.scenario_id, game.chat) if scenario is not None else ""
+            last, last_shown = await self.bridge.resume(game.scenario_id, game.chat) if scenario is not None else ("", "")
         except _UNREACHABLE as exc:
             _LOGGER.warning("tavern resume failed chat=%s:%s: %s", *game.key, exc)
             return await self._reply(event, "酒馆这会儿连不上 SillyTavern，过一会儿再读一次试试。")
@@ -489,6 +492,8 @@ class TavernMode:
         game.hinted = []
         game.host_id, game.host_name = menu.host_id, menu.host_name
         game.players = {menu.host_id: menu.host_name, **{k: v for k, v in game.players.items() if k != menu.host_id}}
+        if not last:
+            last_shown = game.last_reply
         game.last_reply = last or game.last_reply
         game.touch()
         self._sessions[game.key] = game
@@ -499,7 +504,7 @@ class TavernMode:
         head = f"读档成功：《{game.scenario_title}》，已经玩了 {game.rounds} 轮。"
         message = await self._reply(event, self._how_to_play(game, scenario, head, game.last_reply))
         if game.last_reply:
-            await self._send(*game.key, "上回说到——\n" + self._render(scenario, game.last_reply))
+            await self._send(*game.key, "上回说到——\n" + self._render(scenario, last_shown or game.last_reply))
         return message
 
     # ------------------------------------------------------------------
@@ -662,8 +667,10 @@ class TavernMode:
                 return False
             round_text = _quote_macros("\n".join(self._line(session, action) for action in batch))
             user, note = self._user_name(session), self._note(session, scenario)
-            reply = (await self.bridge.turn(session.scenario_id, session.chat, user=user, text=round_text, note=note)).strip()
-            if not self._adult_content(session, scenario) and EXPLICIT.search(reply):
+            # The reply as SillyTavern keeps it, and as QQ gets it (without what its page hides).
+            reply, shown = await self.bridge.turn(session.scenario_id, session.chat, user=user, text=round_text, note=note)
+            reply, shown = reply.strip(), shown.strip()
+            if not self._adult_content(session, scenario) and EXPLICIT.search(shown):
                 # The note asks for a fade-out, but a model made for taverns may not keep to it.
                 _LOGGER.warning("tavern round too explicit for this game, rewriting chat=%s:%s", *session.key)
                 rewritten = await self.bridge.rewrite(
@@ -671,7 +678,7 @@ class TavernMode:
                 )
                 rewritten = _THINKING.sub("", rewritten).strip()
                 reply = rewritten if rewritten and not EXPLICIT.search(rewritten) else _SKIPPED
-                await self.bridge.replace_last(session.scenario_id, session.chat, reply)
+                shown = (await self.bridge.replace_last(session.scenario_id, session.chat, reply)).strip()
             if not reply:
                 raise BridgeError("SillyTavern wrote nothing")
         except _UNREACHABLE as exc:  # the actions stay pending and go with the next round
@@ -693,7 +700,7 @@ class TavernMode:
             "tavern round chat=%s:%s round=%s actions=%s chars=%s seconds=%.1f",
             *session.key, session.rounds, len(batch), len(reply), time.monotonic() - started,
         )
-        await self._send(*session.key, self._render(scenario, reply))
+        await self._send(*session.key, self._render(scenario, shown or reply))
         if scenario.rounds and _FINALE.search(reply):
             await self._end(session, reason="finished", notice=self._ending(session, finished=True))
             return False
