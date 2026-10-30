@@ -198,6 +198,10 @@ class TavernConfig:
     # compose 部署里是 http://sillytavern:8000/ 和 http://browser:9222。
     sillytavern_url: str = ""
     browser_url: str = ""
+    # 在 QQ 酒馆操作前检查网页已保存的预设/扩展配置；变化时在本轮生成前重载，不中断正在进行的回复。
+    sync_web_settings: bool = True
+    # 检查节流秒数；0 表示每次操作前检查。不会同步网页里尚未保存的临时状态。
+    web_sync_interval_seconds: float = 2.0
     # SillyTavern 要装的扩展（「git 地址@tag」，和它网页上「安装扩展」一样装给这个用户）；tag 改了就重装成那个版本。
     # 默认是酒馆助手（JS-Slash-Runner）：卡里带的酒馆助手脚本会跑；它默认把上下文开到 200 万，这一项会被关掉。
     sillytavern_extensions: list[str] = field(default_factory=lambda: ["https://github.com/N0VI028/JS-Slash-Runner@4.11.3"])

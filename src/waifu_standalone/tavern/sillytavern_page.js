@@ -3,7 +3,7 @@
 // needs from SillyTavern goes through its own functions, so a card is played exactly as
 // SillyTavern plays it: its prompt order, lorebook, regex scripts, preset and API settings.
 (() => {
-    const VERSION = 4;
+    const VERSION = 5;
     if (window.openqqwaifu && window.openqqwaifu.version === VERSION) {
         return;
     }
@@ -205,6 +205,45 @@
         await s.saveSettings();
         await sleep(200);
         return { context: oai.oai_settings.openai_max_context, helper };
+    }
+
+    // The server's saved state is shared across Chrome and the QQ headless page; in-memory stores are not.
+    // This function only reads configuration. It never saves the stale page over a newer web configuration.
+    async function webState() {
+        const { s } = await st();
+        const [settingsResponse, extensionsResponse] = await Promise.all([
+            fetch('/api/settings/get', { method: 'POST', headers: s.getRequestHeaders(), body: '{}', cache: 'no-store' }),
+            fetch('/api/extensions/discover', { cache: 'no-store' }),
+        ]);
+        if (!settingsResponse.ok || !extensionsResponse.ok) {
+            throw new Error(`SillyTavern saved-state check failed (${settingsResponse.status}/${extensionsResponse.status})`);
+        }
+        const data = await settingsResponse.json();
+        const saved = typeof data.settings === 'string' ? JSON.parse(data.settings) : data.settings;
+        if (!saved || typeof saved !== 'object') throw new Error('SillyTavern returned invalid saved settings');
+        // Ignore chat variables, execution counters and UI-only state, not user switches or task definitions.
+        const transient = new Set(['$impl', 'variables', 'recorded', 'lastRun', 'lastRunTime', 'lastTriggerTime',
+            'lastExecution', 'lastRunResult', 'userPrefStoreByTask', 'uiThemeByTask']);
+        const clean = (value) => {
+            if (Array.isArray(value)) return value.map(clean);
+            if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+                .filter(([key]) => !transient.has(key)).map(([key, item]) => [key, clean(item)]));
+            return value;
+        };
+        const ignored = new Set(['gallery', 'attachments', 'character_attachments', 'disabled_attachments']);
+        const extensions = Object.fromEntries(Object.entries(saved.extension_settings || {})
+            .filter(([key]) => !ignored.has(key)).map(([key, value]) => [key, clean(value)]));
+        const installed = await extensionsResponse.json();
+        return {
+            mainApi: saved.main_api,
+            completion: saved.oai_settings,
+            extensions,
+            presets: (data.openai_setting_names || []).map((name, index) => [name, data.openai_settings?.[index]])
+                .sort(([a], [b]) => a.localeCompare(b)),
+            installedExtensions: Array.isArray(installed) ? installed.sort((a, b) =>
+                String(a.name || a).localeCompare(String(b.name || b))) : installed,
+            worldNames: data.world_names,
+        };
     }
 
     async function characters() {
@@ -527,6 +566,6 @@
     }
 
     window.openqqwaifu = {
-        version: VERSION, ready, connection, connect, parseReasoning, extensions, installExtension, deleteExtension, keepContext, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
+        version: VERSION, ready, webState, connection, connect, parseReasoning, extensions, installExtension, deleteExtension, keepContext, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
     };
 })();

@@ -66,6 +66,7 @@ class _SillyTavern:
 
     def __init__(self) -> None:
         self.closed = False
+        self.web_revision = 1
         self.characters: dict[str, dict[str, object]] = {}
         self.pictures: dict[str, bytes] = {}
         self.chats: dict[str, dict[str, list[dict[str, object]]]] = {}
@@ -106,6 +107,9 @@ class _SillyTavern:
 
     async def close(self) -> None:
         self.closed = True
+
+    def do_webState(self, options):  # type: ignore[no-untyped-def]
+        return {"revision": self.web_revision}
 
     def do_connection(self, options):  # type: ignore[no-untyped-def]
         return dict(self.connection)
@@ -800,6 +804,62 @@ class TavernTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # SillyTavern's setup
     # ------------------------------------------------------------------
+    def test_saved_web_changes_reload_before_the_next_qq_turn(self) -> None:
+        self._start()
+        reloads = self.st.loads
+        self.st.web_revision += 1
+        self.service.tavern.bridge._web_sync_due = 0
+        self._send(_group("我推开门"))
+        self.assertEqual(self.st.loads, reloads + 1)
+        self.service.tavern.bridge._web_sync_due = 0
+        self._send(_group("我看看四周"))
+        self.assertEqual(self.st.loads, reloads + 1)
+        self.assertEqual(len(self.st.connects), 1)  # Reload does not overwrite a web-selected model/preset.
+
+    def test_a_web_save_during_reload_is_not_acknowledged_before_it_is_loaded(self) -> None:
+        self._start()
+        reloads = self.st.loads
+        original_send = self.st.send
+        async def concurrent_save(method, timeout, **params):
+            if method == "Page.reload" and self.st.web_revision == 2:
+                self.st.web_revision = 3
+            return await original_send(method, timeout, **params)
+        self.st.send = concurrent_save
+        self.st.web_revision = 2
+        self.service.tavern.bridge._web_sync_due = 0
+        self._send(_group("我推开门"))
+        self.assertEqual(self.st.loads, reloads + 1)
+        self.service.tavern.bridge._web_sync_due = 0
+        self._send(_group("我看看四周"))
+        self.assertEqual(self.st.loads, reloads + 2)
+
+    def test_web_sync_can_be_disabled_or_throttled(self) -> None:
+        self._start()
+        reloads = self.st.loads
+        self.st.web_revision += 1
+        self.config.tavern.sync_web_settings = False
+        self.service.tavern.bridge._web_sync_due = 0
+        self._send(_group("我推开门"))
+        self.assertEqual(self.st.loads, reloads)
+        self.config.tavern.sync_web_settings = True
+        self.service.tavern.bridge._web_sync_due = float("inf")
+        self._send(_group("我看看四周"))
+        self.assertEqual(self.st.loads, reloads)
+        self.service.tavern.bridge._web_sync_due = 0
+        self._send(_group("我点亮灯"))
+        self.assertEqual(self.st.loads, reloads + 1)
+
+    def test_failed_web_sync_does_not_generate_with_stale_settings(self) -> None:
+        self._start()
+        self.service.tavern.bridge._web_sync_due = 0
+        def unavailable(options):
+            raise BridgeError("saved settings unavailable")
+        self.st.do_webState = unavailable
+        with self.assertLogs("waifu_standalone.tavern.mode", "WARNING"):
+            self._send(_group("我推开门"))
+        self.assertFalse(self.st.turns)
+        self.assertIn("主持人卡了一下", self._texts()[-1])
+
     def test_sillytavern_plays_on_the_tavern_model_set_once(self) -> None:
         self._send(_group("启动酒馆", mention=True))
         (connect,) = self.st.connects
