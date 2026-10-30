@@ -80,6 +80,7 @@ WaifuService (app.py)
   - `.r 2d6+1 撬锁` 由程序掷骰，结果一起发过去；「酒馆状态」看谁在玩；只有房主（和 `tavern.admin_user_ids`、`tool_policy.authorized_user_ids`）能「退出酒馆模式」，30 分钟没人说话自动结束；「继续酒馆」从没玩完的存档接着玩
   - 卡由 SillyTavern 1.19.0 自己来玩：compose 里跑着官方镜像和一个无头浏览器，浏览器一直开着 SillyTavern 的网页，酒馆通过它调 SillyTavern 自己的函数，所以提示词顺序、世界书、正则、预设和调模型都是 SillyTavern 的。每局是它里面的一个聊天，在它的网页（本机 http://127.0.0.1:8000/）里能直接看、能改预设
   - 模型用 `tavern.llm_*`（没填就用 `llm`），第一次连上和配置改了时自动写进 SillyTavern
+  - 网页已保存的预设、扩展、全局/预设脚本和连接设置会在 QQ 酒馆操作前自动检测；变化时先重载后台页再生成，不打断正在进行的一轮。`tavern.sync_web_settings` 控制开关，`web_sync_interval_seconds` 控制检查节流（0 为每次操作检查）。未保存的网页临时状态、界面布局和聊天变量不作为同步触发条件；预设里关闭的条目保持关闭
   - SillyTavern 里自动装好酒馆助手（JS-Slash-Runner 4.11.3，`tavern.sillytavern_extensions` 可以加别的扩展），卡里带的酒馆助手脚本会跑
   - 自带 4 个跑团本（主持人卡），每个都有三幕转折和四个结局，走到结局写完收场就自动收摊。别的卡：管理员私聊把 `.png` / `.json` 卡当文件发给机器人，放进 `data/tavern/scenarios/`，或者直接在 SillyTavern 网页里加，都会出现在菜单里
   - 开局先发卡面图，开场白原样发；卡网页上画的场景卡、状态栏和选项按钮转成文字发到 QQ，回「2」就是点第二个选项

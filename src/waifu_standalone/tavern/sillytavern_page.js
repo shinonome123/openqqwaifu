@@ -3,7 +3,7 @@
 // needs from SillyTavern goes through its own functions, so a card is played exactly as
 // SillyTavern plays it: its prompt order, lorebook, regex scripts, preset and API settings.
 (() => {
-    const VERSION = 4;
+    const VERSION = 6;
     if (window.openqqwaifu && window.openqqwaifu.version === VERSION) {
         return;
     }
@@ -207,6 +207,45 @@
         return { context: oai.oai_settings.openai_max_context, helper };
     }
 
+    // The server's saved state is shared across Chrome and the QQ headless page; in-memory stores are not.
+    // This function only reads configuration. It never saves the stale page over a newer web configuration.
+    async function webState() {
+        const { s } = await st();
+        const [settingsResponse, extensionsResponse] = await Promise.all([
+            fetch('/api/settings/get', { method: 'POST', headers: s.getRequestHeaders(), body: '{}', cache: 'no-store' }),
+            fetch('/api/extensions/discover', { cache: 'no-store' }),
+        ]);
+        if (!settingsResponse.ok || !extensionsResponse.ok) {
+            throw new Error(`SillyTavern saved-state check failed (${settingsResponse.status}/${extensionsResponse.status})`);
+        }
+        const data = await settingsResponse.json();
+        const saved = typeof data.settings === 'string' ? JSON.parse(data.settings) : data.settings;
+        if (!saved || typeof saved !== 'object') throw new Error('SillyTavern returned invalid saved settings');
+        // Ignore chat variables, execution counters and UI-only state, not user switches or task definitions.
+        const transient = new Set(['$impl', 'variables', 'recorded', 'lastRun', 'lastRunTime', 'lastTriggerTime',
+            'lastExecution', 'lastRunResult', 'userPrefStoreByTask', 'uiThemeByTask']);
+        const clean = (value) => {
+            if (Array.isArray(value)) return value.map(clean);
+            if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+                .filter(([key]) => !transient.has(key)).map(([key, item]) => [key, clean(item)]));
+            return value;
+        };
+        const ignored = new Set(['gallery', 'attachments', 'character_attachments', 'disabled_attachments']);
+        const extensions = Object.fromEntries(Object.entries(saved.extension_settings || {})
+            .filter(([key]) => !ignored.has(key)).map(([key, value]) => [key, clean(value)]));
+        const installed = await extensionsResponse.json();
+        return {
+            mainApi: saved.main_api,
+            completion: saved.oai_settings,
+            extensions,
+            presets: (data.openai_setting_names || []).map((name, index) => [name, data.openai_settings?.[index]])
+                .sort(([a], [b]) => a.localeCompare(b)),
+            installedExtensions: Array.isArray(installed) ? installed.sort((a, b) =>
+                String(a.name || a).localeCompare(String(b.name || b))) : installed,
+            worldNames: data.world_names,
+        };
+    }
+
     async function characters() {
         const { s } = await st();
         await s.getCharacters();
@@ -288,8 +327,9 @@
         }
     }
 
-    // A card's scripts may still be rewriting the reply (酒馆助手's MESSAGE_RECEIVED handlers).
-    // In a new chat they are still loading, so the first change may take up to ``patienceMs``.
+    // Extensions may still be working on the newest message after SillyTavern is done with it (酒馆助手
+    // scripts, 小白X and others on MESSAGE_RECEIVED): it is read once it stays the same. In a new chat
+    // a card's scripts are still loading, so the first change may take up to ``patienceMs``.
     async function settled(s, patienceMs = 0) {
         const latest = () => s.chat[s.chat.length - 1]?.mes;
         let text = latest();
@@ -298,14 +338,35 @@
             await sleep(200);
         }
         text = latest();
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 20; i++) {
             await sleep(300);
             const now = latest();
-            if (now === text) {
+            if (now === text && !s.is_send_press) {
                 return;
             }
             text = now;
         }
+    }
+
+    // A reply as QQ should get it: what SillyTavern's page hides stays out (the display-only regex
+    // scripts that delete text, like a model's leftover thinking or a card's variable blocks). The ones
+    // that draw text as HTML (scene cards, status bars, buttons, frames) the tavern draws for QQ as
+    // plain lines instead, from the reply SillyTavern keeps.
+    async function shown(text) {
+        const { regex, ext } = await st();
+        if (!text || ext.extension_settings.disabledExtensions?.includes('regex')) {
+            return text || '';
+        }
+        const aiOutput = regex.regex_placement?.AI_OUTPUT ?? 2;
+        let result = text;
+        for (const script of regex.getRegexScripts({ allowedOnly: true })) {
+            if (!script || script.disabled || !script.markdownOnly || script.promptOnly) continue;
+            if (!Array.isArray(script.placement) || !script.placement.includes(aiOutput)) continue;
+            if (Number(script.minDepth) > 0) continue; // the newest message is at depth 0
+            if (String(script.replaceString ?? '').trim() !== '') continue;
+            result = regex.runRegexScript(script, result);
+        }
+        return result;
     }
 
     // What SillyTavern's "Yes" to "import the embedded lorebook?" does, without the editor.
@@ -388,10 +449,9 @@
             const { events } = await st();
             await events.eventSource.emit(events.event_types.MESSAGE_SWIPED, s.chat.indexOf(greeting));
         }
-        if (helperScripts(s.characters[id])) {
-            await settled(s, 3000);
-        }
-        return { chat, greeting: greeting ? greeting.mes : '' };
+        await settled(s, helperScripts(s.characters[id]) ? 3000 : 1000);
+        const text = greeting ? greeting.mes : '';
+        return { chat, greeting: text, shown: await shown(text) };
     }
 
     function lastReply(chat) {
@@ -402,7 +462,8 @@
     async function resume(options) {
         const { s } = await st();
         await open(options.avatar, options.chat);
-        return { last: lastReply(s.chat) };
+        const last = lastReply(s.chat);
+        return { last, shown: await shown(last) };
     }
 
     async function prepare(options) {
@@ -414,21 +475,30 @@
         return s;
     }
 
-    // The players' round as the user's message, then SillyTavern writes the character's reply.
+    // The players' round is sent the way a message typed in SillyTavern's page is: put in its input
+    // box and sent by sendTextareaMessage(), what its send button calls. Every extension sees the same
+    // send, the same generation and the same reply as there.
     async function turn(options) {
         const s = await prepare(options);
         if ((await online()) === 'no_connection') {
             throw new Error('SillyTavern is not connected to a model');
         }
         const before = s.chat.length;
-        await s.sendMessageAsUser(options.text);
+        // Players' words are never one of SillyTavern's slash commands.
+        const text = /^\s*\//.test(options.text) ? `\u200b${options.text}` : options.text;
+        const box = $('#send_textarea');
+        box.val(text)[0].dispatchEvent(new Event('input', { bubbles: true }));
         let failure = null;
         try {
-            await s.Generate('normal');
+            await s.sendTextareaMessage();
         } catch (error) {
             failure = error; // the endpoint answered with an error
         }
-        if (!failure && helperScripts(s.characters[s.this_chid])) {
+        if (box.val()) {
+            // SillyTavern did not take it (busy); the round goes again with the next one.
+            box.val('')[0].dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        if (!failure) {
             await settled(s);
         }
         const last = s.chat[s.chat.length - 1];
@@ -441,7 +511,7 @@
             }
             throw new Error(`no reply${error ? `: ${error}` : ''}`);
         }
-        return { reply: last.mes };
+        return { reply: last.mes, shown: await shown(last.mes) };
     }
 
     // A reply written again from the same chat (the note says how), not added to it.
@@ -462,9 +532,14 @@
         if (Array.isArray(last.swipes)) {
             last.swipes[last.swipe_id ?? 0] = options.text;
         }
-        s.updateMessageBlock(s.chat.length - 1, last);
+        // As an edit made in SillyTavern's page: extensions keeping state from the reply update it.
+        const id = s.chat.length - 1;
+        s.updateMessageBlock(id, last);
+        const { events } = await st();
+        await events.eventSource.emit(events.event_types.MESSAGE_EDITED, id);
+        await events.eventSource.emit(events.event_types.MESSAGE_UPDATED, id);
         await s.saveChatConditional();
-        return true;
+        return { shown: await shown(last.mes) };
     }
 
     function stop() {
@@ -527,6 +602,6 @@
     }
 
     window.openqqwaifu = {
-        version: VERSION, ready, connection, connect, parseReasoning, extensions, installExtension, deleteExtension, keepContext, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
+        version: VERSION, ready, webState, connection, connect, parseReasoning, extensions, installExtension, deleteExtension, keepContext, characters, importCard, start, resume, turn, quiet, replaceLast, stop, chats, saveChat, picture,
     };
 })();
