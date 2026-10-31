@@ -45,6 +45,45 @@ def _http_error(status_code: int, body: object = "") -> TransportError:
 
 
 class NapCatLoginBridgeTests(unittest.TestCase):
+    def test_polling_reuses_one_webui_login_and_renews_it_only_when_refused(self) -> None:
+        # NapCat allows a few WebUI logins a minute; a console page polling the QR code
+        # with a fresh login each time used them all up and the page lost its QR code.
+        logins: list[str] = []
+        state = {"refuse": False}
+
+        def fake_request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            headers = {str(key).lower(): value for key, value in (kwargs.get("headers") or {}).items()}
+            if url.endswith("/api/auth/login"):
+                logins.append(url)
+                return _json_response({"code": 0, "data": {"Credential": f"cred-{len(logins)}"}})
+            if url.endswith("/api/QQLogin/CheckLoginStatus"):
+                if state["refuse"] and headers.get("authorization") == "Bearer cred-1":
+                    raise _http_error(401, {"code": -1, "message": "Unauthorized"})
+                return _json_response({"code": 0, "data": {"isLogin": False, "qrcodeurl": "https://txz.qq.com/p?k=1"}})
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        bridge = NapCatLoginBridge(base_url="http://127.0.0.1:6099", api_prefix="/api", webui_token="secret-token", timeout=5.0)
+        with patch("waifu_standalone.gateways.napcat_login.SyncHttpTransport.request", side_effect=fake_request):
+            for _ in range(10):
+                self.assertEqual(bridge.fetch_status(force=True)["qrcode_url"], "https://txz.qq.com/p?k=1")
+            self.assertEqual(len(logins), 1)
+            state["refuse"] = True
+            self.assertEqual(bridge.fetch_status(force=True)["qrcode_url"], "https://txz.qq.com/p?k=1")
+            self.assertEqual(len(logins), 2)
+
+    def test_login_rate_limit_is_named_not_hidden_behind_a_404(self) -> None:
+        def fake_request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            if url.endswith("/api/auth/login"):
+                return _json_response({"code": -1, "message": "login rate limit"})
+            if url.endswith("/auth/login"):
+                raise _http_error(404)
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        bridge = NapCatLoginBridge(base_url="http://127.0.0.1:6099", api_prefix="/api", webui_token="secret-token", timeout=5.0)
+        with patch("waifu_standalone.gateways.napcat_login.SyncHttpTransport.request", side_effect=fake_request):
+            with self.assertRaisesRegex(NapCatLoginError, "太频繁"):
+                bridge.fetch_status(force=True)
+
     def test_hash_matches_official_napcat_rule(self) -> None:
         self.assertEqual(
             _hash_webui_token("napcat-token"),

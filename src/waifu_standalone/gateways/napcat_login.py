@@ -158,7 +158,10 @@ class NapCatLoginBridge:
         *,
         force: bool = False,
     ) -> dict[str, Any]:
-        self._ensure_credential(force=force)
+        # ``force`` asks for fresh data, not a fresh login: NapCat allows only a few WebUI
+        # logins a minute, and a console page polling every few seconds used them all up,
+        # leaving the QQ 登录 page without a QR code. The credential is renewed when refused.
+        self._ensure_credential()
         if not self._credential or not self._resolved_api_base:
             raise NapCatLoginError("NapCat WebUI credential is unavailable")
         try:
@@ -256,6 +259,9 @@ class NapCatLoginBridge:
                 self._resolved_api_base = api_base
                 return
             except NapCatLoginError as exc:
+                if _looks_rate_limited(str(exc)):
+                    # The other bases would only answer 404 and hide why.
+                    raise NapCatLoginError(_RATE_LIMITED_MESSAGE) from exc
                 last_error = str(exc)
         raise NapCatLoginError(last_error or "NapCat WebUI login failed")
 
@@ -452,6 +458,13 @@ def _looks_already_logged_in(message: str) -> bool:
             "宸茬櫥褰?",
         )
     )
+
+
+_RATE_LIMITED_MESSAGE = "NapCat 后台登录太频繁（每分钟只允许几次），等一分钟再刷新。"
+
+
+def _looks_rate_limited(message: str) -> bool:
+    return "rate limit" in str(message or "").lower()
 
 
 def qrcode_payload_to_image_source(payload: str) -> tuple[str, bytes]:
